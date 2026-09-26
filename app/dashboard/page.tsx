@@ -1,7 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowUp, Monitor, Plus } from "lucide-react";
+import { signOut } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+import { useAuth } from "@/lib/auth-context";
 import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import BotAvatar from "@/components/BotAvatar";
@@ -31,11 +35,21 @@ function mockReplyFor(botName: string): ThreadMessage {
 }
 
 export default function DashboardPage() {
+  const { user, loading } = useAuth();
+  const router = useRouter();
+
   const [activeId, setActiveId] = useState("sales-outbound");
   const [threads, setThreads] = useState<Record<string, ThreadMessage[]>>(
     initialThreads
   );
   const [draft, setDraft] = useState("");
+
+  // Route guard: no session, no dashboard.
+  useEffect(() => {
+    if (!loading && !user) {
+      router.replace("/");
+    }
+  }, [loading, user, router]);
 
   const activeBot = useMemo(
     () => bots.find((b) => b.id === activeId)!,
@@ -65,9 +79,23 @@ export default function DashboardPage() {
     }, 700);
   }
 
+  if (loading || !user) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-bg text-sm text-muted">
+        Loading…
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-bg">
-      <Sidebar bots={bots} activeId={activeId} onSelect={setActiveId} />
+      <Sidebar
+        bots={bots}
+        activeId={activeId}
+        onSelect={setActiveId}
+        userLabel={user.email ?? "Account"}
+        onSignOut={() => signOut(auth)}
+      />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-line px-6 py-3.5">
