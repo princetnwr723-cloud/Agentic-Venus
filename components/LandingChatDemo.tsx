@@ -27,8 +27,8 @@ export default function LandingChatDemo() {
 
       <div className="space-y-3 px-4 py-5">
         <div className="max-w-[85%] rounded-xl bg-panel2 px-3.5 py-2.5 text-sm leading-relaxed text-ink">
-          Tell me what you'd hand off first — outbound, an inbox, expenses,
-          anything. I'll show you how it gets worked.
+          Tell me what you&rsquo;d hand off first — outbound, an inbox,
+          expenses, anything. I&rsquo;ll show you how it gets worked.
         </div>
       </div>
 
