@@ -30,7 +30,7 @@ export default function LandingPage() {
           </button>
           <button
             onClick={() => openAuth("signup")}
-            className="rounded-full bg-gold px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+            className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
           >
             Sign up
           </button>
@@ -51,7 +51,7 @@ export default function LandingPage() {
           <div className="mt-8 flex items-center gap-3">
             <button
               onClick={() => openAuth("signup")}
-              className="rounded-full bg-gold px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90"
+              className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90"
             >
               Get your first teammate
             </button>
