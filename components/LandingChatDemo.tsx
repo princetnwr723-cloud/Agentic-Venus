@@ -1,17 +1,27 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowUp, Plus } from "lucide-react";
 import BotAvatar from "./BotAvatar";
 import AuthModal from "./AuthModal";
+import { useAuth } from "@/lib/auth-context";
 
 export default function LandingChatDemo() {
   const [value, setValue] = useState("");
   const [authOpen, setAuthOpen] = useState(false);
+  const { user } = useAuth();
+  const router = useRouter();
 
   function handleSend(e: React.FormEvent) {
     e.preventDefault();
     if (!value.trim()) return;
+
+    if (user) {
+      // Already signed in — this box becomes the real thing.
+      router.push("/dashboard");
+      return;
+    }
     // No agent is connected yet on the public demo — any message you send
     // here is the moment we ask you to create an account, matching the
     // real flow: sign up, and this exact box becomes a live teammate.
@@ -52,7 +62,7 @@ export default function LandingChatDemo() {
         <button
           type="submit"
           aria-label="Send"
-          className="rounded-full bg-gold p-2 text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
+          className="rounded-full bg-white p-2 text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
           disabled={!value.trim()}
         >
           <ArrowUp size={16} />
