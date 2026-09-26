@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, Search } from "lucide-react";
+import { LogOut, Plus, Search } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import type { Bot } from "@/lib/bots";
@@ -9,11 +9,17 @@ export default function Sidebar({
   bots,
   activeId,
   onSelect,
+  userLabel,
+  onSignOut,
 }: {
   bots: Bot[];
   activeId: string;
   onSelect: (id: string) => void;
+  userLabel: string;
+  onSignOut: () => void;
 }) {
+  const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
+
   return (
     <aside className="flex h-screen w-[320px] shrink-0 flex-col border-r border-line bg-panel">
       <div className="flex items-center justify-between px-4 py-4">
@@ -68,6 +74,23 @@ export default function Sidebar({
           );
         })}
       </nav>
+
+      <div className="flex items-center gap-2.5 border-t border-line px-4 py-3.5">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-panel2 text-xs font-medium text-ink">
+          {initial}
+        </div>
+        <span className="min-w-0 flex-1 truncate text-sm text-ink">
+          {userLabel}
+        </span>
+        <button
+          aria-label="Sign out"
+          title="Sign out"
+          onClick={onSignOut}
+          className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"
+        >
+          <LogOut size={16} />
+        </button>
+      </div>
     </aside>
   );
 }
