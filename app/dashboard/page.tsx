@@ -116,7 +116,7 @@ export default function DashboardPage() {
             type="submit"
             aria-label="Send"
             disabled={!draft.trim()}
-            className="rounded-full bg-gold p-2.5 text-bg hover:opacity-90 disabled:opacity-40"
+            className="rounded-full bg-white p-2.5 text-bg hover:opacity-90 disabled:opacity-40"
           >
             <ArrowUp size={16} />
           </button>
