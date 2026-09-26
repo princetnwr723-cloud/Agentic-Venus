@@ -1,15 +1,19 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import LandingChatDemo from "@/components/LandingChatDemo";
 import AuthModal from "@/components/AuthModal";
+import { useAuth } from "@/lib/auth-context";
 import { bots } from "@/lib/bots";
 
 export default function LandingPage() {
   const [authOpen, setAuthOpen] = useState(false);
   const [authTab, setAuthTab] = useState<"signin" | "signup">("signup");
+  const { user } = useAuth();
+  const router = useRouter();
 
   function openAuth(tab: "signin" | "signup") {
     setAuthTab(tab);
@@ -22,18 +26,29 @@ export default function LandingPage() {
       <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
         <Logo />
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => openAuth("signin")}
-            className="rounded-full px-4 py-2 text-sm text-muted hover:text-ink"
-          >
-            Sign in
-          </button>
-          <button
-            onClick={() => openAuth("signup")}
-            className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
-          >
-            Sign up
-          </button>
+          {user ? (
+            <button
+              onClick={() => router.push("/dashboard")}
+              className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+            >
+              Dashboard
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => openAuth("signin")}
+                className="rounded-full px-4 py-2 text-sm text-muted hover:text-ink"
+              >
+                Sign in
+              </button>
+              <button
+                onClick={() => openAuth("signup")}
+                className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+              >
+                Sign up
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -50,10 +65,12 @@ export default function LandingPage() {
           </p>
           <div className="mt-8 flex items-center gap-3">
             <button
-              onClick={() => openAuth("signup")}
+              onClick={() =>
+                user ? router.push("/dashboard") : openAuth("signup")
+              }
               className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90"
             >
-              Get your first teammate
+              {user ? "Go to your dashboard" : "Get your first teammate"}
             </button>
             <a
               href="#team"
