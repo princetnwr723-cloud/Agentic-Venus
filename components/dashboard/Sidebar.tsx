@@ -1,23 +1,29 @@
 "use client";
 
-import { LogOut, Plus, Search } from "lucide-react";
+import { useState } from "react";
+import { Key, LogOut, Plus, Settings, Search } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
-import type { Bot } from "@/lib/bots";
+import type { Chat } from "@/lib/chats";
 
 export default function Sidebar({
-  bots,
+  chats,
   activeId,
   onSelect,
+  onNewChat,
   userLabel,
+  onOpenApiKeys,
   onSignOut,
 }: {
-  bots: Bot[];
-  activeId: string;
+  chats: Chat[];
+  activeId: string | null;
   onSelect: (id: string) => void;
+  onNewChat: () => void;
   userLabel: string;
+  onOpenApiKeys: () => void;
   onSignOut: () => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
 
   return (
@@ -25,7 +31,9 @@ export default function Sidebar({
       <div className="flex items-center justify-between px-4 py-4">
         <Logo size={18} />
         <button
-          aria-label="New teammate"
+          aria-label="New chat"
+          title="New chat"
+          onClick={onNewChat}
           className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"
         >
           <Plus size={18} />
@@ -43,53 +51,82 @@ export default function Sidebar({
       </div>
 
       <nav className="flex-1 overflow-y-auto">
-        {bots.map((bot) => {
-          const active = bot.id === activeId;
+        {chats.length === 0 && (
+          <p className="px-4 py-6 text-center text-xs text-faint">
+            No chats yet — hit + to bring on your first teammate.
+          </p>
+        )}
+        {chats.map((chat) => {
+          const active = chat.id === activeId;
+          const last = chat.messages[chat.messages.length - 1];
           return (
             <button
-              key={bot.id}
-              onClick={() => onSelect(bot.id)}
+              key={chat.id}
+              onClick={() => onSelect(chat.id)}
               className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors ${
                 active ? "bg-panel2" : "hover:bg-panel2/60"
               }`}
             >
-              <BotAvatar color={bot.color} paired={bot.paired} size={34} />
+              <BotAvatar color={chat.agentColor} size={34} />
               <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-medium text-ink">
-                    {bot.name}
-                  </span>
-                  <span className="shrink-0 text-[11px] text-faint">
-                    {bot.time}
-                  </span>
-                </div>
+                <span className="truncate text-sm font-medium text-ink">
+                  {chat.agentName}
+                </span>
                 <p className="truncate text-xs text-muted">
-                  {bot.lastMessage}
+                  {last ? last.content : "New chat"}
                 </p>
               </div>
-              {bot.unread && (
-                <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
-              )}
             </button>
           );
         })}
       </nav>
 
-      <div className="flex items-center gap-2.5 border-t border-line px-4 py-3.5">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-panel2 text-xs font-medium text-ink">
-          {initial}
+      <div className="relative border-t border-line px-4 py-3.5">
+        {menuOpen && (
+          <>
+            <div
+              className="fixed inset-0 z-10"
+              onClick={() => setMenuOpen(false)}
+            />
+            <div className="absolute bottom-[calc(100%+4px)] left-4 right-4 z-20 overflow-hidden rounded-lg border border-line bg-panel2 shadow-xl">
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenApiKeys();
+                }}
+                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
+              >
+                <Key size={15} /> API keys
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onSignOut();
+                }}
+                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
+              >
+                <LogOut size={15} /> Sign out
+              </button>
+            </div>
+          </>
+        )}
+
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-panel2 text-xs font-medium text-ink">
+            {initial}
+          </div>
+          <span className="min-w-0 flex-1 truncate text-sm text-ink">
+            {userLabel}
+          </span>
+          <button
+            aria-label="Settings"
+            title="Settings"
+            onClick={() => setMenuOpen((v) => !v)}
+            className="relative z-20 rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"
+          >
+            <Settings size={16} />
+          </button>
         </div>
-        <span className="min-w-0 flex-1 truncate text-sm text-ink">
-          {userLabel}
-        </span>
-        <button
-          aria-label="Sign out"
-          title="Sign out"
-          onClick={onSignOut}
-          className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"
-        >
-          <LogOut size={16} />
-        </button>
       </div>
     </aside>
   );
