@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
+import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider } from "@/lib/ai-providers-server";
 import type { ProviderId } from "@/lib/providers";
 
@@ -11,6 +11,14 @@ export async function POST(req: Request) {
   const expected = `Bearer ${process.env.ROUTINE_RUNNER_SECRET}`;
   if (!process.env.ROUTINE_RUNNER_SECRET || authHeader !== expected) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  let adminDb;
+  try {
+    adminDb = getAdminDb();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Routines aren't configured yet.";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 
   const now = Date.now();
