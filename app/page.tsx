@@ -7,7 +7,7 @@ import Logo from "@/components/Logo";
 import LandingChatDemo from "@/components/LandingChatDemo";
 import AuthModal from "@/components/AuthModal";
 import { useAuth } from "@/lib/auth-context";
-import { bots } from "@/lib/bots";
+import { PRESET_AGENTS } from "@/lib/bots";
 
 export default function LandingPage() {
   const [authOpen, setAuthOpen] = useState(false);
@@ -100,22 +100,13 @@ export default function LandingPage() {
         </p>
 
         <div className="mt-8 divide-y divide-line rounded-xl2 border border-line">
-          {bots.map((bot) => (
-            <div
-              key={bot.id}
-              className="flex items-center gap-4 px-5 py-4"
-            >
-              <BotAvatar color={bot.color} paired={bot.paired} size={38} />
+          {PRESET_AGENTS.map((agent) => (
+            <div key={agent.id} className="flex items-center gap-4 px-5 py-4">
+              <BotAvatar color={agent.color} size={38} />
               <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2">
-                  <span className="font-medium text-ink">{bot.name}</span>
-                  <span className="text-xs text-faint">{bot.role}</span>
-                </div>
-                <p className="truncate text-sm text-muted">
-                  {bot.lastMessage}
-                </p>
+                <span className="font-medium text-ink">{agent.name}</span>
+                <p className="truncate text-sm text-muted">{agent.role}</p>
               </div>
-              <span className="shrink-0 text-xs text-faint">{bot.time}</span>
             </div>
           ))}
         </div>
