@@ -1,52 +1,51 @@
-import type { ThreadMessage } from "@/lib/bots";
-import ToolCallCard from "./ToolCallCard";
-import RoutinePill from "./RoutinePill";
+import { Repeat } from "lucide-react";
+import type { ChatMessage } from "@/lib/chats";
 
 export default function ChatThread({
   messages,
+  pending,
+  onSaveAsRoutine,
 }: {
-  messages: ThreadMessage[];
+  messages: ChatMessage[];
+  pending?: boolean;
+  onSaveAsRoutine?: (text: string) => void;
 }) {
   return (
     <div className="space-y-4">
-      {messages.map((m, i) => {
-        if (m.kind === "tool-run") {
-          return <ToolCallCard key={i} steps={m.steps} />;
-        }
-        if (m.kind === "routine") {
-          return <RoutinePill key={i} name={m.name} />;
-        }
-        if (m.kind === "cross-bot") {
-          return (
-            <div key={i} className="space-y-2">
-              <p className="text-center text-xs text-faint">
-                Messages from {m.from}
-              </p>
-              <div className="mx-auto max-w-[85%] rounded-xl border border-line bg-panel2 px-4 py-3 text-sm leading-relaxed text-ink">
-                {m.body}
-              </div>
-            </div>
-          );
-        }
-        // text
-        const fromUser = m.from === "user";
-        return (
+      {messages.map((m, i) => (
+        <div
+          key={i}
+          className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}
+        >
           <div
-            key={i}
-            className={`flex ${fromUser ? "justify-end" : "justify-start"}`}
+            className={`max-w-[75%] whitespace-pre-wrap rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
+              m.role === "user"
+                ? "bg-ink text-bg"
+                : "border border-line bg-panel2 text-ink"
+            }`}
           >
-            <div
-              className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
-                fromUser
-                  ? "bg-ink text-bg"
-                  : "border border-line bg-panel2 text-ink"
-              }`}
-            >
-              {m.body}
-            </div>
+            {m.content}
           </div>
-        );
-      })}
+          {m.role === "user" && onSaveAsRoutine && (
+            <button
+              onClick={() => onSaveAsRoutine(m.content)}
+              className="mt-1 flex items-center gap-1 text-[11px] text-faint hover:text-muted"
+            >
+              <Repeat size={11} /> Repeat this on a schedule
+            </button>
+          )}
+        </div>
+      ))}
+
+      {pending && (
+        <div className="flex justify-start">
+          <div className="flex items-center gap-1 rounded-xl border border-line bg-panel2 px-4 py-3">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint" />
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:150ms]" />
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:300ms]" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
