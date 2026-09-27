@@ -33,6 +33,7 @@ import ModelPicker from "@/components/dashboard/ModelPicker";
 import NewChatModal from "@/components/dashboard/NewChatModal";
 import SettingsModal from "@/components/dashboard/SettingsModal";
 import RoutinesPanel from "@/components/dashboard/RoutinesPanel";
+import FirstKeyGate from "@/components/dashboard/FirstKeyGate";
 import BotAvatar from "@/components/BotAvatar";
 
 function defaultProviderAndModel(
@@ -372,21 +373,7 @@ export default function DashboardPage() {
             Loading your chats…
           </div>
         ) : !hasAnyKey && !keysLoading ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-sm text-ink">
-              Add an AI provider key to start chatting.
-            </p>
-            <p className="max-w-sm text-xs text-muted">
-              Bring your own key from Claude, ChatGPT, Gemini, Grok, or any of
-              the other 6 supported providers.
-            </p>
-            <button
-              onClick={() => setSettingsOpen(true)}
-              className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
-            >
-              Add API key
-            </button>
-          </div>
+          <FirstKeyGate />
         ) : !activeChat ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
             <p className="text-sm text-ink">Pick a chat, or start a new one.</p>
