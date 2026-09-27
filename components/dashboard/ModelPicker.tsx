@@ -1,7 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PROVIDERS, providerMeta, type ProviderId } from "@/lib/providers";
+
+// Session-lifetime cache so switching between chats on the same
+// provider/key doesn't re-fetch every time.
+const modelCache = new Map<string, string[]>();
 
 export default function ModelPicker({
   provider,
@@ -15,11 +19,56 @@ export default function ModelPicker({
   onChange: (provider: ProviderId, model: string) => void;
 }) {
   const available = PROVIDERS.filter((p) => apiKeys[p.id]);
-  const current = providerMeta(provider);
-  const isCustomModel = !current.models.includes(model);
-  const [customDraft, setCustomDraft] = useState(isCustomModel ? model : "");
+  const [models, setModels] = useState<string[]>(providerMeta(provider).models);
+  const [loading, setLoading] = useState(false);
+  const [customDraft, setCustomDraft] = useState("");
+
+  const key = apiKeys[provider];
+
+  useEffect(() => {
+    if (!key) {
+      setModels(providerMeta(provider).models);
+      return;
+    }
+    const cacheKey = `${provider}:${key}`;
+    const cached = modelCache.get(cacheKey);
+    if (cached) {
+      setModels(cached);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    fetch("/api/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, apiKey: key }),
+    })
+      .then((res) => res.json())
+      .then((data: { models?: Array<{ id: string }> | null }) => {
+        if (cancelled) return;
+        const list =
+          data.models && data.models.length > 0
+            ? data.models.map((m) => m.id)
+            : providerMeta(provider).models;
+        modelCache.set(cacheKey, list);
+        setModels(list);
+      })
+      .catch(() => {
+        if (!cancelled) setModels(providerMeta(provider).models);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, key]);
 
   if (available.length === 0) return null;
+
+  const isCustomModel = !loading && !models.includes(model);
 
   function commitCustom() {
     if (customDraft.trim()) onChange(provider, customDraft.trim());
@@ -31,7 +80,9 @@ export default function ModelPicker({
         value={provider}
         onChange={(e) => {
           const nextProvider = e.target.value as ProviderId;
-          onChange(nextProvider, providerMeta(nextProvider).models[0]);
+          const nextKey = apiKeys[nextProvider];
+          const cached = nextKey ? modelCache.get(`${nextProvider}:${nextKey}`) : undefined;
+          onChange(nextProvider, cached?.[0] ?? providerMeta(nextProvider).models[0]);
         }}
         className="rounded-md border border-line bg-panel2 px-2 py-1 text-xs text-ink"
       >
@@ -43,7 +94,7 @@ export default function ModelPicker({
       </select>
 
       <select
-        value={isCustomModel ? "__custom" : model}
+        value={loading ? "" : isCustomModel ? "__custom" : model}
         onChange={(e) => {
           if (e.target.value === "__custom") {
             setCustomDraft("");
@@ -51,14 +102,21 @@ export default function ModelPicker({
             onChange(provider, e.target.value);
           }
         }}
-        className="rounded-md border border-line bg-panel2 px-2 py-1 text-xs text-ink"
+        disabled={loading}
+        className="rounded-md border border-line bg-panel2 px-2 py-1 text-xs text-ink disabled:opacity-50"
       >
-        {current.models.map((m) => (
-          <option key={m} value={m}>
-            {m}
-          </option>
-        ))}
-        <option value="__custom">Custom model…</option>
+        {loading ? (
+          <option value="">Loading your models…</option>
+        ) : (
+          <>
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+            <option value="__custom">Custom model…</option>
+          </>
+        )}
       </select>
 
       {isCustomModel && (
