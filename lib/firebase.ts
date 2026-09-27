@@ -1,5 +1,6 @@
 import { initializeApp, getApps, getApp, type FirebaseOptions } from "firebase/app";
 import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 
 // All values come from env vars so real keys never live in the repo.
 // Set these in .env.local for local dev and in Vercel → Project →
@@ -18,3 +19,4 @@ export const firebaseApp = getApps().length
   : initializeApp(firebaseConfig);
 
 export const auth = getAuth(firebaseApp);
+export const db = getFirestore(firebaseApp);
