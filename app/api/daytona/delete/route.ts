@@ -1,5 +1,8 @@
+// SAVE AS: app/api/daytona/delete/route.ts
 import { NextResponse } from "next/server";
 import { deleteSandbox } from "@/lib/daytona-server";
+
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
