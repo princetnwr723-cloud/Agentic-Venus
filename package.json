@@ -15,7 +15,8 @@
     "react-dom": "^18.3.1",
     "lucide-react": "^0.383.0",
     "firebase": "^10.13.1",
-    "firebase-admin": "^12.3.1"
+    "firebase-admin": "^12.3.1",
+    "@daytona/sdk": "latest"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",
