@@ -1,5 +1,8 @@
+// SAVE AS: app/api/daytona/create/route.ts
 import { NextResponse } from "next/server";
 import { createSandbox } from "@/lib/daytona-server";
+
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
