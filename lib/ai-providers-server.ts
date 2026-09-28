@@ -1,11 +1,19 @@
-// Server-only. Called from app/api/chat/route.ts — never imported into a
-// client component, so the API key passed in here never reaches the browser
+// SAVE AS: lib/ai-providers-server.ts
+// Server-only. Called from API routes — never imported into a client
+// component, so the API key passed in here never reaches the browser
 // bundle. Each provider has a slightly different request/response shape;
 // this file normalizes all of them to a single callProvider() function.
+// A message may carry one image (used by the computer-use agent to send a
+// screenshot); it needs a vision-capable model on the provider's side.
 
 import type { ProviderId } from "./providers";
 
-export type ChatMsg = { role: "system" | "user" | "assistant"; content: string };
+export type ChatImage = { mediaType: string; data: string };
+export type ChatMsg = {
+  role: "system" | "user" | "assistant";
+  content: string;
+  image?: ChatImage;
+};
 
 const OPENAI_COMPATIBLE_URLS: Partial<Record<ProviderId, string>> = {
   openai: "https://api.openai.com/v1/chat/completions",
@@ -16,6 +24,18 @@ const OPENAI_COMPATIBLE_URLS: Partial<Record<ProviderId, string>> = {
   groq: "https://api.groq.com/openai/v1/chat/completions",
   deepseek: "https://api.deepseek.com/chat/completions",
 };
+
+// OpenAI-style content: plain string, or [text, image_url] when an image is attached.
+function openAIStyleContent(m: ChatMsg) {
+  if (!m.image) return m.content;
+  return [
+    { type: "text", text: m.content },
+    {
+      type: "image_url",
+      image_url: { url: `data:${m.image.mediaType};base64,${m.image.data}` },
+    },
+  ];
+}
 
 async function callOpenAICompatible(
   provider: ProviderId,
@@ -32,7 +52,10 @@ async function callOpenAICompatible(
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, messages }),
+    body: JSON.stringify({
+      model,
+      messages: messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) })),
+    }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -45,7 +68,22 @@ async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[])
   const system = messages.find((m) => m.role === "system")?.content;
   const rest = messages
     .filter((m) => m.role !== "system")
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({
+      role: m.role,
+      content: m.image
+        ? [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: m.image.mediaType,
+                data: m.image.data,
+              },
+            },
+            { type: "text", text: m.content },
+          ]
+        : m.content,
+    }));
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -68,7 +106,12 @@ async function callGemini(apiKey: string, model: string, messages: ChatMsg[]) {
     .filter((m) => m.role !== "system")
     .map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
+      parts: m.image
+        ? [
+            { inline_data: { mime_type: m.image.mediaType, data: m.image.data } },
+            { text: m.content },
+          ]
+        : [{ text: m.content }],
     }));
   const system = messages.find((m) => m.role === "system")?.content;
 
@@ -78,9 +121,7 @@ async function callGemini(apiKey: string, model: string, messages: ChatMsg[]) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents,
-      ...(system
-        ? { systemInstruction: { parts: [{ text: system }] } }
-        : {}),
+      ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -97,7 +138,10 @@ async function callCohere(apiKey: string, model: string, messages: ChatMsg[]) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, messages }),
+    body: JSON.stringify({
+      model,
+      messages: messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) })),
+    }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
