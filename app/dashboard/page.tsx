@@ -1,6 +1,7 @@
+// SAVE AS: app/dashboard/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, Clock, Monitor, Plus } from "lucide-react";
 import { signOut } from "firebase/auth";
@@ -34,6 +35,7 @@ import NewChatModal from "@/components/dashboard/NewChatModal";
 import SettingsModal from "@/components/dashboard/SettingsModal";
 import RoutinesPanel from "@/components/dashboard/RoutinesPanel";
 import FirstKeyGate from "@/components/dashboard/FirstKeyGate";
+import PcPanel, { type PcStatus } from "@/components/dashboard/PcPanel";
 import BotAvatar from "@/components/BotAvatar";
 
 function defaultProviderAndModel(
@@ -58,8 +60,17 @@ export default function DashboardPage() {
   const [sending, setSending] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [creatingSandbox, setCreatingSandbox] = useState(false);
   const [pcMessage, setPcMessage] = useState<string | null>(null);
+
+  // The per-chat cloud computer: panel visibility, live-screen URL, and the
+  // agent's task loop (each step is one screenshot → action round trip).
+  const [pcOpen, setPcOpen] = useState(false);
+  const [pcStatus, setPcStatus] = useState<PcStatus>("idle");
+  const [pcError, setPcError] = useState<string | null>(null);
+  const [screenUrl, setScreenUrl] = useState<string | null>(null);
+  const [pcSteps, setPcSteps] = useState<string[]>([]);
+  const [pcRunning, setPcRunning] = useState(false);
+  const stopRequested = useRef(false);
 
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [routinesOpen, setRoutinesOpen] = useState(false);
@@ -97,6 +108,17 @@ export default function DashboardPage() {
     }
     listRoutinesForChat(user.uid, activeChat.id).then(setRoutines);
   }, [user, activeChat?.id]);
+
+  // Each chat has its own computer, so switching chats resets the panel.
+  useEffect(() => {
+    stopRequested.current = true;
+    setPcOpen(false);
+    setScreenUrl(null);
+    setPcSteps([]);
+    setPcRunning(false);
+    setPcStatus("idle");
+    setPcError(null);
+  }, [activeChat?.id]);
 
   const hasAnyKey = Object.values(apiKeys).some(Boolean);
 
@@ -187,12 +209,35 @@ export default function DashboardPage() {
     }
   }
 
+  async function loadScreen(sandboxId: string) {
+    if (!daytonaKey) {
+      setSettingsOpen(true);
+      return;
+    }
+    setPcStatus("loading");
+    setPcError(null);
+    try {
+      const res = await fetch("/api/daytona/screen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: daytonaKey, sandboxId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Could not open the computer's screen.");
+      setScreenUrl(data.url);
+      setPcStatus("ready");
+    } catch (err) {
+      setPcError(err instanceof Error ? err.message : "Could not open the computer's screen.");
+      setPcStatus("error");
+    }
+  }
+
   async function handlePcClick() {
     if (!activeChat || !user) return;
     setPcMessage(null);
 
-    if (activeChat.sandboxId) {
-      setPcMessage(`Computer running · sandbox ${activeChat.sandboxId}`);
+    if (pcOpen) {
+      setPcOpen(false);
       return;
     }
     if (!daytonaKey) {
@@ -200,8 +245,20 @@ export default function DashboardPage() {
       setSettingsOpen(true);
       return;
     }
+    setPcOpen(true);
+    if (activeChat.sandboxId && !screenUrl) {
+      await loadScreen(activeChat.sandboxId);
+    }
+  }
 
-    setCreatingSandbox(true);
+  async function handleStartPc() {
+    if (!activeChat || !user) return;
+    if (!daytonaKey) {
+      setSettingsOpen(true);
+      return;
+    }
+    setPcStatus("creating");
+    setPcError(null);
     try {
       const res = await fetch("/api/daytona/create", {
         method: "POST",
@@ -213,12 +270,113 @@ export default function DashboardPage() {
 
       patchChat(activeChat.id, { sandboxId: data.sandboxId });
       await updateChatSandbox(user.uid, activeChat.id, data.sandboxId);
-      setPcMessage(`Computer ready · sandbox ${data.sandboxId}`);
+      await loadScreen(data.sandboxId);
     } catch (err) {
-      setPcMessage(err instanceof Error ? err.message : "Could not create a computer.");
-    } finally {
-      setCreatingSandbox(false);
+      setPcError(err instanceof Error ? err.message : "Could not create a computer.");
+      setPcStatus("error");
     }
+  }
+
+  async function handleDeletePc() {
+    if (!activeChat || !user || !daytonaKey || !activeChat.sandboxId) return;
+    if (!window.confirm("Delete this teammate's computer? Anything saved on it will be lost.")) {
+      return;
+    }
+    setPcStatus("loading");
+    setPcError(null);
+    try {
+      const res = await fetch("/api/daytona/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: daytonaKey, sandboxId: activeChat.sandboxId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Could not delete the computer.");
+
+      patchChat(activeChat.id, { sandboxId: "" });
+      await updateChatSandbox(user.uid, activeChat.id, "");
+      setScreenUrl(null);
+      setPcSteps([]);
+      setPcStatus("idle");
+    } catch (err) {
+      setPcError(err instanceof Error ? err.message : "Could not delete the computer.");
+      setPcStatus("error");
+    }
+  }
+
+  async function handleRunPcTask(task: string) {
+    if (!user || !activeChat || !daytonaKey || !activeChat.sandboxId) return;
+    const key = apiKeys[activeChat.provider];
+    if (!key) {
+      setSettingsOpen(true);
+      return;
+    }
+
+    const chatId = activeChat.id;
+    const baseMessages = activeChat.messages;
+    const MAX_STEPS = 25;
+
+    stopRequested.current = false;
+    setPcRunning(true);
+    setPcSteps([`▶ ${task}`]);
+
+    const history: string[] = [];
+    let summary = "";
+
+    try {
+      for (let i = 0; i < MAX_STEPS; i++) {
+        if (stopRequested.current) {
+          summary = "Stopped before finishing.";
+          setPcSteps((prev) => [...prev, "■ Stopped."]);
+          break;
+        }
+
+        const res = await fetch("/api/daytona/step", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            daytonaKey,
+            sandboxId: activeChat.sandboxId,
+            provider: activeChat.provider,
+            apiKey: key,
+            model: activeChat.model,
+            task,
+            history: history.slice(-12),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || "A step failed.");
+
+        if (data.done) {
+          summary = data.summary || "Done.";
+          setPcSteps((prev) => [...prev, `✓ ${summary}`]);
+          break;
+        }
+
+        const line = `${i + 1}. ${data.thought ? data.thought + " → " : ""}${data.actionText}`;
+        history.push(line);
+        setPcSteps((prev) => [...prev, line]);
+
+        if (i === MAX_STEPS - 1) {
+          summary = "Hit the step limit before finishing — the screen shows where it got to.";
+          setPcSteps((prev) => [...prev, `… ${summary}`]);
+        }
+      }
+    } catch (err) {
+      summary = `⚠️ ${err instanceof Error ? err.message : "The task failed."}`;
+      setPcSteps((prev) => [...prev, summary]);
+    } finally {
+      setPcRunning(false);
+    }
+
+    // Leave a record in the chat so the work isn't only visible on the screen.
+    const record: ChatMessage[] = [
+      ...baseMessages,
+      { role: "user", content: `🖥️ Task on your computer: ${task}`, at: Date.now() },
+      { role: "assistant", content: summary || "Finished.", at: Date.now() },
+    ];
+    patchChat(chatId, { messages: record });
+    updateChatMessages(user.uid, chatId, record).catch(() => {});
   }
 
   async function handleCreateRoutine(input: {
@@ -320,6 +478,7 @@ export default function DashboardPage() {
         onSignOut={() => signOut(auth)}
       />
 
+      <div className="flex min-w-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
         {activeChat && (
           <header className="flex items-center justify-between border-b border-line px-6 py-3.5">
@@ -342,13 +501,16 @@ export default function DashboardPage() {
               </button>
               <button
                 onClick={handlePcClick}
-                disabled={creatingSandbox}
                 title={
-                  activeChat.sandboxId
-                    ? "This teammate's computer is running"
+                  pcOpen
+                    ? "Hide this teammate's computer"
+                    : activeChat.sandboxId
+                    ? "Show this teammate's computer"
                     : "Give this teammate a cloud computer (Daytona)"
                 }
-                className="relative rounded-lg p-2 text-muted hover:bg-panel2 hover:text-ink disabled:opacity-50"
+                className={`relative rounded-lg p-2 hover:bg-panel2 hover:text-ink ${
+                  pcOpen ? "bg-panel2 text-ink" : "text-muted"
+                }`}
               >
                 <Monitor size={17} />
                 {activeChat.sandboxId && (
@@ -436,6 +598,27 @@ export default function DashboardPage() {
             </form>
           </>
         )}
+      </div>
+
+      {activeChat && pcOpen && (
+        <PcPanel
+          agentName={activeChat.agentName}
+          hasComputer={Boolean(activeChat.sandboxId)}
+          status={pcStatus}
+          error={pcError}
+          screenUrl={screenUrl}
+          steps={pcSteps}
+          running={pcRunning}
+          onClose={() => setPcOpen(false)}
+          onStart={handleStartPc}
+          onReload={() => activeChat.sandboxId && loadScreen(activeChat.sandboxId)}
+          onDelete={handleDeletePc}
+          onRunTask={handleRunPcTask}
+          onStop={() => {
+            stopRequested.current = true;
+          }}
+        />
+      )}
       </div>
 
       <NewChatModal
