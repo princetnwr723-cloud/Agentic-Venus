@@ -17,15 +17,33 @@
 
 import { Sandbox } from "@e2b/desktop";
 
-const TEMPLATE = process.env.E2B_TEMPLATE || "desktop";
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // Hobby's own ~1h ceiling; pauses (not kills) at this point.
 
 type DesktopSandbox = InstanceType<typeof Sandbox>;
 
+/** Zod (used inside the SDK) puts the real reason in .issues — surface it. */
+function describeError(err: unknown, fallback: string): string {
+  if (err && typeof err === "object") {
+    const issues = (err as { issues?: Array<{ path?: unknown[]; message?: string }> }).issues;
+    if (Array.isArray(issues) && issues.length > 0) {
+      const first = issues[0];
+      const field = Array.isArray(first.path) ? first.path.join(".") : "input";
+      return `${field}: ${first.message ?? "invalid value"}`;
+    }
+    const message = (err as { message?: string }).message;
+    if (message) return message;
+  }
+  return fallback;
+}
+
 async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
-  // Sandbox.connect resumes a paused sandbox automatically — this one call
-  // covers both "still running" and "was paused, wake it up".
-  return Sandbox.connect(sandboxId, { apiKey } as never) as unknown as Promise<DesktopSandbox>;
+  try {
+    // Sandbox.connect resumes a paused sandbox automatically — this one
+    // call covers both "still running" and "was paused, wake it up".
+    return (await Sandbox.connect(sandboxId, { apiKey } as never)) as unknown as DesktopSandbox;
+  } catch (err) {
+    throw new Error(describeError(err, "Could not reach the computer."));
+  }
 }
 
 function loose(sandbox: DesktopSandbox) {
@@ -80,17 +98,18 @@ echo provisioned
  * Firestore doc themselves (lib/keys-context.tsx).
  */
 export async function createSandbox(apiKey: string): Promise<string> {
-  const sandbox = await Sandbox.create(TEMPLATE, {
-    apiKey,
-    timeoutMs: IDLE_TIMEOUT_MS,
-    // Best-effort resource hint — ignored harmlessly if this SDK version
-    // only honors specs baked into a custom template. See README → Computer.
-    resolution: [1440, 900],
-    ...( { autoPause: true } as Record<string, unknown> ),
-  } as never);
+  let sandbox: DesktopSandbox;
+  try {
+    sandbox = (await Sandbox.create({
+      apiKey,
+      timeoutMs: IDLE_TIMEOUT_MS,
+    } as never)) as unknown as DesktopSandbox;
+  } catch (err) {
+    throw new Error(describeError(err, "Could not create a computer."));
+  }
 
   try {
-    await provision(sandbox as unknown as DesktopSandbox);
+    await provision(sandbox);
   } catch {
     // Provisioning failing shouldn't strand the person without a computer at
     // all — Chrome/VS Code can be installed by hand from the desktop later.
