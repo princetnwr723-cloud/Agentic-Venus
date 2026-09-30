@@ -1,4 +1,3 @@
-// SAVE AS: lib/chats.ts
 import {
   collection,
   addDoc,
@@ -28,6 +27,8 @@ export type Chat = {
   provider: ProviderId;
   model: string;
   messages: ChatMessage[];
+  // Each chat owns its own E2B computer.
+  pcSandboxId?: string | null;
   createdAt?: Timestamp;
 };
 
@@ -53,9 +54,10 @@ export async function createChat(
   const ref = await addDoc(chatsCol(uid), {
     ...init,
     messages: [],
+    pcSandboxId: null,
     createdAt: serverTimestamp(),
   });
-  return { id: ref.id, messages: [], ...init };
+  return { id: ref.id, messages: [], pcSandboxId: null, ...init };
 }
 
 export async function updateChatMessages(
@@ -73,6 +75,14 @@ export async function updateChatModel(
   model: string
 ) {
   await updateDoc(doc(db, "users", uid, "chats", chatId), { provider, model });
+}
+
+export async function updateChatPc(
+  uid: string,
+  chatId: string,
+  pcSandboxId: string | null
+) {
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { pcSandboxId });
 }
 
 export async function deleteChat(uid: string, chatId: string) {
