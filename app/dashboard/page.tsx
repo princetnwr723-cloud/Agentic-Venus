@@ -37,6 +37,20 @@ import FirstKeyGate from "@/components/dashboard/FirstKeyGate";
 import PcPanel, { type PcStatus } from "@/components/dashboard/PcPanel";
 import BotAvatar from "@/components/BotAvatar";
 
+// Reads a response body safely. If the server crashed and sent HTML or an
+// empty body, we show "Server returned 500: ..." instead of Safari's
+// confusing "The string did not match the expected pattern."
+async function readJson(res: Response) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      error: `Server returned ${res.status}: ${text.slice(0, 200) || "(empty response)"}`,
+    };
+  }
+}
+
 function defaultProviderAndModel(
   apiKeys: Partial<Record<ProviderId, string>>
 ): { provider: ProviderId; model: string } {
@@ -177,7 +191,7 @@ export default function DashboardPage() {
           systemPrompt: `You are ${activeChat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.`,
         }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Request failed.");
 
       const botMsg: ChatMessage = {
@@ -218,7 +232,7 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey: e2bKey, sandboxId }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not open the computer's screen.");
       setScreenUrl(data.url);
       setPcStatus("ready");
@@ -261,7 +275,7 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey: e2bKey }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
 
       await savePcSandboxId(data.sandboxId);
@@ -285,7 +299,7 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey: e2bKey, sandboxId: pcSandboxId }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not delete the computer.");
 
       await savePcSandboxId(null);
@@ -326,9 +340,7 @@ export default function DashboardPage() {
           break;
         }
 
-        // Reconnects to the sandbox fresh every step — if the computer
-        // paused mid-task, this call wakes it back up and carries on from
-        // the same screen, no restart needed.
+        // Reconnects to the sandbox fresh every step.
         const res = await fetch("/api/e2b/step", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -342,7 +354,7 @@ export default function DashboardPage() {
             history: history.slice(-12),
           }),
         });
-        const data = await res.json();
+        const data = await readJson(res);
         if (!res.ok) throw new Error(data?.error || "A step failed.");
 
         if (data.done) {
@@ -367,8 +379,7 @@ export default function DashboardPage() {
       setPcRunning(false);
     }
 
-    // Leave a record in whichever chat kicked the task off, even though the
-    // computer itself is shared.
+    // Leave a record in whichever chat kicked the task off.
     const record: ChatMessage[] = [
       ...baseMessages,
       { role: "user", content: `🖥️ Task on the computer: ${task}`, at: Date.now() },
@@ -426,7 +437,7 @@ export default function DashboardPage() {
           messages: [{ role: "user", content: routine.instructions }],
         }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Routine run failed.");
 
       const afterRoutine = [
