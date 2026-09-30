@@ -1,3 +1,4 @@
+// SAVE AS: lib/chats.ts
 import {
   collection,
   addDoc,
@@ -27,7 +28,6 @@ export type Chat = {
   provider: ProviderId;
   model: string;
   messages: ChatMessage[];
-  sandboxId?: string;
   createdAt?: Timestamp;
 };
 
@@ -73,14 +73,6 @@ export async function updateChatModel(
   model: string
 ) {
   await updateDoc(doc(db, "users", uid, "chats", chatId), { provider, model });
-}
-
-export async function updateChatSandbox(
-  uid: string,
-  chatId: string,
-  sandboxId: string
-) {
-  await updateDoc(doc(db, "users", uid, "chats", chatId), { sandboxId });
 }
 
 export async function deleteChat(uid: string, chatId: string) {
