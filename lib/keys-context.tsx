@@ -1,3 +1,4 @@
+// SAVE AS: lib/keys-context.tsx
 "use client";
 
 import { createContext, useContext, useEffect, useState } from "react";
@@ -8,40 +9,51 @@ import type { ProviderId } from "@/lib/providers";
 
 type KeysState = {
   apiKeys: Partial<Record<ProviderId, string>>;
-  daytonaKey: string | null;
+  e2bKey: string | null;
+  pcSandboxId: string | null;
   loading: boolean;
   saveProviderKey: (provider: ProviderId, key: string) => Promise<void>;
-  saveDaytonaKey: (key: string) => Promise<void>;
+  saveE2bKey: (key: string) => Promise<void>;
+  savePcSandboxId: (sandboxId: string | null) => Promise<void>;
 };
 
 const KeysContext = createContext<KeysState>({
   apiKeys: {},
-  daytonaKey: null,
+  e2bKey: null,
+  pcSandboxId: null,
   loading: true,
   saveProviderKey: async () => {},
-  saveDaytonaKey: async () => {},
+  saveE2bKey: async () => {},
+  savePcSandboxId: async () => {},
 });
 
 export function KeysProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const [apiKeys, setApiKeys] = useState<Partial<Record<ProviderId, string>>>({});
-  const [daytonaKey, setDaytonaKey] = useState<string | null>(null);
+  const [e2bKey, setE2bKey] = useState<string | null>(null);
+  const [pcSandboxId, setPcSandboxId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!user) {
       setApiKeys({});
-      setDaytonaKey(null);
+      setE2bKey(null);
+      setPcSandboxId(null);
       setLoading(false);
       return;
     }
     setLoading(true);
     getDoc(doc(db, "users", user.uid)).then((snap) => {
       const data = snap.data() as
-        | { apiKeys?: Partial<Record<ProviderId, string>>; daytonaKey?: string }
+        | {
+            apiKeys?: Partial<Record<ProviderId, string>>;
+            e2bKey?: string;
+            pcSandboxId?: string;
+          }
         | undefined;
       setApiKeys(data?.apiKeys ?? {});
-      setDaytonaKey(data?.daytonaKey ?? null);
+      setE2bKey(data?.e2bKey ?? null);
+      setPcSandboxId(data?.pcSandboxId ?? null);
       setLoading(false);
     });
   }, [user]);
@@ -53,15 +65,29 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
     await setDoc(doc(db, "users", user.uid), { apiKeys: next }, { merge: true });
   }
 
-  async function saveDaytonaKey(key: string) {
+  async function saveE2bKey(key: string) {
     if (!user) return;
-    setDaytonaKey(key);
-    await setDoc(doc(db, "users", user.uid), { daytonaKey: key }, { merge: true });
+    setE2bKey(key);
+    await setDoc(doc(db, "users", user.uid), { e2bKey: key }, { merge: true });
+  }
+
+  async function savePcSandboxId(sandboxId: string | null) {
+    if (!user) return;
+    setPcSandboxId(sandboxId);
+    await setDoc(doc(db, "users", user.uid), { pcSandboxId: sandboxId }, { merge: true });
   }
 
   return (
     <KeysContext.Provider
-      value={{ apiKeys, daytonaKey, loading, saveProviderKey, saveDaytonaKey }}
+      value={{
+        apiKeys,
+        e2bKey,
+        pcSandboxId,
+        loading,
+        saveProviderKey,
+        saveE2bKey,
+        savePcSandboxId,
+      }}
     >
       {children}
     </KeysContext.Provider>
