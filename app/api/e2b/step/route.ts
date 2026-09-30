@@ -7,6 +7,7 @@ import type { ProviderId } from "@/lib/providers";
 // One step per request (screenshot → model → action) keeps every call well
 // inside the time limit; the browser loops until the agent says it's done.
 export const maxDuration = 60;
+export const runtime = "nodejs";
 
 const ALLOWED = new Set([
   "click",
