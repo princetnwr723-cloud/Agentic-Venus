@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getScreenUrl } from "@/lib/e2b-server";
 
 export const maxDuration = 60;
+export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   try {
