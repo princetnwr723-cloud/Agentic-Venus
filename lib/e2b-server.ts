@@ -1,9 +1,25 @@
 // Server-only. One E2B Desktop sandbox is shared by the whole account.
-import { Sandbox } from "@e2b/desktop";
+import type { Sandbox as SandboxClass } from "@e2b/desktop";
 
-const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour (Hobby ceiling)
+const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000;
 
-type DesktopSandbox = InstanceType<typeof Sandbox>;
+type DesktopSandbox = InstanceType<typeof SandboxClass>;
+
+/** Loads the SDK lazily so a broken package can never crash the route at import time. */
+export async function loadSdk(): Promise<{ Sandbox: typeof SandboxClass }> {
+  try {
+    const mod = (await import("@e2b/desktop")) as unknown as {
+      Sandbox?: typeof SandboxClass;
+      default?: { Sandbox?: typeof SandboxClass };
+    };
+    const Sandbox = mod.Sandbox ?? mod.default?.Sandbox;
+    if (!Sandbox) throw new Error("@e2b/desktop loaded but has no Sandbox export.");
+    return { Sandbox };
+  } catch (err) {
+    const m = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    throw new Error(`E2B SDK failed to load on the server → ${m}`);
+  }
+}
 
 function describeError(err: unknown, fallback: string): string {
   if (err && typeof err === "object") {
@@ -34,9 +50,8 @@ function cleanKey(apiKey: string): string {
 }
 
 async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
+  const { Sandbox } = await loadSdk();
   try {
-    // connect() also resumes a paused sandbox, and passing timeoutMs
-    // pushes the expiry forward so an active computer doesn't die mid-task.
     return (await Sandbox.connect(sandboxId, {
       apiKey: cleanKey(apiKey),
       timeoutMs: SANDBOX_TIMEOUT_MS,
@@ -45,7 +60,7 @@ async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbo
     const msg = describeError(err, "Could not reach the computer.");
     if (/not found|404|does not exist|expired/i.test(msg)) {
       throw new Error(
-        "This computer has expired or was deleted (E2B sandboxes end after their timeout). Delete it with the bin icon and create a new one."
+        "This computer has expired or was deleted. Delete it with the bin icon and create a new one."
       );
     }
     throw new Error(msg);
@@ -71,11 +86,7 @@ function pickString(value: unknown): string | null {
   return null;
 }
 
-/**
- * Installs Chrome + VS Code INSIDE the sandbox, in the background.
- * This call returns immediately (nohup + &) so the API request never
- * waits for apt — that wait was what hit Vercel's timeout.
- */
+/** Installs Chrome + VS Code inside the sandbox in the background; returns immediately. */
 async function startProvisioningInBackground(sandbox: DesktopSandbox) {
   const cmd = `
 cat > /tmp/provision.sh <<'EOF'
@@ -100,16 +111,17 @@ echo started
   try {
     await loose(sandbox).commands.run(cmd, { timeoutMs: 20_000 });
   } catch {
-    // Not fatal — the desktop works without them.
+    // Not fatal.
   }
 }
 
-/** Creates a sandbox and returns its id quickly (a few seconds). */
 export async function createSandbox(apiKeyInput: string): Promise<string> {
   const apiKey = cleanKey(apiKeyInput);
   if (!apiKey) {
     throw new Error("The E2B API key is empty after trimming — re-save it in Settings.");
   }
+
+  const { Sandbox } = await loadSdk();
 
   let sandbox: DesktopSandbox;
   try {
@@ -122,7 +134,6 @@ export async function createSandbox(apiKeyInput: string): Promise<string> {
   }
 
   await startProvisioningInBackground(sandbox);
-
   return (sandbox as unknown as { sandboxId: string }).sandboxId;
 }
 
@@ -132,7 +143,7 @@ export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<
     await (sandbox as unknown as { kill: () => Promise<void> }).kill();
   } catch (err) {
     const message = err instanceof Error ? err.message : "";
-    if (/not found|404|expired|deleted/i.test(message)) return; // already gone
+    if (/not found|404|expired|deleted/i.test(message)) return;
     throw err;
   }
 }
