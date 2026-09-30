@@ -18,7 +18,6 @@ import {
 export type PcStatus = "idle" | "creating" | "loading" | "ready" | "error";
 
 export default function PcPanel({
-  agentName,
   hasComputer,
   status,
   error,
@@ -32,7 +31,6 @@ export default function PcPanel({
   onRunTask,
   onStop,
 }: {
-  agentName: string;
   hasComputer: boolean;
   status: PcStatus;
   error: string | null;
@@ -79,7 +77,7 @@ export default function PcPanel({
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <div className="flex items-center gap-2 text-sm font-medium text-ink">
           <Monitor size={15} />
-          {agentName}&rsquo;s computer
+          Your team&rsquo;s computer
           <span
             className={`h-1.5 w-1.5 rounded-full ${
               status === "ready" ? "bg-avatar-teal" : busy ? "bg-gold" : "bg-faint"
@@ -155,7 +153,7 @@ export default function PcPanel({
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-8 text-center">
             <Monitor size={26} className="text-faint" />
             <p className="text-sm text-ink">
-              Give {agentName} a computer of its own
+              Give your team a computer
             </p>
             <p className="max-w-xs text-xs leading-relaxed text-muted">
               A private Linux desktop with a browser. You watch its screen live
@@ -194,7 +192,7 @@ export default function PcPanel({
           <iframe
             key={src}
             src={src}
-            title={`${agentName} computer screen`}
+            title="Team computer screen"
             allow="clipboard-read; clipboard-write"
             className="h-full w-full border-0"
           />
@@ -216,7 +214,7 @@ export default function PcPanel({
               value={task}
               onChange={(e) => setTask(e.target.value)}
               disabled={running}
-              placeholder={`Give ${agentName} a task on its computer…`}
+              placeholder="Give it a task on the computer…"
               className="flex-1 rounded-full border border-line bg-bg px-4 py-2 text-sm text-ink placeholder:text-faint focus:border-gold focus:outline-none disabled:opacity-60"
             />
             {running ? (
