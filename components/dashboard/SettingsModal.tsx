@@ -1,3 +1,4 @@
+// SAVE AS: components/dashboard/SettingsModal.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -5,7 +6,7 @@ import { X, ExternalLink } from "lucide-react";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { useKeys } from "@/lib/keys-context";
 
-function mask(key?: string) {
+function mask(key?: string | null) {
   if (!key) return null;
   return key.length <= 6 ? "••••" : `••••${key.slice(-4)}`;
 }
@@ -17,14 +18,14 @@ export default function SettingsModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const { apiKeys, daytonaKey, saveProviderKey, saveDaytonaKey } = useKeys();
+  const { apiKeys, e2bKey, saveProviderKey, saveE2bKey } = useKeys();
   const [drafts, setDrafts] = useState<Partial<Record<ProviderId, string>>>({});
-  const [daytonaDraft, setDaytonaDraft] = useState("");
+  const [e2bDraft, setE2bDraft] = useState("");
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
 
   useEffect(() => {
-    setDaytonaDraft(daytonaKey ?? "");
-  }, [daytonaKey]);
+    setE2bDraft(e2bKey ?? "");
+  }, [e2bKey]);
 
   if (!open) return null;
 
@@ -41,10 +42,10 @@ export default function SettingsModal({
     flash(id);
   }
 
-  async function handleSaveDaytona() {
-    if (!daytonaDraft.trim()) return;
-    await saveDaytonaKey(daytonaDraft.trim());
-    flash("daytona");
+  async function handleSaveE2b() {
+    if (!e2bDraft.trim()) return;
+    await saveE2bKey(e2bDraft.trim());
+    flash("e2b");
   }
 
   return (
@@ -115,38 +116,38 @@ export default function SettingsModal({
 
         <div className="my-5 h-px bg-line" />
 
-        <h3 className="mb-1.5 text-sm text-ink">Daytona (cloud computer)</h3>
+        <h3 className="mb-1.5 text-sm text-ink">Computer (E2B)</h3>
         <p className="mb-3 text-xs leading-relaxed text-muted">
-          Each agent gets its own cloud computer through Daytona. Add your
-          key once — get one at{" "}
+          One shared computer for the whole account — every chat can use it.
+          Add your key once — get one at{" "}
           <a
-            href="https://app.daytona.io/dashboard/keys"
+            href="https://e2b.dev/dashboard"
             target="_blank"
             rel="noreferrer"
             className="underline"
           >
-            app.daytona.io
-          </a>
-          .
+            e2b.dev
+          </a>{" "}
+          (no credit card needed).
         </p>
         <div className="flex gap-2">
           <input
             type="password"
-            placeholder="dtn_..."
-            value={daytonaDraft}
-            onChange={(e) => setDaytonaDraft(e.target.value)}
+            placeholder="e2b_..."
+            value={e2bDraft}
+            onChange={(e) => setE2bDraft(e.target.value)}
             className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
           />
           <button
-            onClick={handleSaveDaytona}
+            onClick={handleSaveE2b}
             className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90"
           >
-            {savedFlash === "daytona" ? "Saved" : "Save"}
+            {savedFlash === "e2b" ? "Saved" : "Save"}
           </button>
         </div>
-        {daytonaKey && (
+        {e2bKey && (
           <p className="mt-1.5 text-[11px] text-avatar-teal">
-            Connected · {mask(daytonaKey)}
+            Connected · {mask(e2bKey)}
           </p>
         )}
       </div>
