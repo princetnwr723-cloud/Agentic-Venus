@@ -1,11 +1,11 @@
 // Server-only. One E2B Desktop sandbox is shared by the whole account.
 import type { Sandbox as SandboxClass } from "@e2b/desktop";
 
-const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000;
+const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour; extended on every connect
 
 type DesktopSandbox = InstanceType<typeof SandboxClass>;
 
-/** Loads the SDK lazily so a broken package can never crash the route at import time. */
+/** Loads the SDK lazily so a broken package can never crash a route at import time. */
 export async function loadSdk(): Promise<{ Sandbox: typeof SandboxClass }> {
   try {
     const mod = (await import("@e2b/desktop")) as unknown as {
@@ -49,6 +49,9 @@ function cleanKey(apiKey: string): string {
   return apiKey.trim().replace(/^['"]|['"]$/g, "");
 }
 
+export const GONE_PREFIX = "SANDBOX_GONE";
+
+/** connect() also RESUMES a paused sandbox and pushes the expiry 1h forward. */
 async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   const { Sandbox } = await loadSdk();
   try {
@@ -58,10 +61,8 @@ async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbo
     } as never)) as unknown as DesktopSandbox;
   } catch (err) {
     const msg = describeError(err, "Could not reach the computer.");
-    if (/not found|404|does not exist|expired/i.test(msg)) {
-      throw new Error(
-        "This computer has expired or was deleted. Delete it with the bin icon and create a new one."
-      );
+    if (/not found|404|does not exist|expired|doesn't exist/i.test(msg)) {
+      throw new Error(`${GONE_PREFIX}: this computer has expired or was deleted.`);
     }
     throw new Error(msg);
   }
@@ -122,19 +123,68 @@ export async function createSandbox(apiKeyInput: string): Promise<string> {
   }
 
   const { Sandbox } = await loadSdk();
+  const base = { apiKey, timeoutMs: SANDBOX_TIMEOUT_MS };
 
   let sandbox: DesktopSandbox;
   try {
+    // Preferred: when the timer runs out the computer PAUSES (data kept)
+    // instead of being killed. Older SDKs may not know these options, so
+    // we fall back to a plain create below.
     sandbox = (await Sandbox.create({
-      apiKey,
-      timeoutMs: SANDBOX_TIMEOUT_MS,
+      ...base,
+      autoPause: true,
+      lifecycle: { onTimeout: "pause", autoResume: true },
     } as never)) as unknown as DesktopSandbox;
-  } catch (err) {
-    throw new Error(describeError(err, "Could not create a computer."));
+  } catch {
+    try {
+      sandbox = (await Sandbox.create(base as never)) as unknown as DesktopSandbox;
+    } catch (err) {
+      throw new Error(describeError(err, "Could not create a computer."));
+    }
   }
 
   await startProvisioningInBackground(sandbox);
   return (sandbox as unknown as { sandboxId: string }).sandboxId;
+}
+
+/** Turns the computer OFF without losing anything (files, apps, logins stay). */
+export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Promise<void> {
+  const apiKey = cleanKey(apiKeyInput);
+  const { Sandbox } = await loadSdk();
+  const S = Sandbox as unknown as {
+    betaPause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
+    pause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
+  };
+
+  try {
+    if (typeof S.betaPause === "function") {
+      await S.betaPause(sandboxId, { apiKey });
+      return;
+    }
+    if (typeof S.pause === "function") {
+      await S.pause(sandboxId, { apiKey });
+      return;
+    }
+    const sb = (await connect(apiKey, sandboxId)) as unknown as {
+      betaPause?: () => Promise<unknown>;
+      pause?: () => Promise<unknown>;
+    };
+    if (typeof sb.betaPause === "function") {
+      await sb.betaPause();
+      return;
+    }
+    if (typeof sb.pause === "function") {
+      await sb.pause();
+      return;
+    }
+  } catch (err) {
+    const msg = describeError(err, "Could not pause the computer.");
+    if (/already.*paus|paused/i.test(msg)) return; // already off
+    throw new Error(msg);
+  }
+  throw new Error(
+    "This version of the E2B SDK has no pause feature, so the computer was left running (nothing was deleted)."
+  );
 }
 
 export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<void> {
@@ -143,7 +193,7 @@ export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<
     await (sandbox as unknown as { kill: () => Promise<void> }).kill();
   } catch (err) {
     const message = err instanceof Error ? err.message : "";
-    if (/not found|404|expired|deleted/i.test(message)) return;
+    if (message.startsWith(GONE_PREFIX)) return; // already gone
     throw err;
   }
 }
