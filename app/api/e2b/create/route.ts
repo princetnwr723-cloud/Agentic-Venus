@@ -1,8 +1,21 @@
 import { NextResponse } from "next/server";
-import { createSandbox } from "@/lib/e2b-server";
+import { createSandbox, loadSdk } from "@/lib/e2b-server";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+// Open /api/e2b/create in a browser tab: it tells you whether the E2B SDK
+// loads on the server, and if not, the exact reason.
+export async function GET() {
+  try {
+    await loadSdk();
+    return NextResponse.json({ ok: true, sdk: "loaded", node: process.version });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ ok: false, error: message, node: process.version }, { status: 500 });
+  }
+}
 
 export async function POST(req: Request) {
   try {
