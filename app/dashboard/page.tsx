@@ -13,7 +13,6 @@ import {
   createChat,
   updateChatMessages,
   updateChatModel,
-  updateChatSandbox,
   type Chat,
   type ChatMessage,
 } from "@/lib/chats";
@@ -48,7 +47,13 @@ function defaultProviderAndModel(
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
-  const { apiKeys, daytonaKey, loading: keysLoading } = useKeys();
+  const {
+    apiKeys,
+    e2bKey,
+    pcSandboxId,
+    savePcSandboxId,
+    loading: keysLoading,
+  } = useKeys();
   const router = useRouter();
 
   const [chats, setChats] = useState<Chat[]>([]);
@@ -62,8 +67,8 @@ export default function DashboardPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pcMessage, setPcMessage] = useState<string | null>(null);
 
-  // The per-chat cloud computer: panel visibility, live-screen URL, and the
-  // agent's task loop (each step is one screenshot → action round trip).
+  // ONE shared computer for the whole account — every chat can drive it, so
+  // none of this state resets when you switch chats.
   const [pcOpen, setPcOpen] = useState(false);
   const [pcStatus, setPcStatus] = useState<PcStatus>("idle");
   const [pcError, setPcError] = useState<string | null>(null);
@@ -108,17 +113,6 @@ export default function DashboardPage() {
     }
     listRoutinesForChat(user.uid, activeChat.id).then(setRoutines);
   }, [user, activeChat?.id]);
-
-  // Each chat has its own computer, so switching chats resets the panel.
-  useEffect(() => {
-    stopRequested.current = true;
-    setPcOpen(false);
-    setScreenUrl(null);
-    setPcSteps([]);
-    setPcRunning(false);
-    setPcStatus("idle");
-    setPcError(null);
-  }, [activeChat?.id]);
 
   const hasAnyKey = Object.values(apiKeys).some(Boolean);
 
@@ -209,18 +203,20 @@ export default function DashboardPage() {
     }
   }
 
+  // ---- The shared computer ----
+
   async function loadScreen(sandboxId: string) {
-    if (!daytonaKey) {
+    if (!e2bKey) {
       setSettingsOpen(true);
       return;
     }
     setPcStatus("loading");
     setPcError(null);
     try {
-      const res = await fetch("/api/daytona/screen", {
+      const res = await fetch("/api/e2b/screen", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: daytonaKey, sandboxId }),
+        body: JSON.stringify({ apiKey: e2bKey, sandboxId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Could not open the computer's screen.");
@@ -233,43 +229,42 @@ export default function DashboardPage() {
   }
 
   async function handlePcClick() {
-    if (!activeChat || !user) return;
+    if (!user) return;
     setPcMessage(null);
 
     if (pcOpen) {
       setPcOpen(false);
       return;
     }
-    if (!daytonaKey) {
-      setPcMessage("Add a Daytona API key first — opening settings.");
+    if (!e2bKey) {
+      setPcMessage("Add an E2B API key first — opening settings.");
       setSettingsOpen(true);
       return;
     }
     setPcOpen(true);
-    if (activeChat.sandboxId && !screenUrl) {
-      await loadScreen(activeChat.sandboxId);
+    if (pcSandboxId && !screenUrl) {
+      await loadScreen(pcSandboxId);
     }
   }
 
   async function handleStartPc() {
-    if (!activeChat || !user) return;
-    if (!daytonaKey) {
+    if (!user) return;
+    if (!e2bKey) {
       setSettingsOpen(true);
       return;
     }
     setPcStatus("creating");
     setPcError(null);
     try {
-      const res = await fetch("/api/daytona/create", {
+      const res = await fetch("/api/e2b/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: daytonaKey }),
+        body: JSON.stringify({ apiKey: e2bKey }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
 
-      patchChat(activeChat.id, { sandboxId: data.sandboxId });
-      await updateChatSandbox(user.uid, activeChat.id, data.sandboxId);
+      await savePcSandboxId(data.sandboxId);
       await loadScreen(data.sandboxId);
     } catch (err) {
       setPcError(err instanceof Error ? err.message : "Could not create a computer.");
@@ -278,23 +273,22 @@ export default function DashboardPage() {
   }
 
   async function handleDeletePc() {
-    if (!activeChat || !user || !daytonaKey || !activeChat.sandboxId) return;
-    if (!window.confirm("Delete this teammate's computer? Anything saved on it will be lost.")) {
+    if (!user || !e2bKey || !pcSandboxId) return;
+    if (!window.confirm("Delete the shared computer? Anything saved on it will be lost.")) {
       return;
     }
     setPcStatus("loading");
     setPcError(null);
     try {
-      const res = await fetch("/api/daytona/delete", {
+      const res = await fetch("/api/e2b/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: daytonaKey, sandboxId: activeChat.sandboxId }),
+        body: JSON.stringify({ apiKey: e2bKey, sandboxId: pcSandboxId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Could not delete the computer.");
 
-      patchChat(activeChat.id, { sandboxId: "" });
-      await updateChatSandbox(user.uid, activeChat.id, "");
+      await savePcSandboxId(null);
       setScreenUrl(null);
       setPcSteps([]);
       setPcStatus("idle");
@@ -305,7 +299,8 @@ export default function DashboardPage() {
   }
 
   async function handleRunPcTask(task: string) {
-    if (!user || !activeChat || !daytonaKey || !activeChat.sandboxId) return;
+    if (!user || !activeChat || !e2bKey || !pcSandboxId) return;
+    if (pcRunning) return; // one task at a time — it's the same mouse/keyboard for every chat
     const key = apiKeys[activeChat.provider];
     if (!key) {
       setSettingsOpen(true);
@@ -331,12 +326,15 @@ export default function DashboardPage() {
           break;
         }
 
-        const res = await fetch("/api/daytona/step", {
+        // Reconnects to the sandbox fresh every step — if the computer
+        // paused mid-task, this call wakes it back up and carries on from
+        // the same screen, no restart needed.
+        const res = await fetch("/api/e2b/step", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            daytonaKey,
-            sandboxId: activeChat.sandboxId,
+            e2bKey,
+            sandboxId: pcSandboxId,
             provider: activeChat.provider,
             apiKey: key,
             model: activeChat.model,
@@ -369,15 +367,18 @@ export default function DashboardPage() {
       setPcRunning(false);
     }
 
-    // Leave a record in the chat so the work isn't only visible on the screen.
+    // Leave a record in whichever chat kicked the task off, even though the
+    // computer itself is shared.
     const record: ChatMessage[] = [
       ...baseMessages,
-      { role: "user", content: `🖥️ Task on your computer: ${task}`, at: Date.now() },
+      { role: "user", content: `🖥️ Task on the computer: ${task}`, at: Date.now() },
       { role: "assistant", content: summary || "Finished.", at: Date.now() },
     ];
     patchChat(chatId, { messages: record });
     updateChatMessages(user.uid, chatId, record).catch(() => {});
   }
+
+  // ---- Routines ----
 
   async function handleCreateRoutine(input: {
     name: string;
@@ -479,146 +480,145 @@ export default function DashboardPage() {
       />
 
       <div className="flex min-w-0 flex-1">
-      <div className="flex min-w-0 flex-1 flex-col">
-        {activeChat && (
-          <header className="flex items-center justify-between border-b border-line px-6 py-3.5">
-            <div className="flex items-center gap-2.5">
-              <BotAvatar color={activeChat.agentColor} size={26} />
-              <span className="text-sm font-medium text-ink">
-                {activeChat.agentName}
-              </span>
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setRoutinesOpen(true)}
-                title="Routines — teach it once, repeat on a schedule"
-                className="relative rounded-lg p-2 text-muted hover:bg-panel2 hover:text-ink"
-              >
-                <Clock size={17} />
-                {routines.some((r) => r.enabled) && (
-                  <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />
-                )}
-              </button>
-              <button
-                onClick={handlePcClick}
-                title={
-                  pcOpen
-                    ? "Hide this teammate's computer"
-                    : activeChat.sandboxId
-                    ? "Show this teammate's computer"
-                    : "Give this teammate a cloud computer (Daytona)"
-                }
-                className={`relative rounded-lg p-2 hover:bg-panel2 hover:text-ink ${
-                  pcOpen ? "bg-panel2 text-ink" : "text-muted"
-                }`}
-              >
-                <Monitor size={17} />
-                {activeChat.sandboxId && (
-                  <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />
-                )}
-              </button>
-            </div>
-          </header>
-        )}
+        <div className="flex min-w-0 flex-1 flex-col">
+          {activeChat && (
+            <header className="flex items-center justify-between border-b border-line px-6 py-3.5">
+              <div className="flex items-center gap-2.5">
+                <BotAvatar color={activeChat.agentColor} size={26} />
+                <span className="text-sm font-medium text-ink">
+                  {activeChat.agentName}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setRoutinesOpen(true)}
+                  title="Routines — teach it once, repeat on a schedule"
+                  className="relative rounded-lg p-2 text-muted hover:bg-panel2 hover:text-ink"
+                >
+                  <Clock size={17} />
+                  {routines.some((r) => r.enabled) && (
+                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />
+                  )}
+                </button>
+                <button
+                  onClick={handlePcClick}
+                  title={
+                    pcOpen
+                      ? "Hide the team's computer"
+                      : pcSandboxId
+                      ? "Show the team's computer"
+                      : "Give the team a cloud computer"
+                  }
+                  className={`relative rounded-lg p-2 hover:bg-panel2 hover:text-ink ${
+                    pcOpen ? "bg-panel2 text-ink" : "text-muted"
+                  }`}
+                >
+                  <Monitor size={17} />
+                  {pcSandboxId && (
+                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />
+                  )}
+                </button>
+              </div>
+            </header>
+          )}
 
-        {pcMessage && (
-          <div className="flex items-center justify-between border-b border-line bg-panel px-6 py-2 text-xs text-muted">
-            {pcMessage}
-            <button onClick={() => setPcMessage(null)} className="text-faint hover:text-ink">
-              Dismiss
-            </button>
-          </div>
-        )}
+          {pcMessage && (
+            <div className="flex items-center justify-between border-b border-line bg-panel px-6 py-2 text-xs text-muted">
+              {pcMessage}
+              <button onClick={() => setPcMessage(null)} className="text-faint hover:text-ink">
+                Dismiss
+              </button>
+            </div>
+          )}
 
-        {!chatsLoaded ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted">
-            Loading your chats…
-          </div>
-        ) : !hasAnyKey && !keysLoading ? (
-          <FirstKeyGate />
-        ) : !activeChat ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-sm text-ink">Pick a chat, or start a new one.</p>
-            <button
-              onClick={() => setNewChatOpen(true)}
-              className="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
-            >
-              <Plus size={16} /> New chat
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="flex-1 overflow-y-auto px-6 py-6">
-              <div className="mx-auto max-w-2xl">
-                <ChatThread
-                  messages={activeChat.messages}
-                  pending={sending}
-                  onSaveAsRoutine={(text) => {
-                    setRoutinePrefill(text);
-                    setRoutinesOpen(true);
-                  }}
+          {!chatsLoaded ? (
+            <div className="flex flex-1 items-center justify-center text-sm text-muted">
+              Loading your chats…
+            </div>
+          ) : !hasAnyKey && !keysLoading ? (
+            <FirstKeyGate />
+          ) : !activeChat ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+              <p className="text-sm text-ink">Pick a chat, or start a new one.</p>
+              <button
+                onClick={() => setNewChatOpen(true)}
+                className="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+              >
+                <Plus size={16} /> New chat
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex-1 overflow-y-auto px-6 py-6">
+                <div className="mx-auto max-w-2xl">
+                  <ChatThread
+                    messages={activeChat.messages}
+                    pending={sending}
+                    onSaveAsRoutine={(text) => {
+                      setRoutinePrefill(text);
+                      setRoutinesOpen(true);
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="mx-auto w-full max-w-2xl px-6 pb-2">
+                <ModelPicker
+                  provider={activeChat.provider}
+                  model={activeChat.model}
+                  apiKeys={apiKeys}
+                  onChange={handleModelChange}
                 />
               </div>
-            </div>
 
-            <div className="mx-auto w-full max-w-2xl px-6 pb-2">
-              <ModelPicker
-                provider={activeChat.provider}
-                model={activeChat.model}
-                apiKeys={apiKeys}
-                onChange={handleModelChange}
-              />
-            </div>
+              <form
+                onSubmit={handleSend}
+                className="mx-auto flex w-full max-w-2xl items-center gap-2 border-t border-line px-6 py-4"
+              >
+                <button
+                  type="button"
+                  aria-label="Attach"
+                  className="rounded-full p-2 text-muted hover:bg-panel2"
+                >
+                  <Plus size={18} />
+                </button>
+                <input
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={`Message ${activeChat.agentName}`}
+                  className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold"
+                />
+                <button
+                  type="submit"
+                  aria-label="Send"
+                  disabled={!draft.trim() || sending}
+                  className="rounded-full bg-white p-2.5 text-bg hover:opacity-90 disabled:opacity-40"
+                >
+                  <ArrowUp size={16} />
+                </button>
+              </form>
+            </>
+          )}
+        </div>
 
-            <form
-              onSubmit={handleSend}
-              className="mx-auto flex w-full max-w-2xl items-center gap-2 border-t border-line px-6 py-4"
-            >
-              <button
-                type="button"
-                aria-label="Attach"
-                className="rounded-full p-2 text-muted hover:bg-panel2"
-              >
-                <Plus size={18} />
-              </button>
-              <input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={`Message ${activeChat.agentName}`}
-                className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold"
-              />
-              <button
-                type="submit"
-                aria-label="Send"
-                disabled={!draft.trim() || sending}
-                className="rounded-full bg-white p-2.5 text-bg hover:opacity-90 disabled:opacity-40"
-              >
-                <ArrowUp size={16} />
-              </button>
-            </form>
-          </>
+        {pcOpen && (
+          <PcPanel
+            hasComputer={Boolean(pcSandboxId)}
+            status={pcStatus}
+            error={pcError}
+            screenUrl={screenUrl}
+            steps={pcSteps}
+            running={pcRunning}
+            onClose={() => setPcOpen(false)}
+            onStart={handleStartPc}
+            onReload={() => pcSandboxId && loadScreen(pcSandboxId)}
+            onDelete={handleDeletePc}
+            onRunTask={handleRunPcTask}
+            onStop={() => {
+              stopRequested.current = true;
+            }}
+          />
         )}
-      </div>
-
-      {activeChat && pcOpen && (
-        <PcPanel
-          agentName={activeChat.agentName}
-          hasComputer={Boolean(activeChat.sandboxId)}
-          status={pcStatus}
-          error={pcError}
-          screenUrl={screenUrl}
-          steps={pcSteps}
-          running={pcRunning}
-          onClose={() => setPcOpen(false)}
-          onStart={handleStartPc}
-          onReload={() => activeChat.sandboxId && loadScreen(activeChat.sandboxId)}
-          onDelete={handleDeletePc}
-          onRunTask={handleRunPcTask}
-          onStop={() => {
-            stopRequested.current = true;
-          }}
-        />
-      )}
       </div>
 
       <NewChatModal
