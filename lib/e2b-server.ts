@@ -1,4 +1,4 @@
-// Server-only. One E2B Desktop sandbox is shared by the whole account.
+// Server-only. One E2B Desktop sandbox per chat.
 import type { Sandbox as SandboxClass } from "@e2b/desktop";
 
 const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour; extended on every connect
@@ -180,6 +180,9 @@ export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Prom
   } catch (err) {
     const msg = describeError(err, "Could not pause the computer.");
     if (/already.*paus|paused/i.test(msg)) return; // already off
+    if (/not found|404|does not exist|expired/i.test(msg)) {
+      throw new Error(`${GONE_PREFIX}: this computer has expired or was deleted.`);
+    }
     throw new Error(msg);
   }
   throw new Error(
@@ -242,7 +245,66 @@ export type PcAction = {
   amount?: number;
   seconds?: number;
   summary?: string;
+  url?: string;
+  query?: string;
 };
+
+const KEY_ALIASES: Record<string, string> = {
+  enter: "Return",
+  return: "Return",
+  esc: "Escape",
+  escape: "Escape",
+  backspace: "BackSpace",
+  delete: "Delete",
+  del: "Delete",
+  tab: "Tab",
+  space: "space",
+  control: "ctrl",
+  ctrl: "ctrl",
+  alt: "alt",
+  shift: "shift",
+  left: "Left",
+  right: "Right",
+  up: "Up",
+  down: "Down",
+  pageup: "Prior",
+  pagedown: "Next",
+  home: "Home",
+  end: "End",
+};
+
+function normalizeKey(k: string): string {
+  const t = k.trim();
+  return KEY_ALIASES[t.toLowerCase()] ?? t;
+}
+
+function normalizeUrl(input: string): string {
+  const raw = input.trim();
+  if (!raw) throw new Error("open_url needs a url.");
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+  if (!/^https?:\/\//i.test(withScheme)) {
+    throw new Error("Only http(s) links can be opened.");
+  }
+  return withScheme;
+}
+
+/** Opens a link in the computer's default browser — far more reliable than clicking around. */
+async function openUrl(sandbox: DesktopSandbox, url: string) {
+  const d = sandbox as unknown as { open?: (target: string) => Promise<unknown> };
+  try {
+    if (typeof d.open === "function") {
+      await d.open(url);
+      return;
+    }
+  } catch {
+    // fall through to the shell fallback
+  }
+  const safe = url.replace(/'/g, "%27");
+  await loose(sandbox).commands.run(
+    `DISPLAY=:0 nohup xdg-open '${safe}' >/dev/null 2>&1 &`,
+    { timeoutMs: 15_000 }
+  );
+}
 
 export async function performAction(
   apiKey: string,
@@ -276,7 +338,8 @@ export async function performAction(
       return `type "${(action.text ?? "").slice(0, 60)}"`;
     case "key": {
       const keys = action.keys ?? "";
-      await d.press(keys.includes("+") ? keys.split("+") : keys);
+      const parts = keys.includes("+") ? keys.split("+").map(normalizeKey) : normalizeKey(keys);
+      await d.press(parts);
       return `press ${keys}`;
     }
     case "scroll": {
@@ -288,6 +351,20 @@ export async function performAction(
       const seconds = Math.min(Math.max(action.seconds ?? 2, 1), 5);
       await new Promise((r) => setTimeout(r, seconds * 1000));
       return `wait ${seconds}s`;
+    }
+    case "open_url": {
+      const url = normalizeUrl(action.url ?? "");
+      await openUrl(sandbox, url);
+      await new Promise((r) => setTimeout(r, 4000));
+      return `open ${url}`;
+    }
+    case "search": {
+      const q = (action.query ?? "").trim();
+      if (!q) throw new Error("search needs a query.");
+      const url = `https://duckduckgo.com/?q=${encodeURIComponent(q)}`;
+      await openUrl(sandbox, url);
+      await new Promise((r) => setTimeout(r, 4000));
+      return `search "${q.slice(0, 80)}"`;
     }
     default:
       throw new Error(`Unknown action type "${action.type}".`);
