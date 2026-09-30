@@ -21,26 +21,50 @@ const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // Hobby's own ~1h ceiling; pauses (not 
 
 type DesktopSandbox = InstanceType<typeof Sandbox>;
 
-/** Zod (used inside the SDK) puts the real reason in .issues — surface it. */
+/** Zod (used inside the SDK) puts the real reason in .issues — surface it,
+ *  and fall back to the raw error shape rather than a generic message, so a
+ *  failure is diagnosable from the very first try. */
 function describeError(err: unknown, fallback: string): string {
   if (err && typeof err === "object") {
     const issues = (err as { issues?: Array<{ path?: unknown[]; message?: string }> }).issues;
     if (Array.isArray(issues) && issues.length > 0) {
-      const first = issues[0];
-      const field = Array.isArray(first.path) ? first.path.join(".") : "input";
-      return `${field}: ${first.message ?? "invalid value"}`;
+      const parts = issues.map((iss) => {
+        const field = Array.isArray(iss.path) && iss.path.length ? iss.path.join(".") : "input";
+        return `${field}: ${iss.message ?? "invalid value"}`;
+      });
+      return parts.join("; ");
     }
     const message = (err as { message?: string }).message;
-    if (message) return message;
+    const name = (err as { name?: string }).name;
+    const status = (err as { status?: unknown; statusCode?: unknown }).status ??
+      (err as { statusCode?: unknown }).statusCode;
+    if (message) {
+      const prefix = name ? `${name}: ` : "";
+      const suffix = status !== undefined ? ` (status ${status})` : "";
+      return `${prefix}${message}${suffix}`;
+    }
   }
-  return fallback;
+  try {
+    const raw = JSON.stringify(err);
+    if (raw && raw !== "{}") return `${fallback} Raw error: ${raw}`;
+  } catch {
+    // ignore — fall through
+  }
+  return `${fallback} (${String(err)})`;
+}
+
+/** Strips whitespace and accidental wrapping quotes from a pasted key. */
+function cleanKey(apiKey: string): string {
+  return apiKey.trim().replace(/^['"]|['"]$/g, "");
 }
 
 async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   try {
     // Sandbox.connect resumes a paused sandbox automatically — this one
     // call covers both "still running" and "was paused, wake it up".
-    return (await Sandbox.connect(sandboxId, { apiKey } as never)) as unknown as DesktopSandbox;
+    return (await Sandbox.connect(sandboxId, {
+      apiKey: cleanKey(apiKey),
+    } as never)) as unknown as DesktopSandbox;
   } catch (err) {
     throw new Error(describeError(err, "Could not reach the computer."));
   }
@@ -50,7 +74,7 @@ function loose(sandbox: DesktopSandbox) {
   return sandbox as unknown as {
     stream: {
       start: (opts?: Record<string, unknown>) => Promise<unknown>;
-      getUrl: (opts?: Record<string, unknown>) => string | Promise<string>;
+      getUrl: (opts?: Record<string, unknown>) => string;
       isRunning?: () => Promise<boolean>;
     };
     commands: { run: (cmd: string, opts?: Record<string, unknown>) => Promise<unknown> };
@@ -97,7 +121,12 @@ echo provisioned
  * if it doesn't exist yet. Callers persist the returned id on the user's
  * Firestore doc themselves (lib/keys-context.tsx).
  */
-export async function createSandbox(apiKey: string): Promise<string> {
+export async function createSandbox(apiKeyInput: string): Promise<string> {
+  const apiKey = cleanKey(apiKeyInput);
+  if (!apiKey) {
+    throw new Error("The E2B API key is empty after trimming — re-save it in Settings.");
+  }
+
   let sandbox: DesktopSandbox;
   try {
     sandbox = (await Sandbox.create({
@@ -105,7 +134,9 @@ export async function createSandbox(apiKey: string): Promise<string> {
       timeoutMs: IDLE_TIMEOUT_MS,
     } as never)) as unknown as DesktopSandbox;
   } catch (err) {
-    throw new Error(describeError(err, "Could not create a computer."));
+    throw new Error(
+      `${describeError(err, "Could not create a computer.")} [key length: ${apiKey.length}]`
+    );
   }
 
   try {
@@ -141,7 +172,7 @@ export async function getScreenUrl(apiKey: string, sandboxId: string): Promise<s
     if (!/already|running/i.test(message)) throw err;
   }
 
-  const raw = await s.stream.getUrl();
+  const raw = s.stream.getUrl();
   const url = pickString(raw);
   if (!url) throw new Error("E2B didn't return a URL for the live screen.");
   return url;
