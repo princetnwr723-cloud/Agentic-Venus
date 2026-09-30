@@ -18,6 +18,9 @@
     "firebase-admin": "^12.3.1",
     "@e2b/desktop": "latest"
   },
+  "overrides": {
+    "chalk": "4.1.2"
+  },
   "devDependencies": {
     "@types/node": "^20.14.15",
     "@types/react": "^18.3.5",
