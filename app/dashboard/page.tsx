@@ -19,6 +19,7 @@ import {
   createChat,
   updateChatMessages,
   updateChatModel,
+  updateChatPc,
   type Chat,
   type ChatMessage,
 } from "@/lib/chats";
@@ -70,10 +71,32 @@ function defaultProviderAndModel(
 
 const normSite = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
+// ---- Per-chat computer session ----
+
+type PcSession = {
+  status: PcStatus;
+  error: string | null;
+  screenUrl: string | null;
+  steps: string[];
+  running: boolean;
+  request: AgentRequest | null;
+};
+
+const EMPTY_SESSION: PcSession = {
+  status: "idle",
+  error: null,
+  screenUrl: null,
+  steps: [],
+  running: false,
+  request: null,
+};
+
+// ---- Chat → computer commands ----
+
 type PcCommand = { cmd: "start" | "stop" | "task"; arg?: string };
 
-// The chat agent controls the computer by ending its reply with tags like
-// [[PC:task|open Chrome and research X]]. We run them and hide them.
+// The chat agent can control the computer by ending its reply with tags like
+// [[PC:task|open a browser and research X]]. We run them and hide them.
 function extractPcCommands(text: string): { clean: string; cmds: PcCommand[] } {
   const cmds: PcCommand[] = [];
   const clean = text
@@ -87,18 +110,44 @@ function extractPcCommands(text: string): { clean: string; cmds: PcCommand[] } {
 
 const PC_PROMPT = `
 
-You can operate a shared cloud Linux computer (web browser, VS Code) on the user's behalf. Whenever a request needs it — browsing, web research, logging into sites, working with files or apps — finish your reply with a line like:
+You can operate this chat's own cloud Linux computer (web browser) on the user's behalf. Whenever a request needs it — browsing, web research, news, logging into sites, working with files or apps — finish your reply with a line like:
 [[PC:task|<a clear, complete instruction for the computer agent>]]
 To turn the computer on: [[PC:start]]. To shut it down while keeping everything saved: [[PC:stop]].
 Only use these tags when they are actually needed, and never explain the tag syntax to the user. The computer agent asks the user itself for logins and one-time codes, so don't ask for passwords in chat.`;
+
+// Plain "pc on / pc band kr do" messages are handled directly, so they work
+// with any chat model (even ones that ignore the tag instructions).
+const START_WORDS = ["on", "start", "chalu", "chalao", "chala", "resume", "wake", "open", "kholo", "khol", "shuru", "launch", "boot"];
+const STOP_WORDS = ["off", "stop", "shutdown", "pause", "close", "band", "bandh", "bund", "sleep"];
+
+function detectPcIntent(text: string): "start" | "stop" | null {
+  const t = text.toLowerCase();
+  if (t.length > 70) return null; // long messages are tasks, not commands
+  const words = t.split(/[^a-z\u0900-\u097f]+/).filter(Boolean);
+  const mentionsPc =
+    words.some((w) => ["pc", "computer", "desktop", "sandbox", "comp"].includes(w)) ||
+    /कंप्यूटर|पीसी/.test(t);
+  if (!mentionsPc) return null;
+  if (words.some((w) => STOP_WORDS.includes(w)) || /बंद/.test(t)) return "stop";
+  if (words.some((w) => START_WORDS.includes(w)) || /चालू|शुरू/.test(t)) return "start";
+  return null;
+}
+
+function stuckHint(history: string[]): string | undefined {
+  const last = history
+    .slice(-3)
+    .map((l) => l.split("→").pop()?.trim() ?? "");
+  if (last.length === 3 && last[0] && last[0] === last[1] && last[1] === last[2]) {
+    return "You repeated the same action 3 times with no progress. Do something different: use search or open_url, or a keyboard shortcut, instead of clicking again.";
+  }
+  return undefined;
+}
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
   const {
     apiKeys,
     e2bKey,
-    pcSandboxId,
-    savePcSandboxId,
     pcCredentials,
     savePcCredential,
     loading: keysLoading,
@@ -116,34 +165,37 @@ export default function DashboardPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pcMessage, setPcMessage] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState(false);
+  // When on, whatever you type is given straight to the computer as a task.
+  const [computerMode, setComputerMode] = useState(false);
 
-  // ONE shared computer for the whole account.
   const [pcOpen, setPcOpen] = useState(false);
   const [pcFullscreen, setPcFullscreen] = useState(false);
-  const [pcStatus, setPcStatus] = useState<PcStatus>("idle");
-  const [pcError, setPcError] = useState<string | null>(null);
-  const [screenUrl, setScreenUrl] = useState<string | null>(null);
-  const [pcSteps, setPcSteps] = useState<string[]>([]);
-  const [pcRunning, setPcRunning] = useState(false);
-  const [pcRequest, setPcRequest] = useState<AgentRequest | null>(null);
+  const [sessions, setSessions] = useState<Record<string, PcSession>>({});
 
-  const stopRequested = useRef(false);
-  const pcRunningRef = useRef(false);
-  const sandboxIdRef = useRef<string | null>(null);
-  const statusRef = useRef<PcStatus>("idle");
-  const resolverRef = useRef<((r: RequestReply) => void) | null>(null);
-
-  useEffect(() => {
-    sandboxIdRef.current = pcSandboxId;
-  }, [pcSandboxId]);
-  useEffect(() => {
-    statusRef.current = pcStatus;
-  }, [pcStatus]);
+  // Refs so long-running async loops always see the latest values.
+  const sessionsRef = useRef<Record<string, PcSession>>({});
+  const sandboxRef = useRef<Record<string, string | null>>({});
+  const runningRef = useRef<Record<string, boolean>>({});
+  const stopRef = useRef<Record<string, boolean>>({});
+  const resolverRef = useRef<Record<string, ((r: RequestReply) => void) | null>>({});
+  const chatsRef = useRef<Chat[]>([]);
+  const activeIdRef = useRef<string | null>(null);
 
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [routinesOpen, setRoutinesOpen] = useState(false);
   const [routinePrefill, setRoutinePrefill] = useState<string | null>(null);
   const [runningRoutineId, setRunningRoutineId] = useState<string | null>(null);
+
+  useEffect(() => {
+    chatsRef.current = chats;
+    for (const c of chats) {
+      if (!(c.id in sandboxRef.current)) sandboxRef.current[c.id] = c.pcSandboxId ?? null;
+    }
+  }, [chats]);
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   useEffect(() => {
     if (!authLoading && !user) router.replace("/");
@@ -180,6 +232,40 @@ export default function DashboardPage() {
     setChats((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   }
 
+  // Appends messages to the LATEST version of a chat, so a long computer
+  // task finishing never overwrites messages sent while it was running.
+  function appendMessages(chatId: string, msgs: ChatMessage[]) {
+    if (!user) return;
+    const base = chatsRef.current.find((c) => c.id === chatId)?.messages ?? [];
+    const next = [...base, ...msgs];
+    chatsRef.current = chatsRef.current.map((c) =>
+      c.id === chatId ? { ...c, messages: next } : c
+    );
+    patchChat(chatId, { messages: next });
+    updateChatMessages(user.uid, chatId, next).catch(() => {});
+  }
+
+  function patchSession(
+    chatId: string,
+    patch: Partial<PcSession> | ((s: PcSession) => Partial<PcSession>)
+  ) {
+    const cur = sessionsRef.current[chatId] ?? EMPTY_SESSION;
+    const p = typeof patch === "function" ? patch(cur) : patch;
+    const next = { ...sessionsRef.current, [chatId]: { ...cur, ...p } };
+    sessionsRef.current = next;
+    setSessions(next);
+  }
+
+  function pushStep(chatId: string, line: string) {
+    patchSession(chatId, (s) => ({ steps: [...s.steps, line] }));
+  }
+
+  function setSandboxId(chatId: string, id: string | null) {
+    sandboxRef.current[chatId] = id;
+    patchChat(chatId, { pcSandboxId: id });
+    if (user) updateChatPc(user.uid, chatId, id).catch(() => {});
+  }
+
   async function handlePickAgent(agent: { name: string; color: AvatarColor }) {
     if (!user) return;
     const { provider, model } = defaultProviderAndModel(apiKeys);
@@ -207,15 +293,15 @@ export default function DashboardPage() {
     await updateChatModel(user.uid, activeChat.id, provider, model);
   }
 
-  // ---- The shared computer ----
+  // ---- This chat's computer ----
 
-  async function loadScreen(sandboxId: string): Promise<boolean> {
+  // Opens the live screen. Also wakes the computer if it was paused.
+  async function loadScreen(chatId: string, sandboxId: string): Promise<"ok" | "gone" | "error"> {
     if (!e2bKey) {
       setSettingsOpen(true);
-      return false;
+      return "error";
     }
-    setPcStatus("loading");
-    setPcError(null);
+    patchSession(chatId, { status: "loading", error: null });
     try {
       const res = await fetch("/api/e2b/screen", {
         method: "POST",
@@ -224,25 +310,33 @@ export default function DashboardPage() {
       });
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not open the computer's screen.");
-      setScreenUrl(data.url);
-      setPcStatus("ready");
-      return true;
+      patchSession(chatId, { screenUrl: data.url, status: "ready" });
+      return "ok";
     } catch (err) {
-      setPcError(err instanceof Error ? err.message : "Could not open the computer's screen.");
-      setPcStatus("error");
-      return false;
+      const msg = err instanceof Error ? err.message : "Could not open the computer's screen.";
+      if (msg.includes("SANDBOX_GONE")) {
+        setSandboxId(chatId, null);
+        patchSession(chatId, {
+          status: "error",
+          screenUrl: null,
+          error: "Is chat ka purana computer expire ho gaya tha. Naya bana lo (Create computer).",
+        });
+        return "gone";
+      }
+      patchSession(chatId, { status: "error", error: msg });
+      return "error";
     }
   }
 
-  async function createPc(): Promise<string | null> {
+  async function createPc(chatId: string): Promise<string | null> {
     if (!user) return null;
     if (!e2bKey) {
       setSettingsOpen(true);
       return null;
     }
-    setPcOpen(true);
-    setPcStatus("creating");
-    setPcError(null);
+    if (sessionsRef.current[chatId]?.status === "creating") return null;
+    if (activeIdRef.current === chatId) setPcOpen(true);
+    patchSession(chatId, { status: "creating", error: null, screenUrl: null });
     try {
       const res = await fetch("/api/e2b/create", {
         method: "POST",
@@ -252,40 +346,45 @@ export default function DashboardPage() {
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
 
-      sandboxIdRef.current = data.sandboxId;
-      await savePcSandboxId(data.sandboxId);
-      const ok = await loadScreen(data.sandboxId);
-      return ok ? (data.sandboxId as string) : null;
+      setSandboxId(chatId, data.sandboxId);
+      const r = await loadScreen(chatId, data.sandboxId);
+      return r === "ok" ? (data.sandboxId as string) : null;
     } catch (err) {
-      setPcError(err instanceof Error ? err.message : "Could not create a computer.");
-      setPcStatus("error");
+      patchSession(chatId, {
+        status: "error",
+        error: err instanceof Error ? err.message : "Could not create a computer.",
+      });
       return null;
     }
   }
 
-  // Creates the computer if there is none, wakes it if it's off.
-  async function startOrResumePc(): Promise<string | null> {
+  // Creates the computer if this chat has none, wakes it if it is off.
+  async function startOrResumePc(chatId: string): Promise<string | null> {
     if (!e2bKey) {
       setSettingsOpen(true);
       return null;
     }
-    setPcOpen(true);
-    const id = sandboxIdRef.current;
-    if (!id) return createPc();
-    if (statusRef.current === "ready") return id;
-    const ok = await loadScreen(id);
-    return ok ? id : null;
+    if (activeIdRef.current === chatId) setPcOpen(true);
+    const id = sandboxRef.current[chatId] ?? null;
+    if (!id) return createPc(chatId);
+    if (sessionsRef.current[chatId]?.status === "ready") return id;
+    const r = await loadScreen(chatId, id);
+    if (r === "ok") return id;
+    if (r === "gone") return createPc(chatId);
+    return null;
   }
 
-  async function pausePc() {
-    const id = sandboxIdRef.current;
-    if (!user || !e2bKey || !id) return;
-    if (pcRunningRef.current) {
-      setPcMessage("Stop the running task first, then turn the computer off.");
-      return;
+  // Turns the computer off; everything on it stays saved.
+  async function pausePc(chatId: string): Promise<{ ok: boolean; error?: string }> {
+    const id = sandboxRef.current[chatId] ?? null;
+    if (!user || !e2bKey || !id) return { ok: false, error: "Is chat ka computer abhi bana hi nahi hai." };
+    if (runningRef.current[chatId]) {
+      const error = "Pehle chalta hua task Stop karo, phir computer band hoga.";
+      setPcMessage(error);
+      return { ok: false, error };
     }
-    setPcStatus("loading");
-    setPcError(null);
+    const prev = sessionsRef.current[chatId]?.status ?? "idle";
+    patchSession(chatId, { status: "loading", error: null });
     try {
       const res = await fetch("/api/e2b/pause", {
         method: "POST",
@@ -294,81 +393,92 @@ export default function DashboardPage() {
       });
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not turn the computer off.");
-      setScreenUrl(null);
-      setPcStatus("paused");
+      patchSession(chatId, { screenUrl: null, status: "paused" });
+      return { ok: true };
     } catch (err) {
-      setPcError(err instanceof Error ? err.message : "Could not turn the computer off.");
-      setPcStatus("error");
+      const msg = err instanceof Error ? err.message : "Could not turn the computer off.";
+      if (msg.includes("SANDBOX_GONE")) {
+        setSandboxId(chatId, null);
+        patchSession(chatId, { status: "idle", screenUrl: null, error: null });
+        return { ok: true }; // it's already off/gone
+      }
+      // The computer is still running — put the panel back the way it was.
+      patchSession(chatId, { status: prev === "loading" ? "ready" : prev, error: msg });
+      setPcMessage(`⚠️ Computer band nahi ho paya: ${msg}`);
+      return { ok: false, error: msg };
     }
   }
 
-  async function handlePcClick() {
-    if (!user) return;
-    setPcMessage(null);
+  async function deletePc(chatId: string) {
+    const id = sandboxRef.current[chatId] ?? null;
+    if (!user || !e2bKey || !id) return;
+    if (!window.confirm("Is chat ka computer hamesha ke liye delete karein? Usme saved sab kuch chala jayega.")) {
+      return;
+    }
+    patchSession(chatId, { status: "loading", error: null });
+    try {
+      const res = await fetch("/api/e2b/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: e2bKey, sandboxId: id }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data?.error || "Could not delete the computer.");
 
+      setSandboxId(chatId, null);
+      patchSession(chatId, { screenUrl: null, steps: [], status: "idle", error: null });
+      setPcFullscreen(false);
+    } catch (err) {
+      patchSession(chatId, {
+        status: "error",
+        error: err instanceof Error ? err.message : "Could not delete the computer.",
+      });
+    }
+  }
+
+  function handlePcClick() {
+    setPcMessage(null);
     if (pcOpen) {
       setPcOpen(false);
       setPcFullscreen(false);
       return;
     }
     if (!e2bKey) {
-      setPcMessage("Add an E2B API key first — opening settings.");
+      setPcMessage("Pehle E2B API key add karo — settings khol raha hoon.");
       setSettingsOpen(true);
       return;
     }
     setPcOpen(true);
-    if (pcSandboxId && !screenUrl && pcStatus !== "paused") {
-      await loadScreen(pcSandboxId);
-    }
   }
 
-  async function handleDeletePc() {
-    if (!user || !e2bKey || !pcSandboxId) return;
-    if (!window.confirm("Delete the shared computer for good? Anything saved on it will be lost.")) {
-      return;
-    }
-    setPcStatus("loading");
-    setPcError(null);
-    try {
-      const res = await fetch("/api/e2b/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: e2bKey, sandboxId: pcSandboxId }),
-      });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data?.error || "Could not delete the computer.");
-
-      sandboxIdRef.current = null;
-      await savePcSandboxId(null);
-      setScreenUrl(null);
-      setPcSteps([]);
-      setPcFullscreen(false);
-      setPcStatus("idle");
-    } catch (err) {
-      setPcError(err instanceof Error ? err.message : "Could not delete the computer.");
-      setPcStatus("error");
-    }
-  }
+  // When the panel is open and you switch to a chat that has a computer, show its screen.
+  useEffect(() => {
+    if (!pcOpen || !activeChat || !e2bKey) return;
+    const id = activeChat.pcSandboxId ?? null;
+    const s = sessionsRef.current[activeChat.id] ?? EMPTY_SESSION;
+    if (id && s.status === "idle") void loadScreen(activeChat.id, id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pcOpen, activeChat?.id]);
 
   // ---- Agent asks the user something (login box, OTP, choices) ----
 
-  function askUser(req: AgentRequest): Promise<RequestReply> {
+  function askUser(chatId: string, req: AgentRequest): Promise<RequestReply> {
     return new Promise((resolve) => {
-      resolverRef.current = resolve;
-      setPcRequest(req);
+      resolverRef.current[chatId] = resolve;
+      patchSession(chatId, { request: req });
     });
   }
 
-  function handleReply(r: RequestReply) {
-    const resolve = resolverRef.current;
-    resolverRef.current = null;
-    setPcRequest(null);
+  function handleReply(chatId: string, r: RequestReply) {
+    const resolve = resolverRef.current[chatId];
+    resolverRef.current[chatId] = null;
+    patchSession(chatId, { request: null });
     resolve?.(r);
   }
 
-  function handleStop() {
-    stopRequested.current = true;
-    handleReply({ type: "answer", text: "" }); // unblocks a pending question
+  function handleStop(chatId: string) {
+    stopRef.current[chatId] = true;
+    handleReply(chatId, { type: "answer", text: "" }); // unblocks a pending question
   }
 
   function findCredential(site: string): SavedLogin | null {
@@ -382,48 +492,48 @@ export default function DashboardPage() {
     return null;
   }
 
-  // ---- Running a task on the computer ----
+  // ---- Running a task on this chat's computer ----
 
-  async function runPcTask(
-    task: string,
-    chat: Chat,
-    baseMessages: ChatMessage[]
-  ): Promise<ChatMessage[]> {
-    if (!user || !e2bKey) return baseMessages;
-    if (pcRunningRef.current) {
-      setPcMessage("The computer is busy with another task — one at a time.");
-      return baseMessages;
+  async function runPcTask(chat: Chat, task: string, logTask: boolean) {
+    const chatId = chat.id;
+    if (!user || !e2bKey) return;
+    if (runningRef.current[chatId]) {
+      setPcMessage("Is chat ka computer abhi ek task chala raha hai — ek time pe ek hi task.");
+      return;
     }
     const key = apiKeys[chat.provider];
     if (!key) {
       setSettingsOpen(true);
-      return baseMessages;
+      return;
     }
 
-    pcRunningRef.current = true;
-    stopRequested.current = false;
-    setPcRunning(true);
-    setPcOpen(true);
-    setPcSteps([`▶ ${task}`]);
+    runningRef.current[chatId] = true;
+    stopRef.current[chatId] = false;
+    patchSession(chatId, { running: true, steps: [`▶ ${task}`], request: null });
+    if (activeIdRef.current === chatId) setPcOpen(true);
 
     const MAX_ACTIONS = 40;
     const history: string[] = [];
+    const notes: string[] = [];
     let creds: SavedLogin | null = null;
     let summary = "";
+    let invalidStreak = 0;
 
     try {
-      if (!sandboxIdRef.current || statusRef.current !== "ready") {
-        const id = await startOrResumePc();
-        if (!id) throw new Error("The computer couldn't be started — see the panel for the reason.");
+      const startedId = await startOrResumePc(chatId);
+      if (!startedId) {
+        throw new Error(
+          sessionsRef.current[chatId]?.error || "Computer start nahi ho paya — panel mein wajah dekho."
+        );
       }
 
       let actions = 0;
       let guard = 0;
-      while (actions < MAX_ACTIONS && guard < 150) {
+      while (actions < MAX_ACTIONS && guard < 160) {
         guard++;
-        if (stopRequested.current) {
+        if (stopRef.current[chatId]) {
           summary = "Stopped before finishing.";
-          setPcSteps((prev) => [...prev, "■ Stopped."]);
+          pushStep(chatId, "■ Stopped.");
           break;
         }
 
@@ -432,12 +542,16 @@ export default function DashboardPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             e2bKey,
-            sandboxId: sandboxIdRef.current,
+            sandboxId: sandboxRef.current[chatId],
             provider: chat.provider,
             apiKey: key,
             model: chat.model,
             task,
             history: history.slice(-14),
+            notes: notes.slice(-20),
+            hint: stuckHint(history),
+            stepNo: actions + 1,
+            maxSteps: MAX_ACTIONS,
             creds: creds ?? undefined,
           }),
         });
@@ -446,18 +560,28 @@ export default function DashboardPage() {
 
         // The old computer expired (1h limit) and a fresh one was started.
         if (data.newSandboxId) {
-          sandboxIdRef.current = data.newSandboxId;
-          await savePcSandboxId(data.newSandboxId);
-          setScreenUrl(null);
-          await loadScreen(data.newSandboxId);
+          setSandboxId(chatId, data.newSandboxId);
+          patchSession(chatId, { screenUrl: null });
+          await loadScreen(chatId, data.newSandboxId);
           history.push(data.actionText);
-          setPcSteps((prev) => [...prev, `↻ ${data.actionText}`]);
+          pushStep(chatId, `↻ ${data.actionText}`);
           continue;
         }
 
+        if (data.invalid) {
+          invalidStreak++;
+          if (invalidStreak >= 4) {
+            throw new Error(
+              "Model baar-baar galat format mein jawab de raha hai. Chat ke model picker se koi strong vision model chuno (Claude Sonnet / GPT-4o)."
+            );
+          }
+          continue;
+        }
+        invalidStreak = 0;
+
         if (data.done) {
           summary = data.summary || "Done.";
-          setPcSteps((prev) => [...prev, `✓ ${summary}`]);
+          pushStep(chatId, `✓ ${summary}`);
           break;
         }
 
@@ -473,8 +597,8 @@ export default function DashboardPage() {
             const site = ask.site || "this site";
             let cred = findCredential(site);
             if (!cred) {
-              const reply = await askUser({ kind: "login", site });
-              if (stopRequested.current) continue;
+              const reply = await askUser(chatId, { kind: "login", site });
+              if (stopRef.current[chatId]) continue;
               if (reply.type === "login") {
                 cred = { email: reply.email, password: reply.password };
                 if (reply.remember) {
@@ -487,70 +611,73 @@ export default function DashboardPage() {
               history.push(
                 `Login details for ${site} are ready. Click the email/username field and use type_secret with field "email", then click the password field and use type_secret with field "password", then submit.`
               );
-              setPcSteps((prev) => [...prev, `🔑 Login details ready for ${site}`]);
+              pushStep(chatId, `🔑 Login details ready for ${site}`);
             } else {
-              setPcSteps((prev) => [...prev, `✋ Waiting while you log in to ${site} yourself…`]);
-              await askUser({
+              pushStep(chatId, `✋ Waiting while you log in to ${site} yourself…`);
+              await askUser(chatId, {
                 kind: "handoff",
-                message: `Log in to ${site} on the computer (you have control now), then press continue.`,
+                message: `Computer pe ${site} mein login karo (control ab tumhare paas hai), phir Continue dabao.`,
               });
-              if (stopRequested.current) continue;
+              if (stopRef.current[chatId]) continue;
               history.push(`The user logged in to ${site} themselves. Continue the task.`);
             }
           } else {
             const q = ask.question || "The agent needs your input.";
             const reply = await askUser(
+              chatId,
               ask.kind === "choice"
                 ? { kind: "choice", question: q, options: ask.options ?? [] }
                 : { kind: "text", question: q }
             );
-            if (stopRequested.current) continue;
+            if (stopRef.current[chatId]) continue;
             const answer = reply.type === "answer" ? reply.text : "";
             history.push(`Asked the user: "${q}" → the user answered: "${answer}"`);
-            setPcSteps((prev) => [...prev, `❓ ${q} → ${answer}`]);
+            pushStep(chatId, `❓ ${q} → ${answer}`);
           }
           continue;
         }
 
+        if (data.note) notes.push(String(data.note));
+
         actions++;
         const line = `${actions}. ${data.thought ? data.thought + " → " : ""}${data.actionText}`;
         history.push(line);
-        setPcSteps((prev) => [...prev, line]);
+        pushStep(chatId, line);
       }
 
       if (!summary) {
-        summary = "Hit the step limit before finishing — the screen shows where it got to.";
-        setPcSteps((prev) => [...prev, `… ${summary}`]);
+        summary = "Step limit tak pahunch gaya — screen pe dikh raha hai kahan tak pahuncha.";
+        pushStep(chatId, `… ${summary}`);
       }
     } catch (err) {
       summary = `⚠️ ${err instanceof Error ? err.message : "The task failed."}`;
-      setPcSteps((prev) => [...prev, summary]);
+      pushStep(chatId, summary);
     } finally {
-      pcRunningRef.current = false;
-      setPcRunning(false);
-      resolverRef.current = null;
-      setPcRequest(null);
+      runningRef.current[chatId] = false;
+      resolverRef.current[chatId] = null;
+      patchSession(chatId, { running: false, request: null });
     }
 
-    const record: ChatMessage[] = [
-      ...baseMessages,
-      { role: "user", content: `🖥️ Task on the computer: ${task}`, at: Date.now() },
-      { role: "assistant", content: summary || "Finished.", at: Date.now() },
-    ];
-    patchChat(chat.id, { messages: record });
-    updateChatMessages(user.uid, chat.id, record).catch(() => {});
-    return record;
+    const at = Date.now();
+    appendMessages(
+      chatId,
+      logTask
+        ? [
+            { role: "user", content: `🖥️ Task on the computer: ${task}`, at },
+            { role: "assistant", content: summary || "Finished.", at },
+          ]
+        : [{ role: "assistant", content: summary || "Finished.", at }]
+    );
   }
 
-  async function runPcCommands(cmds: PcCommand[], chat: Chat, base: ChatMessage[]) {
-    let msgs = base;
+  async function runPcCommands(cmds: PcCommand[], chat: Chat) {
     for (const c of cmds) {
       if (c.cmd === "start") {
-        await startOrResumePc();
+        await startOrResumePc(chat.id);
       } else if (c.cmd === "stop") {
-        await pausePc();
+        await pausePc(chat.id);
       } else if (c.cmd === "task" && c.arg) {
-        msgs = await runPcTask(c.arg, chat, msgs);
+        await runPcTask(chat, c.arg, true);
       }
     }
   }
@@ -562,23 +689,66 @@ export default function DashboardPage() {
     const text = draft.trim();
     if (!text || !user || !activeChat || sending) return;
 
-    const key = apiKeys[activeChat.provider];
-    if (!key) {
+    const chat = activeChat;
+    const intent = e2bKey ? detectPcIntent(text) : null;
+    const key = apiKeys[chat.provider];
+
+    if (!intent && !key) {
       setSettingsOpen(true);
       return;
     }
 
-    const chat = activeChat;
-    const userMsg: ChatMessage = { role: "user", content: text, at: Date.now() };
-    const afterUser = [...chat.messages, userMsg];
-    patchChat(chat.id, { messages: afterUser });
+    appendMessages(chat.id, [{ role: "user", content: text, at: Date.now() }]);
     setDraft("");
+
+    // 1) "pc on kro" / "pc band kr do" — handled directly.
+    if (intent) {
+      setSending(true);
+      let reply: string;
+      try {
+        if (intent === "start") {
+          const id = await startOrResumePc(chat.id);
+          reply = id
+            ? "✅ Computer on hai — screen panel mein dikh rahi hai."
+            : `⚠️ Computer on nahi ho paya: ${sessionsRef.current[chat.id]?.error ?? "unknown error"}`;
+        } else {
+          const r = await pausePc(chat.id);
+          reply = r.ok
+            ? sandboxRef.current[chat.id]
+              ? "✅ Computer band kar diya. Files, apps aur logins saved hain — dobara on karoge to wahin se chalega."
+              : "✅ Is chat ka computer already band/expire hai."
+            : `⚠️ ${r.error ?? "Computer band nahi ho paya."}`;
+        }
+      } catch (err) {
+        reply = `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`;
+      } finally {
+        setSending(false);
+      }
+      appendMessages(chat.id, [{ role: "assistant", content: reply, at: Date.now() }]);
+      return;
+    }
+
+    // 2) Computer mode — the message IS the task.
+    if (computerMode && e2bKey) {
+      appendMessages(chat.id, [
+        {
+          role: "assistant",
+          content: "On it — computer pe kaam shuru kar raha hoon. Progress panel mein dikhega.",
+          at: Date.now(),
+        },
+      ]);
+      void runPcTask(chat, text, false);
+      return;
+    }
+
+    // 3) Normal chat; the model may add [[PC:...]] tags.
     setSending(true);
-    updateChatMessages(user.uid, chat.id, afterUser).catch(() => {});
-
-    let pending: { cmds: PcCommand[]; base: ChatMessage[] } | null = null;
-
+    let cmds: PcCommand[] = [];
     try {
+      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -586,7 +756,7 @@ export default function DashboardPage() {
           provider: chat.provider,
           apiKey: key,
           model: chat.model,
-          messages: afterUser.map((m) => ({ role: m.role, content: m.content })),
+          messages: history,
           systemPrompt:
             `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
             (e2bKey ? PC_PROMPT : ""),
@@ -595,39 +765,30 @@ export default function DashboardPage() {
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Request failed.");
 
-      const { clean, cmds } = extractPcCommands(String(data.reply ?? ""));
-      const botMsg: ChatMessage = {
-        role: "assistant",
-        content: clean || (cmds.length ? "On it — working on the computer." : "…"),
-        at: Date.now(),
-      };
-      const afterReply = [...afterUser, botMsg];
-      patchChat(chat.id, { messages: afterReply });
-      await updateChatMessages(user.uid, chat.id, afterReply);
-      if (cmds.length > 0) pending = { cmds, base: afterReply };
+      const parsed = extractPcCommands(String(data.reply ?? ""));
+      cmds = parsed.cmds;
+      appendMessages(chat.id, [
+        {
+          role: "assistant",
+          content: parsed.clean || (cmds.length ? "On it — computer pe kaam kar raha hoon." : "…"),
+          at: Date.now(),
+        },
+      ]);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong.";
-      const errMsg: ChatMessage = {
-        role: "assistant",
-        content: `⚠️ ${message}`,
-        at: Date.now(),
-      };
-      const afterError = [...afterUser, errMsg];
-      patchChat(chat.id, { messages: afterError });
-      await updateChatMessages(user.uid, chat.id, afterError);
+      appendMessages(chat.id, [{ role: "assistant", content: `⚠️ ${message}`, at: Date.now() }]);
     } finally {
       setSending(false);
     }
 
-    // Run the computer commands after the chat reply is shown (not awaited,
-    // so the chat stays usable while the agent works).
-    if (pending) void runPcCommands(pending.cmds, chat, pending.base);
+    // Not awaited, so the chat stays usable while the agent works.
+    if (cmds.length > 0) void runPcCommands(cmds, chat);
   }
 
   // Manual task typed into the computer panel.
   function handleRunPcTask(task: string) {
     if (!activeChat) return;
-    void runPcTask(task, activeChat, activeChat.messages);
+    void runPcTask(activeChat, task, true);
   }
 
   // ---- Routines ----
@@ -681,13 +842,10 @@ export default function DashboardPage() {
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Routine run failed.");
 
-      const afterRoutine = [
-        ...activeChat.messages,
-        { role: "user" as const, content: `🔁 Routine: ${routine.name}`, at: Date.now() },
-        { role: "assistant" as const, content: data.reply, at: Date.now() },
-      ];
-      patchChat(activeChat.id, { messages: afterRoutine });
-      await updateChatMessages(user.uid, activeChat.id, afterRoutine);
+      appendMessages(activeChat.id, [
+        { role: "user", content: `🔁 Routine: ${routine.name}`, at: Date.now() },
+        { role: "assistant", content: data.reply, at: Date.now() },
+      ]);
       await recordManualRun(user.uid, routine.id, data.reply);
       setRoutines((prev) =>
         prev.map((r) =>
@@ -718,6 +876,9 @@ export default function DashboardPage() {
       </div>
     );
   }
+
+  const session: PcSession = activeChat ? sessions[activeChat.id] ?? EMPTY_SESSION : EMPTY_SESSION;
+  const activeSandboxId = activeChat?.pcSandboxId ?? null;
 
   return (
     <div className="flex h-screen bg-bg">
@@ -765,20 +926,20 @@ export default function DashboardPage() {
                   onClick={handlePcClick}
                   title={
                     pcOpen
-                      ? "Hide the team's computer"
-                      : pcSandboxId
-                      ? "Show the team's computer"
-                      : "Give the team a cloud computer"
+                      ? "Hide this chat's computer"
+                      : activeSandboxId
+                      ? "Show this chat's computer"
+                      : "Give this chat a cloud computer"
                   }
                   className={`relative rounded-lg p-2 hover:bg-panel2 hover:text-ink ${
                     pcOpen ? "bg-panel2 text-ink" : "text-muted"
                   }`}
                 >
                   <Monitor size={17} />
-                  {pcSandboxId && (
+                  {activeSandboxId && (
                     <span
                       className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${
-                        pcStatus === "paused" ? "bg-faint" : "bg-avatar-teal"
+                        session.status === "paused" ? "bg-faint" : "bg-avatar-teal"
                       }`}
                     />
                   )}
@@ -847,10 +1008,32 @@ export default function DashboardPage() {
                 >
                   <Plus size={18} />
                 </button>
+                {e2bKey && (
+                  <button
+                    type="button"
+                    onClick={() => setComputerMode((v) => !v)}
+                    aria-pressed={computerMode}
+                    title={
+                      computerMode
+                        ? "Computer mode ON — your message goes straight to the computer as a task"
+                        : "Computer mode — send your message straight to the computer as a task"
+                    }
+                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-2 text-xs ${
+                      computerMode
+                        ? "bg-gold font-medium text-bg"
+                        : "text-muted hover:bg-panel2 hover:text-ink"
+                    }`}
+                  >
+                    <Monitor size={15} />
+                    {computerMode && "Computer"}
+                  </button>
+                )}
                 <input
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder={`Message ${activeChat.agentName}`}
+                  placeholder={
+                    computerMode ? "Computer ko task do…" : `Message ${activeChat.agentName}`
+                  }
                   className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold"
                 />
                 <button
@@ -866,30 +1049,32 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {pcOpen && (
+        {pcOpen && activeChat && (
           <PcPanel
-            hasComputer={Boolean(pcSandboxId)}
-            status={pcStatus}
-            error={pcError}
-            screenUrl={screenUrl}
-            steps={pcSteps}
-            running={pcRunning}
-            request={pcRequest}
+            key={activeChat.id}
+            hasComputer={Boolean(activeSandboxId)}
+            status={session.status}
+            error={session.error}
+            screenUrl={session.screenUrl}
+            steps={session.steps}
+            running={session.running}
+            request={session.request}
             fullscreen={pcFullscreen}
             wide={focusMode}
             onClose={() => {
               setPcOpen(false);
               setPcFullscreen(false);
             }}
-            onStart={() => void createPc()}
+            onStart={() => void createPc(activeChat.id)}
             onReload={() => {
-              if (pcSandboxId) void loadScreen(pcSandboxId);
+              const id = sandboxRef.current[activeChat.id];
+              if (id) void loadScreen(activeChat.id, id);
             }}
-            onPause={() => void pausePc()}
-            onDelete={handleDeletePc}
+            onPause={() => void pausePc(activeChat.id)}
+            onDelete={() => void deletePc(activeChat.id)}
             onRunTask={handleRunPcTask}
-            onStop={handleStop}
-            onReply={handleReply}
+            onStop={() => handleStop(activeChat.id)}
+            onReply={(r) => handleReply(activeChat.id, r)}
             onToggleFullscreen={() => setPcFullscreen((v) => !v)}
           />
         )}
