@@ -27,37 +27,49 @@ const ALLOWED = new Set([
   "key",
   "scroll",
   "wait",
+  "open_url",
+  "search",
+  "note",
   "done",
   "need_login",
   "type_secret",
   "ask_user",
 ]);
 
-function systemPrompt(width: number, height: number) {
-  return `You are an AI agent operating a Linux desktop (a web browser is available, VS Code may be installed) by looking at screenshots. The screenshot is ${width}x${height} pixels; give coordinates in that pixel space, with (0,0) at the top-left.
+function systemPrompt(width: number, height: number, maxSteps: number) {
+  return `You are an AI agent that operates a Linux desktop (with a web browser) by looking at screenshots. The screenshot is ${width}x${height} pixels. All coordinates are ABSOLUTE PIXELS in that space, with (0,0) at the top-left. Never use normalized values (0-1 or 0-1000).
 
 Reply with ONE JSON object only — no prose, no markdown fences:
-{"thought": "<one short sentence>", "action": {...}}
+{"observation":"<what is on the screen right now, and does it match the goal?>","thought":"<your next step and why, one sentence>","action":{...}}
 
-Actions:
+PREFERRED ACTIONS (fast and reliable — use these instead of clicking around):
+{"type":"search","query":"latest AI news today"}      opens a web search in the browser
+{"type":"open_url","url":"https://example.com"}       opens that page in the browser
+{"type":"note","text":"short fact you found + source"} saves a finding so you don't forget it
+
+OTHER ACTIONS:
 {"type":"click","x":N,"y":N}
 {"type":"double_click","x":N,"y":N}
 {"type":"right_click","x":N,"y":N}
 {"type":"type","text":"..."}
-{"type":"key","keys":"Return"}   (or a combo like "ctrl+l")
+{"type":"key","keys":"Return"}   (or a combo like "ctrl+l", "alt+Left", "ctrl+w")
 {"type":"scroll","x":N,"y":N,"direction":"down","amount":3}
 {"type":"wait","seconds":2}
-{"type":"need_login","site":"Gmail"}   (ask the user for email + password for a site)
-{"type":"type_secret","field":"email"}   (types the saved email/username; field is "email" or "password")
-{"type":"ask_user","question":"...","options":["A","B"]}   (options optional; without options the user types a free-text answer, e.g. an OTP or verification code)
-{"type":"done","summary":"what you actually accomplished"}
+{"type":"need_login","site":"Gmail"}     ask the user for email + password for a site
+{"type":"type_secret","field":"email"}   types the saved email/username (field is "email" or "password")
+{"type":"ask_user","question":"...","options":["A","B"]}   options optional; without options the user types a free-text answer (e.g. an OTP)
+{"type":"done","summary":"what you actually accomplished, including the real findings"}
 
-Rules:
-- Click a text field before typing into it; one action per reply; if a page is still loading, wait.
-- NEVER guess or invent credentials. When a site needs a login and you don't have credentials yet, use need_login ONCE. After the user provides them, click the email field and use type_secret with field "email", then click the password field and use type_secret with field "password", then submit.
-- If a login page offers several ways to sign in (for example Google, Apple, email), use ask_user with those choices so the user picks.
-- For OTPs, verification codes, captchas you cannot solve, or any decision that belongs to the user, use ask_user. Then type the answer they give.
-- When the task is finished — or truly impossible — reply with "done" and an honest summary (include key findings if it was a research task).`;
+RULES
+1. Stay strictly on the user's task. NEVER open YouTube, social feeds, ads, shopping pages or recommended videos unless the task explicitly asks for them.
+2. For any research / "find", "look up", "news" task: your FIRST action is "search" with a good query (add words like "today" or the current year when the user wants the latest). Then open the 2-4 most relevant NON-ad results (click a result title or use open_url), read them, and use "note" to save key facts with the source name. Finish with "done" once you have enough — the summary must contain the actual findings, not just "done".
+3. Look carefully at the screenshot before every action. If the screen is not what you expected, fix that first (close popups and cookie banners, go back with "alt+Left").
+4. Click a text field before typing into it. One action per reply. If a page is still loading, wait 2 seconds.
+5. Never repeat the same action more than twice — if it didn't work, change approach (use search/open_url or a keyboard shortcut).
+6. NEVER guess or invent credentials. If a site needs a login and you don't have credentials yet, use need_login ONCE. After the user provides them: click the email field and use type_secret with field "email", then click the password field and use type_secret with field "password", then submit.
+7. If a login page offers several ways to sign in (Google, Apple, email…), use ask_user with those choices so the user picks.
+8. For OTPs, verification codes, captchas you cannot solve, or any decision that belongs to the user, use ask_user, then type the answer they give.
+9. You have at most ${maxSteps} actions, so be efficient. When the task is finished — or truly impossible — reply with "done" and an honest summary.`;
 }
 
 function parseStep(text: string): { thought: string; action: AgentAction } | null {
@@ -66,6 +78,7 @@ function parseStep(text: string): { thought: string; action: AgentAction } | nul
   if (start === -1 || end <= start) return null;
   try {
     const parsed = JSON.parse(text.slice(start, end + 1)) as {
+      observation?: string;
       thought?: string;
       action?: AgentAction;
     };
@@ -87,6 +100,10 @@ export async function POST(req: Request) {
       model,
       task,
       history,
+      notes,
+      hint,
+      stepNo,
+      maxSteps,
       creds,
     }: {
       e2bKey: string;
@@ -96,6 +113,10 @@ export async function POST(req: Request) {
       model: string;
       task: string;
       history: string[];
+      notes?: string[];
+      hint?: string;
+      stepNo?: number;
+      maxSteps?: number;
       creds?: { email?: string; password?: string };
     } = body;
 
@@ -124,17 +145,32 @@ export async function POST(req: Request) {
       throw err;
     }
 
+    const limit = maxSteps ?? 40;
+    const current = stepNo ?? 1;
+    const budgetHint =
+      current >= limit - 3
+        ? "You are almost out of steps — wrap up NOW with done and a summary of what you found."
+        : "";
+
     const reply = await callProvider({
       provider,
       apiKey,
       model,
       messages: [
-        { role: "system", content: systemPrompt(shot.width, shot.height) },
+        { role: "system", content: systemPrompt(shot.width, shot.height, limit) },
         {
           role: "user",
-          content: `Task: ${task}\n\nSteps so far:\n${
-            history && history.length > 0 ? history.join("\n") : "(none yet)"
-          }\n\nHere is the current screen. What is the next action?`,
+          content: [
+            `Task: ${task}`,
+            `Action ${current} of ${limit}.`,
+            `Notes saved so far:\n${notes && notes.length > 0 ? notes.map((n) => `- ${n}`).join("\n") : "(none)"}`,
+            `Steps so far:\n${history && history.length > 0 ? history.join("\n") : "(none yet)"}`,
+            hint ? `IMPORTANT: ${hint}` : "",
+            budgetHint ? `IMPORTANT: ${budgetHint}` : "",
+            "Here is the current screen. Reply with the JSON for the next action.",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
           image: { mediaType: shot.mediaType, data: shot.data },
         },
       ],
@@ -145,6 +181,7 @@ export async function POST(req: Request) {
       // Soft failure: let the loop try again instead of aborting the task.
       return NextResponse.json({
         done: false,
+        invalid: true,
         thought: "",
         actionText: "(the model's reply wasn't a valid action — retrying)",
       });
@@ -153,6 +190,16 @@ export async function POST(req: Request) {
 
     if (action.type === "done") {
       return NextResponse.json({ done: true, thought, summary: action.summary ?? "Done." });
+    }
+
+    if (action.type === "note") {
+      const text = (action.text ?? "").trim().slice(0, 500);
+      return NextResponse.json({
+        done: false,
+        thought,
+        actionText: `noted: ${text.slice(0, 90)}`,
+        note: text,
+      });
     }
 
     if (action.type === "need_login") {
@@ -178,6 +225,17 @@ export async function POST(req: Request) {
       });
     }
 
+    // Some models answer in 0-1 fractions instead of pixels — convert those.
+    if (
+      typeof action.x === "number" &&
+      typeof action.y === "number" &&
+      action.x <= 1 &&
+      action.y <= 1 &&
+      (!Number.isInteger(action.x) || !Number.isInteger(action.y))
+    ) {
+      action.x = action.x * shot.width;
+      action.y = action.y * shot.height;
+    }
     if (typeof action.x === "number") action.x = Math.min(Math.max(action.x, 0), shot.width - 1);
     if (typeof action.y === "number") action.y = Math.min(Math.max(action.y, 0), shot.height - 1);
 
