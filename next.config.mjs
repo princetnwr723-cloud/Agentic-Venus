@@ -4,7 +4,7 @@ const nextConfig = {
   reactStrictMode: true,
   experimental: {
     // Keep the Daytona SDK out of the webpack bundle; it runs server-side only.
-    serverComponentsExternalPackages: ["@daytona/sdk"],
+    serverComponentsExternalPackages: ["@e2b/desktop"],
   },
 };
 
