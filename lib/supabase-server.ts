@@ -20,15 +20,18 @@ function cfg() {
 
 async function storage(path: string, init: { method?: string; json?: unknown; headers?: Record<string, string> } = {}) {
   const { url, key } = cfg();
+  const hasBody = init.json !== undefined;
   const res = await fetch(url + "/storage/v1" + path, {
     method: init.method ?? "GET",
     headers: {
       apikey: key,
       Authorization: "Bearer " + key,
-      "Content-Type": "application/json",
+      // Only send a JSON content-type when there really is a body —
+      // Supabase rejects an empty body with that header set.
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
       ...(init.headers ?? {}),
     },
-    body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
+    body: hasBody ? JSON.stringify(init.json) : undefined,
     signal: AbortSignal.timeout(20_000),
   });
   const text = await res.text();
