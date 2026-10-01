@@ -68,6 +68,8 @@ async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbo
   }
 }
 
+type RunResult = { stdout?: string; stderr?: string; exitCode?: number };
+
 function loose(sandbox: DesktopSandbox) {
   return sandbox as unknown as {
     stream: {
@@ -76,6 +78,24 @@ function loose(sandbox: DesktopSandbox) {
     };
     commands: { run: (cmd: string, opts?: Record<string, unknown>) => Promise<unknown> };
   };
+}
+
+/** Runs a shell command; a non-zero exit code is returned, not thrown. */
+async function exec(
+  sandbox: DesktopSandbox,
+  cmd: string,
+  timeoutMs = 30_000
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  try {
+    const r = (await loose(sandbox).commands.run(cmd, { timeoutMs })) as RunResult;
+    return { stdout: r?.stdout ?? "", stderr: r?.stderr ?? "", exitCode: r?.exitCode ?? 0 };
+  } catch (err) {
+    const e = err as RunResult;
+    if (e && typeof e.exitCode === "number") {
+      return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", exitCode: e.exitCode };
+    }
+    throw err;
+  }
 }
 
 function pickString(value: unknown): string | null {
@@ -110,13 +130,17 @@ echo started
 `.trim();
 
   try {
-    await loose(sandbox).commands.run(cmd, { timeoutMs: 20_000 });
+    await exec(sandbox, cmd, 20_000);
   } catch {
     // Not fatal.
   }
 }
 
-export async function createSandbox(apiKeyInput: string): Promise<string> {
+export type PersistenceMode = "lifecycle" | "autoPause" | "none";
+
+export async function createSandbox(
+  apiKeyInput: string
+): Promise<{ sandboxId: string; persistence: PersistenceMode }> {
   const apiKey = cleanKey(apiKeyInput);
   if (!apiKey) {
     throw new Error("The E2B API key is empty after trimming — re-save it in Settings.");
@@ -125,26 +149,31 @@ export async function createSandbox(apiKeyInput: string): Promise<string> {
   const { Sandbox } = await loadSdk();
   const base = { apiKey, timeoutMs: SANDBOX_TIMEOUT_MS };
 
-  let sandbox: DesktopSandbox;
-  try {
-    // Preferred: when the timer runs out the computer PAUSES (data kept)
-    // instead of being killed. Older SDKs may not know these options, so
-    // we fall back to a plain create below.
-    sandbox = (await Sandbox.create({
-      ...base,
-      autoPause: true,
-      lifecycle: { onTimeout: "pause", autoResume: true },
-    } as never)) as unknown as DesktopSandbox;
-  } catch {
+  // Best option first: when the timer runs out the computer PAUSES (all data
+  // kept) instead of being killed. Older SDKs get the older option, and as a
+  // last resort a plain computer (then the app pauses it itself before expiry).
+  const attempts: Array<{ mode: PersistenceMode; opts: Record<string, unknown> }> = [
+    { mode: "lifecycle", opts: { ...base, lifecycle: { onTimeout: "pause", autoResume: true } } },
+    { mode: "autoPause", opts: { ...base, autoPause: true } },
+    { mode: "none", opts: base },
+  ];
+
+  let sandbox: DesktopSandbox | undefined;
+  let persistence: PersistenceMode = "none";
+  let lastErr: unknown;
+  for (const a of attempts) {
     try {
-      sandbox = (await Sandbox.create(base as never)) as unknown as DesktopSandbox;
+      sandbox = (await Sandbox.create(a.opts as never)) as unknown as DesktopSandbox;
+      persistence = a.mode;
+      break;
     } catch (err) {
-      throw new Error(describeError(err, "Could not create a computer."));
+      lastErr = err;
     }
   }
+  if (!sandbox) throw new Error(describeError(lastErr, "Could not create a computer."));
 
   await startProvisioningInBackground(sandbox);
-  return (sandbox as unknown as { sandboxId: string }).sandboxId;
+  return { sandboxId: (sandbox as unknown as { sandboxId: string }).sandboxId, persistence };
 }
 
 /** Turns the computer OFF without losing anything (files, apps, logins stay). */
@@ -152,29 +181,29 @@ export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Prom
   const apiKey = cleanKey(apiKeyInput);
   const { Sandbox } = await loadSdk();
   const S = Sandbox as unknown as {
-    betaPause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
     pause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
+    betaPause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
   };
 
   try {
-    if (typeof S.betaPause === "function") {
-      await S.betaPause(sandboxId, { apiKey });
-      return;
-    }
     if (typeof S.pause === "function") {
       await S.pause(sandboxId, { apiKey });
       return;
     }
-    const sb = (await connect(apiKey, sandboxId)) as unknown as {
-      betaPause?: () => Promise<unknown>;
-      pause?: () => Promise<unknown>;
-    };
-    if (typeof sb.betaPause === "function") {
-      await sb.betaPause();
+    if (typeof S.betaPause === "function") {
+      await S.betaPause(sandboxId, { apiKey });
       return;
     }
+    const sb = (await connect(apiKey, sandboxId)) as unknown as {
+      pause?: () => Promise<unknown>;
+      betaPause?: () => Promise<unknown>;
+    };
     if (typeof sb.pause === "function") {
       await sb.pause();
+      return;
+    }
+    if (typeof sb.betaPause === "function") {
+      await sb.betaPause();
       return;
     }
   } catch (err) {
@@ -235,6 +264,70 @@ export async function takeScreenshot(apiKey: string, sandboxId: string): Promise
   };
 }
 
+// ---- Shell jobs: run commands (even long installs) and read their output ----
+
+export type ShellResult = {
+  jobId: string;
+  done: boolean;
+  exitCode?: number;
+  output: string;
+};
+
+function cleanOutput(s: string): string {
+  return s
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+async function pollJob(sandbox: DesktopSandbox, jobId: string, maxMs: number): Promise<ShellResult> {
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    const r = await exec(
+      sandbox,
+      `cat /tmp/jobs/${jobId}.exit 2>/dev/null; echo ---; tail -c 3500 /tmp/jobs/${jobId}.log 2>/dev/null`,
+      10_000
+    );
+    const idx = r.stdout.indexOf("---\n");
+    const exitStr = (idx >= 0 ? r.stdout.slice(0, idx) : "").trim();
+    const log = cleanOutput(idx >= 0 ? r.stdout.slice(idx + 4) : r.stdout);
+    const done = exitStr !== "";
+    if (done || Date.now() >= deadline) {
+      return { jobId, done, exitCode: done ? Number(exitStr) : undefined, output: log };
+    }
+    await new Promise((res) => setTimeout(res, 2500));
+  }
+}
+
+/** Starts a command in the background and waits up to ~30s for it to finish. */
+export async function shellStart(
+  apiKey: string,
+  sandboxId: string,
+  command: string
+): Promise<ShellResult> {
+  const sandbox = await connect(apiKey, sandboxId);
+  const jobId = "j" + Date.now().toString(36);
+  const b64 = Buffer.from(command, "utf8").toString("base64");
+  await exec(
+    sandbox,
+    `mkdir -p /tmp/jobs && echo ${b64} | base64 -d > /tmp/jobs/${jobId}.sh && (nohup bash -lc 'bash /tmp/jobs/${jobId}.sh > /tmp/jobs/${jobId}.log 2>&1; echo $? > /tmp/jobs/${jobId}.exit' > /dev/null 2>&1 &); echo started`,
+    15_000
+  );
+  return pollJob(sandbox, jobId, 30_000);
+}
+
+export async function shellCheck(
+  apiKey: string,
+  sandboxId: string,
+  jobId: string
+): Promise<ShellResult> {
+  if (!/^j[a-z0-9]+$/.test(jobId)) throw new Error("Invalid job id.");
+  const sandbox = await connect(apiKey, sandboxId);
+  return pollJob(sandbox, jobId, 30_000);
+}
+
+// ---- Screen actions ----
+
 export type PcAction = {
   type: string;
   x?: number;
@@ -247,6 +340,8 @@ export type PcAction = {
   summary?: string;
   url?: string;
   query?: string;
+  command?: string;
+  job?: string;
 };
 
 const KEY_ALIASES: Record<string, string> = {
@@ -300,10 +395,7 @@ async function openUrl(sandbox: DesktopSandbox, url: string) {
     // fall through to the shell fallback
   }
   const safe = url.replace(/'/g, "%27");
-  await loose(sandbox).commands.run(
-    `DISPLAY=:0 nohup xdg-open '${safe}' >/dev/null 2>&1 &`,
-    { timeoutMs: 15_000 }
-  );
+  await exec(sandbox, `DISPLAY=:0 nohup xdg-open '${safe}' >/dev/null 2>&1 &`, 15_000);
 }
 
 export async function performAction(
@@ -361,8 +453,7 @@ export async function performAction(
     case "search": {
       const q = (action.query ?? "").trim();
       if (!q) throw new Error("search needs a query.");
-      const url = `https://duckduckgo.com/?q=${encodeURIComponent(q)}`;
-      await openUrl(sandbox, url);
+      await openUrl(sandbox, `https://duckduckgo.com/?q=${encodeURIComponent(q)}`);
       await new Promise((r) => setTimeout(r, 4000));
       return `search "${q.slice(0, 80)}"`;
     }
