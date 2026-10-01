@@ -32,6 +32,7 @@ const ALLOWED = new Set([
   "scroll",
   "wait",
   "open_url",
+  "launch",
   "search",
   "shell",
   "shell_check",
@@ -57,6 +58,7 @@ TOOLS (prefer these — they are the fastest and most reliable):
 {"type":"web_read","url":"https://..."}   read a web page as plain text
 {"type":"search","query":"..."}           show a web search in the browser on screen
 {"type":"open_url","url":"https://..."}   show a page in the browser on screen
+{"type":"launch","app":"chrome"}         open an app on the screen (chrome, firefox, terminal, code, files)
 {"type":"note","text":"..."}              save a short finding or progress marker (kept for the whole task)
 
 SCREEN ACTIONS (only when you really need the GUI):
@@ -76,7 +78,7 @@ FINISHING:
 
 RULES
 1. Do ALL parts of the task, in order. If the task has several parts, keep a checklist in your notes ("1/3 done"). Never call done while a part is still pending. In the done summary, state for every part whether it is done (✓) or not (✗) and why.
-2. Terminal work (installing software, files, git, scripts, checking versions): use "shell". Commands run in a normal Linux shell with passwordless sudo. Always make them non-interactive: use -y flags, DEBIAN_FRONTEND=noninteractive, curl -fsSL. After installing something, verify it (for example "claude --version"). Example for Claude Code: install Node.js 20 with "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs", then "sudo npm install -g @anthropic-ai/claude-code", then verify.
+2. Terminal work: "shell" opens a REAL terminal window on the screen and runs the command there while the user watches live — use it for EVERY terminal task (installing software, files, git, scripts, versions), and always when the user says "terminal" or "command". Commands run as a normal user with passwordless sudo. Make them non-interactive: -y flags, DEBIAN_FRONTEND=noninteractive, curl -fsSL. After installing something, verify it (for example "claude --version"). Example for Claude Code: install Node.js 20 with "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs", then "sudo npm install -g @anthropic-ai/claude-code", then verify. Use "launch" to open apps like chrome or code.
 3. If a shell result says STILL RUNNING, call shell_check with that job id until it finishes. If a command fails, read the error, fix the cause, and retry — do not give up after one failure.
 4. Research ("find", "look up", "news"): use web_search first, then web_read on the 2-4 best NON-ad results, and use note to save key facts with the source name. If web_search fails, retry ONCE with a shorter, different query; if it still fails, use web_read on a page you know (Wikipedia, the official site, socialblade.com for YouTube stats, etc.) or use search/open_url in the browser and read the screen. Use the browser also when the user wants to see it.
 5. Stay strictly on the task. NEVER open YouTube, social feeds, ads, shopping pages or recommended videos unless the task says so.
