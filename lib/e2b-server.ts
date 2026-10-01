@@ -230,20 +230,74 @@ export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<
   }
 }
 
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 export async function getScreenUrl(apiKey: string, sandboxId: string): Promise<string> {
   const sandbox = await connect(apiKey, sandboxId);
-  const s = loose(sandbox);
+  const stream = (
+    sandbox as unknown as {
+      stream: {
+        start: (o?: Record<string, unknown>) => Promise<unknown>;
+        stop?: () => Promise<unknown>;
+        getUrl: (o?: Record<string, unknown>) => unknown;
+      };
+    }
+  ).stream;
 
+  let problem = "";
+
+  // 1) Normal path.
   try {
-    await s.stream.start();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "";
-    if (!/already|running/i.test(message)) throw err;
+    await stream.start();
+  } catch (e) {
+    problem = errMsg(e);
+  }
+  try {
+    const u = pickString(stream.getUrl());
+    if (u) return u;
+  } catch (e) {
+    problem ||= errMsg(e);
   }
 
-  const url = pickString(s.stream.getUrl());
-  if (!url) throw new Error("E2B didn't return a URL for the live screen.");
-  return url;
+  // 2) After a resume, the old screen servers are still in memory but this
+  //    connection doesn't know them. Clean them up and start fresh.
+  try {
+    await exec(
+      sandbox,
+      "pkill -f '[n]ovnc_proxy'; pkill -f '[w]ebsockify'; pkill -x x11vnc; sleep 1; true",
+      20_000
+    );
+  } catch {
+    // ignore
+  }
+  try {
+    await stream.stop?.();
+  } catch {
+    // ignore
+  }
+  try {
+    await stream.start();
+  } catch (e) {
+    problem = errMsg(e);
+  }
+  try {
+    const u = pickString(stream.getUrl());
+    if (u) return u;
+  } catch (e) {
+    problem ||= errMsg(e);
+  }
+
+  // 3) Last resort: the standard noVNC address of the running screen server.
+  try {
+    const host = (sandbox as unknown as { getHost?: (p: number) => string }).getHost?.(6080);
+    if (host) return `https://${host}/vnc.html?autoconnect=true&resize=scale`;
+  } catch {
+    // ignore
+  }
+
+  throw new Error(`The live screen could not be started: ${problem || "unknown error"}`);
 }
 
 export type Screenshot = { data: string; mediaType: string; width: number; height: number };
