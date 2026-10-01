@@ -1,8 +1,10 @@
 export const SCENE_TYPES = [
   "title", "kinetic", "bullets", "stat", "bar-chart", "line-chart",
-  "quote", "split", "timeline", "ranking", "image", "outro",
+  "quote", "split", "timeline", "ranking", "image", "outro", "custom",
 ] as const;
 export type SceneType = (typeof SCENE_TYPES)[number];
+
+export const FONT_NAMES = ["inter", "montserrat", "poppins", "spacegrotesk", "playfair", "oswald"];
 
 export const THEMES = [
   { id: "midnight", label: "Midnight", colors: ["#070b1f", "#5b8cff", "#a66bff"] },
@@ -28,28 +30,43 @@ export const OVERLAP = 12;
 export type Scene = { type: SceneType; seconds: number; [k: string]: unknown };
 export type Storyboard = {
   title: string;
+  concept?: string;
   fps: number;
   width: number;
   height: number;
   theme: string;
+  palette?: Record<string, string>;
+  fonts?: { display?: string; body?: string };
   captions: boolean;
   scenes: Scene[];
 };
 
+const ALLOWED_IMPORTS = ["react", "remotion", "../kit", "../theme"];
+
+/** Static safety check for AI-written scene code. Returns a problem description or null. */
+export function checkCode(code: string): string | null {
+  if (!code || code.length < 40) return "The scene code is empty.";
+  if (code.length > 12000) return "The scene code is too long (max ~140 lines).";
+  if (!/export\s+default/.test(code)) return "Missing `export default` component.";
+  for (const m of code.matchAll(/(?:from\s+|import\s+)["']([^"']+)["']/g)) {
+    if (!ALLOWED_IMPORTS.includes(m[1])) return `Import "${m[1]}" is not allowed (only react, remotion, ../kit, ../theme).`;
+  }
+  const bad = /(require\s*\(|import\s*\(|\beval\s*\(|new\s+Function|\bfetch\s*\(|XMLHttpRequest|WebSocket|process\.|child_process|document\.|window\.|localStorage|Math\.random)/.exec(code);
+  if (bad) return `Forbidden usage: ${bad[1]}. Use random("seed") from remotion instead of Math.random.`;
+  return null;
+}
+
 function clean(v: unknown, depth = 0): unknown {
-  if (typeof v === "string") return v.replace(/\s+/g, " ").trim().slice(0, 240);
+  if (typeof v === "string") return v.replace(/\s+/g, " ").trim().slice(0, 400);
   if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
   if (typeof v === "boolean") return v;
   if (depth >= 3) return undefined;
   if (Array.isArray(v)) {
-    return v
-      .slice(0, 8)
-      .map((x) => clean(x, depth + 1))
-      .filter((x) => x !== undefined);
+    return v.slice(0, 8).map((x) => clean(x, depth + 1)).filter((x) => x !== undefined);
   }
   if (v && typeof v === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>).slice(0, 14)) {
+    for (const [k, val] of Object.entries(v as Record<string, unknown>).slice(0, 16)) {
       if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(k)) continue;
       const c = clean(val, depth + 1);
       if (c !== undefined) out[k] = c;
@@ -62,7 +79,9 @@ function clean(v: unknown, depth = 0): unknown {
 const FILE_RE = /^p\/[A-Za-z0-9_-]+\/(img|vo)\/[A-Za-z0-9_.-]+$/;
 
 export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
-  const base = (clean(raw) as Record<string, unknown>) ?? {};
+  const rawObj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const code = typeof rawObj.code === "string" ? rawObj.code.slice(0, 12000) : undefined;
+  const base = (clean({ ...rawObj, code: undefined }) as Record<string, unknown>) ?? {};
   const type = SCENE_TYPES.includes(base.type as SceneType) ? (base.type as SceneType) : "title";
   const seconds = Math.min(14, Math.max(2.5, Number(base.seconds) || 4));
   const out: Scene = { ...base, type, seconds };
@@ -71,6 +90,10 @@ export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
   }
   if (out.transition !== undefined && !TRANSITIONS.includes(String(out.transition))) delete out.transition;
   if (out.fontScale !== undefined) out.fontScale = Math.min(1.3, Math.max(0.5, Number(out.fontScale) || 1));
+  if (type === "custom") {
+    out.id = String(base.id ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12) || "c" + Date.now().toString(36).slice(-5);
+    if (code) out.code = code;
+  }
   return out;
 }
 
@@ -91,20 +114,42 @@ export function sanitizeStoryboard(
     scenes = [{ type: "title", seconds: 4, headline: String(r.title ?? "Untitled") }];
   }
 
+  const seen = new Set<string>();
+  scenes = scenes.map((s, i) => {
+    if (s.type !== "custom") return s;
+    let id = String(s.id);
+    if (seen.has(id)) id = id.slice(0, 9) + "x" + i;
+    seen.add(id);
+    return { ...s, id };
+  });
+
   const max = Math.min(MAX_SECONDS, opts.maxSeconds ?? MAX_SECONDS);
-  const total = () => scenes.reduce((a, s) => a + s.seconds, 0) - (OVERLAP / 30) * (scenes.length - 1);
-  const t = total();
-  if (t > max) {
-    const f = max / t;
+  const total = scenes.reduce((a, s) => a + s.seconds, 0) - (OVERLAP / 30) * (scenes.length - 1);
+  if (total > max) {
+    const f = max / total;
     scenes = scenes.map((s) => ({ ...s, seconds: Math.max(2.5, Math.round(s.seconds * f * 10) / 10) }));
   }
 
+  const palette: Record<string, string> = {};
+  const rp = (r.palette && typeof r.palette === "object" ? r.palette : {}) as Record<string, unknown>;
+  for (const k of ["bg1", "bg2", "accent", "accent2", "text", "muted"]) {
+    const v = rp[k];
+    if (typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v.trim())) palette[k] = v.trim();
+  }
+  const rf = (r.fonts && typeof r.fonts === "object" ? r.fonts : {}) as Record<string, unknown>;
+  const fonts: { display?: string; body?: string } = {};
+  if (FONT_NAMES.includes(String(rf.display))) fonts.display = String(rf.display);
+  if (FONT_NAMES.includes(String(rf.body))) fonts.body = String(rf.body);
+
   return {
     title: String(clean(r.title) ?? "Untitled").slice(0, 80),
+    concept: typeof r.concept === "string" ? r.concept.slice(0, 300) : undefined,
     fps: 30,
     width,
     height,
     theme,
+    ...(Object.keys(palette).length >= 4 ? { palette } : {}),
+    ...(fonts.display || fonts.body ? { fonts } : {}),
     captions: opts.captions ?? Boolean(r.captions),
     scenes,
   };
@@ -132,7 +177,7 @@ export function sceneLayout(sb: Storyboard): Array<{ from: number; dur: number }
 }
 
 export function summarizeScene(s: Scene): string {
-  for (const k of ["headline", "text", "label", "title"]) {
+  for (const k of ["headline", "text", "label", "title", "brief"]) {
     if (typeof s[k] === "string" && s[k]) return String(s[k]);
   }
   return "";
