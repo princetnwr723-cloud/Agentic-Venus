@@ -91,17 +91,29 @@ const EMPTY_SESSION: PcSession = {
   request: null,
 };
 
-const IDLE_PAUSE_MS = 50 * 60 * 1000; // pause before E2B's 1 hour limit so nothing is lost
+const IDLE_PAUSE_MS = 50 * 60 * 1000; // idle this long → safe-pause
+const RUN_CYCLE_MS = 55 * 60 * 1000; // running this long → pause + resume (resets E2B's 1 hour clock)
 
 // ---- Chat → computer commands ----
 
 type PcCommand = { cmd: "start" | "stop" | "task"; arg?: string };
 
+// The chat agent can control the computer by ending its reply with tags like
+// [[PC:task|research X]], [[PC:start]] or [[PC:stop]]. A bare [[PC:do this]]
+// is treated as a task too. We run them and hide them from the chat.
 function extractPcCommands(text: string): { clean: string; cmds: PcCommand[] } {
   const cmds: PcCommand[] = [];
   const clean = text
-    .replace(/\[\[PC:(start|stop|task)(?:\|([\s\S]*?))?\]\]/gi, (_m, cmd, arg) => {
-      cmds.push({ cmd: String(cmd).toLowerCase() as PcCommand["cmd"], arg: arg?.trim() });
+    .replace(/\[\[PC:([\s\S]*?)\]\]/gi, (_m, inner: string) => {
+      const t = String(inner).trim();
+      const lower = t.toLowerCase();
+      if (lower === "start" || lower === "stop") {
+        cmds.push({ cmd: lower as "start" | "stop" });
+      } else {
+        const m = /^task\s*[|:]\s*([\s\S]*)$/i.exec(t);
+        const arg = (m ? m[1] : t.replace(/^\|/, "")).trim();
+        if (arg) cmds.push({ cmd: "task", arg });
+      }
       return "";
     })
     .trim();
@@ -171,7 +183,11 @@ function analyzePcMessage(text: string): {
   );
 
   if ((hasStart || hasStop) && rest.length <= 1) {
-    return { pureCommand: hasStop && !hasStart ? "stop" : hasStart ? "start" : "stop", compound: false, stopAfter: false };
+    return {
+      pureCommand: hasStop && !hasStart ? "stop" : hasStart ? "start" : "stop",
+      compound: false,
+      stopAfter: false,
+    };
   }
   if (hasStart && rest.length >= 2) {
     return { pureCommand: null, compound: true, stopAfter: hasStop };
@@ -221,6 +237,7 @@ export default function DashboardPage() {
   const stopRef = useRef<Record<string, boolean>>({});
   const resolverRef = useRef<Record<string, ((r: RequestReply) => void) | null>>({});
   const lastTouchRef = useRef<Record<string, number>>({});
+  const runStartRef = useRef<Record<string, number>>({});
   const chatsRef = useRef<Chat[]>([]);
   const activeIdRef = useRef<string | null>(null);
 
@@ -342,11 +359,13 @@ export default function DashboardPage() {
 
   // ---- This chat's computer ----
 
+  // Opens the live screen. Also wakes the computer if it was paused.
   async function loadScreen(chatId: string, sandboxId: string): Promise<"ok" | "gone" | "error"> {
     if (!e2bKey) {
       setSettingsOpen(true);
       return "error";
     }
+    const wasPaused = sessionsRef.current[chatId]?.status === "paused";
     patchSession(chatId, { status: "loading", error: null });
     try {
       const res = await fetch("/api/e2b/screen", {
@@ -358,6 +377,8 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(data?.error || "Could not open the computer's screen.");
       patchSession(chatId, { screenUrl: data.url, status: "ready" });
       touch(chatId);
+      // A resumed computer gets a fresh 1 hour clock from E2B.
+      if (wasPaused || !runStartRef.current[chatId]) runStartRef.current[chatId] = Date.now();
       return "ok";
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not open the computer's screen.";
@@ -394,9 +415,10 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
 
       setSandboxId(chatId, data.sandboxId);
+      runStartRef.current[chatId] = Date.now();
       if (data.persistence === "none") {
         setPcMessage(
-          "ℹ️ Is E2B version mein auto-pause nahi mila. Computer 50 min idle rehne par app khud pause karegi (data safe), isliye tab khuli rakhna."
+          "ℹ️ Is E2B version mein auto-pause nahi mila. Computer ko app khud pause/resume karegi (data safe), isliye tab khuli rakhna."
         );
       }
       const r = await loadScreen(chatId, data.sandboxId);
@@ -458,6 +480,27 @@ export default function DashboardPage() {
     }
   }
 
+  // Pause + resume in one go, even while a task is running. Everything stays
+  // (files, apps, running commands) and E2B's 1 hour clock starts over.
+  async function cyclePc(chatId: string): Promise<boolean> {
+    const id = sandboxRef.current[chatId] ?? null;
+    if (!id || !e2bKey) return false;
+    try {
+      const res = await fetch("/api/e2b/pause", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: e2bKey, sandboxId: id }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data?.error || "pause failed");
+      patchSession(chatId, { screenUrl: null, status: "paused" });
+      const r = await loadScreen(chatId, id); // resumes it
+      return r === "ok";
+    } catch {
+      return false;
+    }
+  }
+
   async function deletePc(chatId: string) {
     const id = sandboxRef.current[chatId] ?? null;
     if (!user || !e2bKey || !id) return;
@@ -508,18 +551,22 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pcOpen, activeChat?.id]);
 
-  // Safety net: pause idle computers before E2B's 1 hour limit, so the data is kept.
+  // Safety net for computers that are NOT running a task: pause them before
+  // E2B's 1 hour limit, so the data is kept. (Running tasks cycle themselves.)
   useEffect(() => {
     if (!user || !e2bKey) return;
     const iv = setInterval(() => {
       for (const [chatId, s] of Object.entries(sessionsRef.current)) {
         if (s.status !== "ready" || s.running || runningRef.current[chatId]) continue;
         const last = lastTouchRef.current[chatId] ?? 0;
-        if (last && Date.now() - last > IDLE_PAUSE_MS) {
+        const started = runStartRef.current[chatId] ?? 0;
+        const idle = last > 0 && Date.now() - last > IDLE_PAUSE_MS;
+        const tooLong = started > 0 && Date.now() - started > RUN_CYCLE_MS;
+        if (idle || tooLong) {
           void pausePc(chatId).then((r) => {
             if (r.ok) {
               setPcMessage(
-                "💾 Computer 50 min se idle tha, isliye safe-pause kar diya. Data saved hai — panel mein Turn on dabao, wahin se chalega."
+                "💾 Computer ko 1 ghante ki limit se pehle safe-pause kar diya. Data saved hai — panel mein Turn on dabao, wahin se chalega."
               );
             }
           });
@@ -656,6 +703,18 @@ export default function DashboardPage() {
           break;
         }
 
+        // Close to E2B's 1 hour limit: pause + resume to start a fresh hour.
+        const startedAt = runStartRef.current[chatId] ?? Date.now();
+        if (Date.now() - startedAt > RUN_CYCLE_MS) {
+          pushStep(chatId, "♻️ 1 ghante ki limit paas hai — computer ko save-pause karke wapas on kar raha hoon (data safe)…");
+          const ok = await cyclePc(chatId);
+          pushStep(
+            chatId,
+            ok ? "✅ Computer dobara on, kaam jaari." : "⚠️ Refresh nahi ho paya — kaam jaari rakh raha hoon."
+          );
+          if (!ok) runStartRef.current[chatId] = Date.now(); // don't retry on every step
+        }
+
         const res = await fetch("/api/e2b/step", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -681,6 +740,7 @@ export default function DashboardPage() {
 
         if (data.newSandboxId) {
           setSandboxId(chatId, data.newSandboxId);
+          runStartRef.current[chatId] = Date.now();
           patchSession(chatId, { screenUrl: null });
           await loadScreen(chatId, data.newSandboxId);
           history.push(data.actionText);
