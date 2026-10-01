@@ -5,8 +5,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Open /api/e2b/create in a browser tab: it tells you whether the E2B SDK
-// loads on the server, and if not, the exact reason.
+// Open /api/e2b/create in a browser tab to check that the E2B SDK loads.
 export async function GET() {
   try {
     await loadSdk();
@@ -23,8 +22,8 @@ export async function POST(req: Request) {
     if (!apiKey) {
       return NextResponse.json({ error: "No E2B API key on file." }, { status: 400 });
     }
-    const sandboxId = await createSandbox(apiKey);
-    return NextResponse.json({ sandboxId });
+    const { sandboxId, persistence } = await createSandbox(apiKey);
+    return NextResponse.json({ sandboxId, persistence });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not create a computer.";
     return NextResponse.json({ error: message }, { status: 500 });
