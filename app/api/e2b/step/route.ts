@@ -24,25 +24,9 @@ type AgentAction = PcAction & {
 };
 
 const ALLOWED = new Set([
-  "click",
-  "double_click",
-  "right_click",
-  "type",
-  "key",
-  "scroll",
-  "wait",
-  "open_url",
-  "launch",
-  "search",
-  "shell",
-  "shell_check",
-  "web_search",
-  "web_read",
-  "note",
-  "done",
-  "need_login",
-  "type_secret",
-  "ask_user",
+  "click", "double_click", "right_click", "type", "key", "scroll", "wait",
+  "open_url", "launch", "search", "shell", "shell_check", "web_search", "web_read",
+  "note", "done", "need_login", "type_secret", "ask_user",
 ]);
 
 function systemPrompt(width: number, height: number, maxSteps: number) {
@@ -52,13 +36,13 @@ Reply with ONE JSON object only — no prose, no markdown fences:
 {"observation":"<what you see / what the last output said, and does it match the goal?>","thought":"<your next step and why, one sentence>","action":{...}}
 
 TOOLS (prefer these — they are the fastest and most reliable):
-{"type":"shell","command":"..."}          run a command in a Linux terminal; you get its output back
+{"type":"shell","command":"..."}          run a command in a real terminal window on the screen; you get its output back
 {"type":"shell_check","job":"j123"}       wait for a command that was still running
 {"type":"web_search","query":"..."}       search the web; you get titles, links and snippets as text
 {"type":"web_read","url":"https://..."}   read a web page as plain text
 {"type":"search","query":"..."}           show a web search in the browser on screen
 {"type":"open_url","url":"https://..."}   show a page in the browser on screen
-{"type":"launch","app":"chrome"}         open an app on the screen (chrome, firefox, terminal, code, files)
+{"type":"launch","app":"chrome"}          open an app on the screen (chrome, firefox, terminal, code, files)
 {"type":"note","text":"..."}              save a short finding or progress marker (kept for the whole task)
 
 SCREEN ACTIONS (only when you really need the GUI):
@@ -78,14 +62,15 @@ FINISHING:
 
 RULES
 1. Do ALL parts of the task, in order. If the task has several parts, keep a checklist in your notes ("1/3 done"). Never call done while a part is still pending. In the done summary, state for every part whether it is done (✓) or not (✗) and why.
-2. Terminal work: "shell" opens a REAL terminal window on the screen and runs the command there while the user watches live — use it for EVERY terminal task (installing software, files, git, scripts, versions), and always when the user says "terminal" or "command". Commands run as a normal user with passwordless sudo. Make them non-interactive: -y flags, DEBIAN_FRONTEND=noninteractive, curl -fsSL. After installing something, verify it (for example "claude --version"). Example for Claude Code: install Node.js 20 with "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs", then "sudo npm install -g @anthropic-ai/claude-code", then verify. Use "launch" to open apps like chrome or code.
-3. If a shell result says STILL RUNNING, call shell_check with that job id until it finishes. If a command fails, read the error, fix the cause, and retry — do not give up after one failure.
+2. Terminal work: "shell" opens a REAL terminal window on the screen and runs the command there while the user watches live — use it for EVERY terminal task (installing software, files, git, scripts, versions), and always when the user says "terminal" or "command". Commands run as a normal user with passwordless sudo. Make them non-interactive: -y flags, DEBIAN_FRONTEND=noninteractive, curl -fsSL. After installing something, verify it. To install Claude Code use the official installer: "curl -fsSL https://claude.ai/install.sh | bash", then verify with "export PATH=$HOME/.local/bin:$PATH; claude --version". If that fails, install Node.js 20 ("curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs") and run "npm install -g @anthropic-ai/claude-code" (global npm installs go to ~/.npm-global, no sudo needed). Do not try to sign in to Claude Code yourself: report that it is installed and tell the user to run "claude" and sign in. apt-get waits for package locks automatically (another installer may be running for a few minutes), so be patient and use shell_check.
+3. If a shell result says STILL RUNNING, call shell_check with that job id until it finishes. NEVER start the same command again while its job is running. If a command fails, read the error, fix the cause, and retry — do not give up after one failure.
 4. Research ("find", "look up", "news"): use web_search first, then web_read on the 2-4 best NON-ad results, and use note to save key facts with the source name. If web_search fails, retry ONCE with a shorter, different query; if it still fails, use web_read on a page you know (Wikipedia, the official site, socialblade.com for YouTube stats, etc.) or use search/open_url in the browser and read the screen. Use the browser also when the user wants to see it.
 5. Stay strictly on the task. NEVER open YouTube, social feeds, ads, shopping pages or recommended videos unless the task says so.
 6. Look at the screenshot before screen actions. If the screen is not what you expected, fix that first (close popups, go back with "alt+Left"). Click a text field before typing. One action per reply.
 7. Never repeat the same action more than twice — change approach instead.
 8. NEVER guess or invent credentials. If a site needs a login and you have none, use need_login ONCE; after the user provides them, click the email field and use type_secret "email", click the password field and use type_secret "password", then submit. If a login page offers several sign-in methods, use ask_user with those choices. For OTPs, verification codes, or decisions that belong to the user, use ask_user.
-9. You have at most ${maxSteps} actions. Be efficient. The "summary" in done must contain the real results (findings, versions, paths) — not just "done".`;
+9. You have at most ${maxSteps} actions. Be efficient. The "summary" in done must contain the real results (findings, versions, paths) — not just "done".
+10. Approvals: before any irreversible or outward-facing action (sending an email or message, posting publicly, buying, deleting data, changing account settings), ask with ask_user and options ["Approve","Cancel"], and do it only after "Approve".`;
 }
 
 function parseStep(text: string): { thought: string; action: AgentAction } | null {
@@ -93,10 +78,7 @@ function parseStep(text: string): { thought: string; action: AgentAction } | nul
   const end = text.lastIndexOf("}");
   if (start === -1 || end <= start) return null;
   try {
-    const parsed = JSON.parse(text.slice(start, end + 1)) as {
-      thought?: string;
-      action?: AgentAction;
-    };
+    const parsed = JSON.parse(text.slice(start, end + 1)) as { thought?: string; action?: AgentAction };
     if (!parsed.action || !ALLOWED.has(parsed.action.type)) return null;
     return { thought: parsed.thought ?? "", action: parsed.action };
   } catch {
@@ -111,36 +93,18 @@ function formatShell(r: ShellResult): string {
   return `${head}\n${r.output || "(no output yet)"}`.slice(0, 3800);
 }
 
+const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const {
-      e2bKey,
-      sandboxId,
-      provider,
-      apiKey,
-      model,
-      task,
-      history,
-      notes,
-      hint,
-      stepNo,
-      maxSteps,
-      lastOutput,
-      creds,
+      e2bKey, sandboxId, provider, apiKey, model, task, history, notes, hint,
+      stepNo, maxSteps, lastOutput, runningJob, creds,
     }: {
-      e2bKey: string;
-      sandboxId: string;
-      provider: ProviderId;
-      apiKey: string;
-      model: string;
-      task: string;
-      history: string[];
-      notes?: string[];
-      hint?: string;
-      stepNo?: number;
-      maxSteps?: number;
-      lastOutput?: string;
+      e2bKey: string; sandboxId: string; provider: ProviderId; apiKey: string; model: string;
+      task: string; history: string[]; notes?: string[]; hint?: string; stepNo?: number;
+      maxSteps?: number; lastOutput?: string; runningJob?: { id: string; command: string };
       creds?: { email?: string; password?: string };
     } = body;
 
@@ -148,9 +112,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing something needed to run a step." }, { status: 400 });
     }
 
-    // Connecting wakes a paused computer and extends its 1-hour timer.
-    // If the computer is truly gone, start a fresh one and let the browser
-    // continue the task on it.
     let shot;
     try {
       shot = await takeScreenshot(e2bKey, sandboxId);
@@ -161,8 +122,7 @@ export async function POST(req: Request) {
         return NextResponse.json({
           done: false,
           thought: "",
-          actionText:
-            "The computer had expired, so a fresh one was started (files from the old one are gone).",
+          actionText: "The computer had expired, so a fresh one was started (files from the old one are gone).",
           newSandboxId: created.sandboxId,
         });
       }
@@ -189,6 +149,9 @@ export async function POST(req: Request) {
             `Action ${current} of ${limit}.`,
             `Notes saved so far:\n${notes && notes.length > 0 ? notes.map((n) => `- ${n}`).join("\n") : "(none)"}`,
             `Steps so far:\n${history && history.length > 0 ? history.join("\n") : "(none yet)"}`,
+            runningJob
+              ? `A command is STILL RUNNING: job ${runningJob.id} (${runningJob.command.slice(0, 100)}). Do NOT start it again — call shell_check with this job id.`
+              : "",
             lastOutput ? `Output of your previous action:\n${lastOutput}` : "",
             hint ? `IMPORTANT: ${hint}` : "",
             budgetHint ? `IMPORTANT: ${budgetHint}` : "",
@@ -212,35 +175,35 @@ export async function POST(req: Request) {
     }
     const { thought, action } = step;
 
+    // The model tried to start a command that is already running: just wait for it.
+    if (action.type === "shell" && runningJob && norm(action.command ?? "") === norm(runningJob.command)) {
+      action.type = "shell_check";
+      action.job = runningJob.id;
+    }
+
     if (action.type === "done") {
       return NextResponse.json({ done: true, thought, summary: action.summary ?? "Done." });
     }
 
     if (action.type === "note") {
       const text = (action.text ?? "").trim().slice(0, 500);
-      return NextResponse.json({
-        done: false,
-        thought,
-        actionText: `noted: ${text.slice(0, 90)}`,
-        note: text,
-      });
+      return NextResponse.json({ done: false, thought, actionText: `noted: ${text.slice(0, 90)}`, note: text });
     }
 
     if (action.type === "shell" || action.type === "shell_check") {
       try {
-        const r =
-          action.type === "shell"
-            ? await shellStart(e2bKey, sandboxId, (action.command ?? "").trim())
-            : await shellCheck(e2bKey, sandboxId, (action.job ?? "").trim());
-        const label =
-          action.type === "shell"
-            ? `$ ${(action.command ?? "").trim().slice(0, 90)}`
-            : `check ${action.job}`;
+        const isStart = action.type === "shell";
+        const r = isStart
+          ? await shellStart(e2bKey, sandboxId, (action.command ?? "").trim())
+          : await shellCheck(e2bKey, sandboxId, (action.job ?? "").trim());
+        const command = isStart ? (action.command ?? "").trim() : runningJob?.command ?? "";
+        const label = isStart ? `$ ${command.slice(0, 90)}` : `check ${action.job}`;
         return NextResponse.json({
           done: false,
           thought,
           actionText: `${label} → ${r.done ? `exit ${r.exitCode}` : `still running (${r.jobId})`}`,
           output: formatShell(r),
+          job: { id: r.jobId, done: r.done, command },
         });
       } catch (err) {
         const m = err instanceof Error ? err.message : "shell failed";
@@ -281,11 +244,7 @@ export async function POST(req: Request) {
     }
 
     if (action.type === "need_login") {
-      return NextResponse.json({
-        done: false,
-        thought,
-        ask: { kind: "login", site: action.site ?? "" },
-      });
+      return NextResponse.json({ done: false, thought, ask: { kind: "login", site: action.site ?? "" } });
     }
 
     if (action.type === "ask_user") {
@@ -303,12 +262,9 @@ export async function POST(req: Request) {
       });
     }
 
-    // Some models answer in 0-1 fractions instead of pixels — convert those.
     if (
-      typeof action.x === "number" &&
-      typeof action.y === "number" &&
-      action.x <= 1 &&
-      action.y <= 1 &&
+      typeof action.x === "number" && typeof action.y === "number" &&
+      action.x <= 1 && action.y <= 1 &&
       (!Number.isInteger(action.x) || !Number.isInteger(action.y))
     ) {
       action.x = action.x * shot.width;
@@ -336,7 +292,6 @@ export async function POST(req: Request) {
     }
 
     await new Promise((r) => setTimeout(r, 1200));
-
     return NextResponse.json({ done: false, thought, actionText });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Step failed.";
