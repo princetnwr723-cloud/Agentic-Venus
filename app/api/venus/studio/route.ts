@@ -5,14 +5,14 @@ import { createSignedUpload } from "@/lib/supabase-server";
 import {
   DIR,
   jobStatus,
+  prepareProject,
   safeId,
   setupStudio,
   startJob,
   studioState,
   writeBinary,
-  writeFiles,
 } from "@/lib/venus-server";
-import { sanitizeStoryboard, type Storyboard } from "@/lib/venus-schema";
+import { sanitizeStoryboard } from "@/lib/venus-schema";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -29,7 +29,6 @@ export async function POST(req: Request) {
     if (!e2bKey) return fail("E2B key missing.", 400);
 
     if (action === "create") {
-      // provision:false → no Chrome/VS Code installer fighting our apt installs.
       const c = await createSandbox(e2bKey, { provision: false });
       return NextResponse.json({ sandboxId: c.sandboxId });
     }
@@ -39,21 +38,17 @@ export async function POST(req: Request) {
     const sb = await connect(e2bKey, sandboxId);
 
     switch (action) {
-      case "setup": {
+      case "setup":
         await setupStudio(sb);
         return NextResponse.json({ ok: true });
-      }
 
-      case "status": {
+      case "status":
         return NextResponse.json(await studioState(sb));
-      }
 
       case "prepare": {
         const pid = safeId(body.projectId);
         const storyboard = sanitizeStoryboard(body.storyboard, { keepFiles: true });
-        await exec(sb, `mkdir -p ${DIR}/work/${pid} ${DIR}/public/p/${pid}/img ${DIR}/public/p/${pid}/vo`, 15_000);
-        await writeFiles(sb, { [`${DIR}/work/${pid}/storyboard.json`]: JSON.stringify(storyboard) });
-        return NextResponse.json({ ok: true });
+        return NextResponse.json(await prepareProject(sb, pid, storyboard));
       }
 
       case "assets": {
@@ -61,7 +56,7 @@ export async function POST(req: Request) {
         const pid = safeId(body.projectId);
         const key = process.env.PEXELS_API_KEY;
         if (!key) return NextResponse.json({ skipped: true, images: {} });
-        const sbd = sanitizeStoryboard(body.storyboard, { keepFiles: true }) as Storyboard;
+        const sbd = sanitizeStoryboard(body.storyboard, { keepFiles: true });
         const orient = sbd.height > sbd.width ? "portrait" : sbd.width === sbd.height ? "square" : "landscape";
         const images: Record<string, string> = {};
         await exec(sb, `mkdir -p ${DIR}/public/p/${pid}/img`, 10_000);
@@ -80,7 +75,7 @@ export async function POST(req: Request) {
             const dl = await exec(sb, `curl -fsSL --max-time 30 -o '${DIR}/public/${rel}' '${src}'`, 40_000);
             if (dl.exitCode === 0) images[String(i)] = rel;
           } catch {
-            // this photo is optional — the scene falls back to a gradient
+            // optional photo — the scene falls back to a gradient
           }
         }
         return NextResponse.json({ images });
@@ -91,10 +86,8 @@ export async function POST(req: Request) {
         const index = Math.max(0, Math.min(40, Number(body.index) || 0));
         const text = String(body.text || "").slice(0, 700);
         const openaiKey = String(body.openaiKey || "");
-        if (!text || !openaiKey) return fail("Voiceover ke liye text aur OpenAI key chahiye.", 400);
-        const voice = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(String(body.voice))
-          ? String(body.voice)
-          : "nova";
+        if (!text || !openaiKey) return fail("Voiceover needs narration text and an OpenAI key.", 400);
+        const voice = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(String(body.voice)) ? String(body.voice) : "nova";
         const r = await fetch("https://api.openai.com/v1/audio/speech", {
           method: "POST",
           headers: { Authorization: `Bearer ${openaiKey}`, "Content-Type": "application/json" },
@@ -108,34 +101,29 @@ export async function POST(req: Request) {
         const bytes = Buffer.from(await r.arrayBuffer());
         const rel = `p/${pid}/vo/scene-${index}.mp3`;
         await writeBinary(sb, `${DIR}/public/${rel}`, bytes);
-        const d = await exec(
-          sb,
-          `ffprobe -v error -show_entries format=duration -of csv=p=0 '${DIR}/public/${rel}'`,
-          15_000
-        );
+        const d = await exec(sb, `ffprobe -v error -show_entries format=duration -of csv=p=0 '${DIR}/public/${rel}'`, 15_000);
         const seconds = Number(d.stdout.trim());
         return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0 });
       }
 
       case "render": {
         const pid = safeId(body.projectId);
-        const kind = body.kind === "final" ? "final" : "preview";
+        const kind = body.kind === "final" ? "final" : body.kind === "scene" ? "scene" : "preview";
         const scale = Math.min(2, Math.max(0.25, Number(body.scale) || 1));
-        const crf = kind === "preview" ? 30 : scale > 1 ? 26 : 23;
+        const crf = kind === "final" ? (scale > 1 ? 26 : 23) : 30;
+        const frames = /^\d+-\d+$/.test(String(body.frames || "")) ? String(body.frames) : "";
         const jobId = "r" + Date.now().toString(36);
         const script = [
           `cd ${DIR}`,
           "mkdir -p out",
-          `npx remotion render src/index.ts Main out/${pid}-${kind}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale} --concurrency=2 --codec=h264 --crf=${crf} --log=info --overwrite`,
+          `npx remotion render src/index.ts Main out/${pid}-${kind}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --concurrency=2 --codec=h264 --crf=${crf} --log=info --overwrite`,
         ].join("\n");
         await startJob(sb, jobId, script);
         return NextResponse.json({ jobId });
       }
 
-      case "progress": {
-        const total = Math.max(0, Number(body.total) || 0);
-        return NextResponse.json(await jobStatus(sb, String(body.jobId || ""), total));
-      }
+      case "progress":
+        return NextResponse.json(await jobStatus(sb, String(body.jobId || ""), Math.max(0, Number(body.total) || 0)));
 
       case "frames": {
         const pid = safeId(body.projectId);
@@ -157,7 +145,7 @@ ffmpeg -y -loglevel error -framerate 1 -i f_%d.jpg -filter_complex "tile=${cols}
 base64 -w0 sheet.jpg`;
         const r = await exec(sb, script, 55_000);
         if (r.exitCode !== 0 || r.stdout.length < 100) {
-          return fail("Frames nikal nahi paye: " + (r.stderr || r.stdout).slice(0, 200));
+          return fail("Could not extract frames: " + (r.stderr || r.stdout).slice(0, 200));
         }
         return NextResponse.json({ image: r.stdout.trim(), mediaType: "image/jpeg" });
       }
@@ -165,7 +153,7 @@ base64 -w0 sheet.jpg`;
       case "upload": {
         const { uid } = await verifyUser(req, body.uid);
         const pid = safeId(body.projectId);
-        const kind = body.kind === "final" ? "final" : "preview";
+        const kind = ["final", "scene"].includes(String(body.kind)) ? String(body.kind) : "preview";
         const objectPath = `${uid}/${pid}/${kind}.mp4`;
         const upUrl = await createSignedUpload(objectPath);
         const file = `${DIR}/out/${pid}-${kind}.mp4`;
@@ -180,9 +168,9 @@ head -c 300 /tmp/up.out`,
         );
         const first = r.stdout.trim().split("\n")[0] ?? "";
         const [code, size] = first.split(" ");
-        if (first.startsWith("MISSING")) return fail("Render ki file nahi mili.");
+        if (first.startsWith("MISSING")) return fail("The rendered file was not found.");
         if (code !== "200") {
-          return fail(`Supabase upload fail (HTTP ${code}). ${r.stdout.split("\n").slice(1).join(" ").slice(0, 200)}`);
+          return fail(`Supabase upload failed (HTTP ${code}). ${r.stdout.split("\n").slice(1).join(" ").slice(0, 200)}`);
         }
         return NextResponse.json({ path: objectPath, bytes: Number(size) || 0 });
       }
