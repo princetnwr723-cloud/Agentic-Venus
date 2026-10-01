@@ -1,6 +1,8 @@
 // Server-only helpers that talk to the Studio computer (an E2B sandbox).
 import { connect, exec } from "@/lib/e2b-server";
-import { TEMPLATE_FILES, TEMPLATE_VERSION } from "@/lib/venus-template";
+import { TEMPLATE_FILES } from "@/lib/venus-template";
+import { EXTRA_FILES, TEMPLATE_VERSION_FINAL } from "@/lib/venus-template-extra";
+import { checkCode, type Storyboard } from "@/lib/venus-schema";
 
 export type Sb = Awaited<ReturnType<typeof connect>>;
 export const DIR = "/home/user/venus";
@@ -26,7 +28,7 @@ export async function writeFiles(sb: Sb, files: Record<string, string>) {
   if (cur) batches.push(cur);
   for (const b of batches) {
     const r = await exec(sb, b, 30_000);
-    if (r.exitCode !== 0) throw new Error("Files likhne mein dikkat: " + (r.stderr || r.stdout).slice(0, 300));
+    if (r.exitCode !== 0) throw new Error("Could not write files: " + (r.stderr || r.stdout).slice(0, 300));
   }
 }
 
@@ -37,7 +39,7 @@ export async function writeBinary(sb: Sb, path: string, bytes: Buffer) {
     await exec(sb, `echo ${b64.slice(i, i + 60_000)} >> '${path}.b64'`, 15_000);
   }
   const r = await exec(sb, `base64 -d '${path}.b64' > '${path}' && rm -f '${path}.b64'`, 15_000);
-  if (r.exitCode !== 0) throw new Error("Audio file save nahi hui.");
+  if (r.exitCode !== 0) throw new Error("Could not save the audio file.");
 }
 
 export async function startJob(sb: Sb, jobId: string, script: string) {
@@ -105,10 +107,10 @@ echo "STUDIO READY"
 `;
 
 export async function setupStudio(sb: Sb) {
-  await exec(sb, `mkdir -p ${DIR}/src ${DIR}/out ${DIR}/work ${DIR}/public`, 15_000);
+  await exec(sb, `mkdir -p ${DIR}/src/custom ${DIR}/out ${DIR}/work ${DIR}/public`, 15_000);
   const files: Record<string, string> = {};
-  for (const [p, c] of Object.entries(TEMPLATE_FILES)) files[`${DIR}/${p}`] = c;
-  files[`${DIR}/.template-version`] = TEMPLATE_VERSION;
+  for (const [p, c] of Object.entries({ ...TEMPLATE_FILES, ...EXTRA_FILES })) files[`${DIR}/${p}`] = c;
+  files[`${DIR}/.template-version`] = TEMPLATE_VERSION_FINAL;
   await writeFiles(sb, files);
   await startJob(sb, "install", INSTALL_SCRIPT);
 }
@@ -131,8 +133,75 @@ tail -c 1500 /tmp/jobs/install.log 2>/dev/null`,
   const v = /v=(.*)/.exec(head)?.[1]?.trim() ?? "";
   const e = /e=(.*)/.exec(head)?.[1]?.trim() ?? "";
   const ok = /ok=(\d)/.exec(head)?.[1] === "1";
-  if (v !== TEMPLATE_VERSION) return { state: "none", log };
+  if (v !== TEMPLATE_VERSION_FINAL) return { state: "none", log };
   if (e === "") return { state: "installing", log };
   if (e === "0" && ok) return { state: "ready", log };
   return { state: "failed", log };
+}
+
+/**
+ * Writes the storyboard and the AI-written scene files, checks them for syntax
+ * errors, and builds the registry from the scenes that passed. Scenes that
+ * failed are reported so the agent can repair them.
+ */
+export async function prepareProject(
+  sb: Sb,
+  pid: string,
+  storyboard: Storyboard
+): Promise<{ errors: Array<{ index: number; message: string }> }> {
+  const dir = `${DIR}/src/custom`;
+  await exec(
+    sb,
+    `mkdir -p ${dir} ${DIR}/work/${pid} ${DIR}/public/p/${pid}/img ${DIR}/public/p/${pid}/vo && rm -f ${dir}/${pid}_*.tsx`,
+    15_000
+  );
+
+  const files: Record<string, string> = {};
+  const errors: Array<{ index: number; message: string }> = [];
+  const customs: Array<{ index: number; id: string; file: string }> = [];
+
+  const slim = {
+    ...storyboard,
+    scenes: storyboard.scenes.map((s, i) => {
+      if (s.type !== "custom") return s;
+      const { code, ...rest } = s as Record<string, unknown>;
+      if (typeof code === "string" && code) {
+        const problem = checkCode(code);
+        if (problem) {
+          errors.push({ index: i, message: problem });
+        } else {
+          const file = `${dir}/${pid}_${String(s.id)}.tsx`;
+          files[file] = code;
+          customs.push({ index: i, id: String(s.id), file });
+        }
+      } else {
+        errors.push({ index: i, message: "This AI scene has no code yet." });
+      }
+      return rest;
+    }),
+  };
+  files[`${DIR}/work/${pid}/storyboard.json`] = JSON.stringify(slim);
+  await writeFiles(sb, files);
+
+  let good = customs;
+  if (customs.length > 0) {
+    const r = await exec(sb, `cd ${DIR} && node check.cjs ${customs.map((c) => `'${c.file}'`).join(" ")}`, 30_000);
+    try {
+      const out = JSON.parse(r.stdout.trim().split("\n").pop() || "{}") as { bad?: Array<{ file: string; message: string }> };
+      const badFiles = new Map((out.bad ?? []).map((b) => [b.file, b.message]));
+      for (const c of customs) {
+        if (badFiles.has(c.file)) errors.push({ index: c.index, message: "Syntax error: " + badFiles.get(c.file) });
+      }
+      good = customs.filter((c) => !badFiles.has(c.file));
+    } catch {
+      // checker unavailable: the render itself will reveal problems
+    }
+  }
+
+  const registry =
+    good.map((c, i) => `import C${i} from "./${pid}_${c.id}";`).join("\n") +
+    `\nexport const CUSTOM: any = {${good.map((c, i) => `"${c.id}": C${i}`).join(",")}};\n`;
+  await writeFiles(sb, { [`${dir}/registry.ts`]: registry });
+
+  return { errors };
 }
