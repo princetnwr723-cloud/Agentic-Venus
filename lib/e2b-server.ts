@@ -52,7 +52,7 @@ function cleanKey(apiKey: string): string {
 export const GONE_PREFIX = "SANDBOX_GONE";
 
 /** connect() also RESUMES a paused sandbox and pushes the expiry 1h forward. */
-async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
+export async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   const { Sandbox } = await loadSdk();
   try {
     return (await Sandbox.connect(sandboxId, {
@@ -81,7 +81,7 @@ function loose(sandbox: DesktopSandbox) {
 }
 
 /** Runs a shell command; a non-zero exit code is returned, not thrown. */
-async function exec(
+export async function exec(
   sandbox: DesktopSandbox,
   cmd: string,
   timeoutMs = 30_000
@@ -139,7 +139,8 @@ echo started
 export type PersistenceMode = "lifecycle" | "autoPause" | "none";
 
 export async function createSandbox(
-  apiKeyInput: string
+  apiKeyInput: string,
+  opts?: { provision?: boolean }
 ): Promise<{ sandboxId: string; persistence: PersistenceMode }> {
   const apiKey = cleanKey(apiKeyInput);
   if (!apiKey) {
@@ -172,7 +173,7 @@ export async function createSandbox(
   }
   if (!sandbox) throw new Error(describeError(lastErr, "Could not create a computer."));
 
-  await startProvisioningInBackground(sandbox);
+  if (opts?.provision !== false) await startProvisioningInBackground(sandbox);
   return { sandboxId: (sandbox as unknown as { sandboxId: string }).sandboxId, persistence };
 }
 
@@ -353,7 +354,7 @@ async function pollJob(sandbox: DesktopSandbox, jobId: string, maxMs: number): P
   }
 }
 
-/** Starts a command in the background and waits up to ~30s for it to finish. */
+/** Runs a command in a REAL terminal window on the desktop (the user watches it live) and waits up to ~30s. */
 export async function shellStart(
   apiKey: string,
   sandboxId: string,
@@ -362,12 +363,43 @@ export async function shellStart(
   const sandbox = await connect(apiKey, sandboxId);
   const jobId = "j" + Date.now().toString(36);
   const b64 = Buffer.from(command, "utf8").toString("base64");
+
+  const runner = `#!/bin/bash
+touch /tmp/jobs/${jobId}.started
+cd ~
+printf '\\033[1;33m$ %s\\033[0m\\n\\n' "$(head -c 800 /tmp/jobs/${jobId}.sh)"
+bash /tmp/jobs/${jobId}.sh 2>&1 | tee /tmp/jobs/${jobId}.log
+code=\${PIPESTATUS[0]}
+echo $code > /tmp/jobs/${jobId}.exit
+printf '\\n\\033[1;32m[finished - exit code %s]\\033[0m\\n' "$code"
+sleep 25
+`;
+  const rb64 = Buffer.from(runner, "utf8").toString("base64");
+
   await exec(
     sandbox,
-    `mkdir -p /tmp/jobs && echo ${b64} | base64 -d > /tmp/jobs/${jobId}.sh && (nohup bash -lc 'bash /tmp/jobs/${jobId}.sh > /tmp/jobs/${jobId}.log 2>&1; echo $? > /tmp/jobs/${jobId}.exit' > /dev/null 2>&1 &); echo started`,
+    `mkdir -p /tmp/jobs && echo ${b64} | base64 -d > /tmp/jobs/${jobId}.sh && echo ${rb64} | base64 -d > /tmp/jobs/${jobId}.run.sh`,
     15_000
   );
-  return pollJob(sandbox, jobId, 30_000);
+
+  const run = `/tmp/jobs/${jobId}.run.sh`;
+  const launch = `export DISPLAY=:0
+if command -v xfce4-terminal >/dev/null 2>&1; then
+  nohup xfce4-terminal --geometry=110x30 --title="Agent terminal" -x bash ${run} >/dev/null 2>&1 &
+elif command -v xterm >/dev/null 2>&1; then
+  nohup xterm -geometry 110x30 -e bash ${run} >/dev/null 2>&1 &
+elif command -v x-terminal-emulator >/dev/null 2>&1; then
+  nohup x-terminal-emulator -e bash ${run} >/dev/null 2>&1 &
+fi
+sleep 4
+test -f /tmp/jobs/${jobId}.started && echo visible || echo headless`;
+  const l = await exec(sandbox, launch, 20_000);
+
+  if (!l.stdout.includes("visible")) {
+    // No terminal app could open: run it hidden so the task still works.
+    await exec(sandbox, `(nohup bash ${run} >/dev/null 2>&1 &); echo ok`, 10_000);
+  }
+  return pollJob(sandbox, jobId, 28_000);
 }
 
 export async function shellCheck(
@@ -396,6 +428,7 @@ export type PcAction = {
   query?: string;
   command?: string;
   job?: string;
+  app?: string;
 };
 
 const KEY_ALIASES: Record<string, string> = {
@@ -510,6 +543,25 @@ export async function performAction(
       await openUrl(sandbox, `https://duckduckgo.com/?q=${encodeURIComponent(q)}`);
       await new Promise((r) => setTimeout(r, 4000));
       return `search "${q.slice(0, 80)}"`;
+    }
+    case "launch": {
+      const app = (action.app ?? "").trim().toLowerCase();
+      const chrome = "google-chrome --no-sandbox --no-first-run --no-default-browser-check";
+      const code = "code --no-sandbox --user-data-dir=/home/user/.vscode-agent";
+      const apps: Record<string, string> = {
+        chrome,
+        "google-chrome": chrome,
+        firefox: "firefox",
+        terminal: "xfce4-terminal",
+        code,
+        vscode: code,
+        files: "thunar",
+      };
+      const c = apps[app];
+      if (!c) throw new Error("Unknown app. Use chrome, firefox, terminal, code or files.");
+      await exec(sandbox, `DISPLAY=:0 nohup ${c} >/dev/null 2>&1 &`, 15_000);
+      await new Promise((r) => setTimeout(r, 3500));
+      return `launch ${app}`;
     }
     default:
       throw new Error(`Unknown action type "${action.type}".`);
