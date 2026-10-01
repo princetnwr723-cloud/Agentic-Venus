@@ -148,6 +148,17 @@ export default function VenusPage() {
     if (!authLoading && !user) router.replace("/");
   }, [authLoading, user, router]);
 
+  // Keys load after the first render, so the provider chosen at startup may
+  // have no key. Move the form to a provider that actually has one.
+  useEffect(() => {
+    if (apiKeys[provider]) return;
+    const found = PROVIDERS.find((p) => apiKeys[p.id]);
+    if (found) {
+      setProvider(found.id);
+      setModel(providerMeta(found.id).models[0]);
+    }
+  }, [apiKeys, provider]);
+
   useEffect(() => {
     if (!user) return;
     listProjects(user.uid).then(setProjects).catch(() => {});
@@ -281,6 +292,16 @@ export default function VenusPage() {
         await upd({ stage: "script" });
         say("✍️ Agent storyboard likh raha hai…");
         setProgress({ label: "Storyboard", value: null });
+
+        // If this project's provider has no key (e.g. it was saved before the
+        // keys finished loading), fall back to a provider that does.
+        if (!apiKeys[p.provider]) {
+          const fallback = PROVIDERS.find((x) => apiKeys[x.id]);
+          if (fallback) {
+            say(`ℹ️ ${providerMeta(p.provider).label} ki key nahi mili — ${fallback.label} use kar raha hoon.`);
+            await upd({ provider: fallback.id, model: providerMeta(fallback.id).models[0] });
+          }
+        }
         const key = apiKeys[p.provider];
         if (!key) throw new Error("Is model ke provider ki API key Settings mein nahi hai.");
         const call = () =>
