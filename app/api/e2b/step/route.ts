@@ -4,9 +4,13 @@ import {
   GONE_PREFIX,
   createSandbox,
   performAction,
+  shellCheck,
+  shellStart,
   takeScreenshot,
   type PcAction,
+  type ShellResult,
 } from "@/lib/e2b-server";
+import { webRead, webSearch } from "@/lib/web-tools-server";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -29,6 +33,10 @@ const ALLOWED = new Set([
   "wait",
   "open_url",
   "search",
+  "shell",
+  "shell_check",
+  "web_search",
+  "web_read",
   "note",
   "done",
   "need_login",
@@ -37,39 +45,45 @@ const ALLOWED = new Set([
 ]);
 
 function systemPrompt(width: number, height: number, maxSteps: number) {
-  return `You are an AI agent that operates a Linux desktop (with a web browser) by looking at screenshots. The screenshot is ${width}x${height} pixels. All coordinates are ABSOLUTE PIXELS in that space, with (0,0) at the top-left. Never use normalized values (0-1 or 0-1000).
+  return `You are an AI agent that operates a Linux computer for the user. You can see its screen (screenshot ${width}x${height} px; coordinates are ABSOLUTE PIXELS, (0,0) top-left — never 0-1 or 0-1000 values) and you can run shell commands and read web pages directly. The computer is ALREADY ON — ignore any part of the task that only says to turn it on.
 
 Reply with ONE JSON object only — no prose, no markdown fences:
-{"observation":"<what is on the screen right now, and does it match the goal?>","thought":"<your next step and why, one sentence>","action":{...}}
+{"observation":"<what you see / what the last output said, and does it match the goal?>","thought":"<your next step and why, one sentence>","action":{...}}
 
-PREFERRED ACTIONS (fast and reliable — use these instead of clicking around):
-{"type":"search","query":"latest AI news today"}      opens a web search in the browser
-{"type":"open_url","url":"https://example.com"}       opens that page in the browser
-{"type":"note","text":"short fact you found + source"} saves a finding so you don't forget it
+TOOLS (prefer these — they are the fastest and most reliable):
+{"type":"shell","command":"..."}          run a command in a Linux terminal; you get its output back
+{"type":"shell_check","job":"j123"}       wait for a command that was still running
+{"type":"web_search","query":"..."}       search the web; you get titles, links and snippets as text
+{"type":"web_read","url":"https://..."}   read a web page as plain text
+{"type":"search","query":"..."}           show a web search in the browser on screen
+{"type":"open_url","url":"https://..."}   show a page in the browser on screen
+{"type":"note","text":"..."}              save a short finding or progress marker (kept for the whole task)
 
-OTHER ACTIONS:
-{"type":"click","x":N,"y":N}
-{"type":"double_click","x":N,"y":N}
-{"type":"right_click","x":N,"y":N}
+SCREEN ACTIONS (only when you really need the GUI):
+{"type":"click","x":N,"y":N}  {"type":"double_click","x":N,"y":N}  {"type":"right_click","x":N,"y":N}
 {"type":"type","text":"..."}
-{"type":"key","keys":"Return"}   (or a combo like "ctrl+l", "alt+Left", "ctrl+w")
+{"type":"key","keys":"Return"}   (or a combo like "ctrl+l", "alt+Left")
 {"type":"scroll","x":N,"y":N,"direction":"down","amount":3}
 {"type":"wait","seconds":2}
-{"type":"need_login","site":"Gmail"}     ask the user for email + password for a site
-{"type":"type_secret","field":"email"}   types the saved email/username (field is "email" or "password")
-{"type":"ask_user","question":"...","options":["A","B"]}   options optional; without options the user types a free-text answer (e.g. an OTP)
-{"type":"done","summary":"what you actually accomplished, including the real findings"}
+
+ASKING THE USER:
+{"type":"need_login","site":"Gmail"}     ask for email + password for a site
+{"type":"type_secret","field":"email"}   types the saved email/username (field: "email" or "password")
+{"type":"ask_user","question":"...","options":["A","B"]}   options optional; without them the user types free text (e.g. an OTP)
+
+FINISHING:
+{"type":"done","summary":"..."}
 
 RULES
-1. Stay strictly on the user's task. NEVER open YouTube, social feeds, ads, shopping pages or recommended videos unless the task explicitly asks for them.
-2. For any research / "find", "look up", "news" task: your FIRST action is "search" with a good query (add words like "today" or the current year when the user wants the latest). Then open the 2-4 most relevant NON-ad results (click a result title or use open_url), read them, and use "note" to save key facts with the source name. Finish with "done" once you have enough — the summary must contain the actual findings, not just "done".
-3. Look carefully at the screenshot before every action. If the screen is not what you expected, fix that first (close popups and cookie banners, go back with "alt+Left").
-4. Click a text field before typing into it. One action per reply. If a page is still loading, wait 2 seconds.
-5. Never repeat the same action more than twice — if it didn't work, change approach (use search/open_url or a keyboard shortcut).
-6. NEVER guess or invent credentials. If a site needs a login and you don't have credentials yet, use need_login ONCE. After the user provides them: click the email field and use type_secret with field "email", then click the password field and use type_secret with field "password", then submit.
-7. If a login page offers several ways to sign in (Google, Apple, email…), use ask_user with those choices so the user picks.
-8. For OTPs, verification codes, captchas you cannot solve, or any decision that belongs to the user, use ask_user, then type the answer they give.
-9. You have at most ${maxSteps} actions, so be efficient. When the task is finished — or truly impossible — reply with "done" and an honest summary.`;
+1. Do ALL parts of the task, in order. If the task has several parts, keep a checklist in your notes ("1/3 done"). Never call done while a part is still pending. In the done summary, state for every part whether it is done (✓) or not (✗) and why.
+2. Terminal work (installing software, files, git, scripts, checking versions): use "shell". Commands run in a normal Linux shell with passwordless sudo. Always make them non-interactive: use -y flags, DEBIAN_FRONTEND=noninteractive, curl -fsSL. After installing something, verify it (for example "claude --version"). Example for Claude Code: install Node.js 20 with "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs", then "sudo npm install -g @anthropic-ai/claude-code", then verify.
+3. If a shell result says STILL RUNNING, call shell_check with that job id until it finishes. If a command fails, read the error, fix the cause, and retry — do not give up after one failure.
+4. Research ("find", "look up", "news"): use web_search first, then web_read on the 2-4 best NON-ad results, and use note to save key facts with the source name. Use the browser (search/open_url) only if the user wants to see it or text tools fail.
+5. Stay strictly on the task. NEVER open YouTube, social feeds, ads, shopping pages or recommended videos unless the task says so.
+6. Look at the screenshot before screen actions. If the screen is not what you expected, fix that first (close popups, go back with "alt+Left"). Click a text field before typing. One action per reply.
+7. Never repeat the same action more than twice — change approach instead.
+8. NEVER guess or invent credentials. If a site needs a login and you have none, use need_login ONCE; after the user provides them, click the email field and use type_secret "email", click the password field and use type_secret "password", then submit. If a login page offers several sign-in methods, use ask_user with those choices. For OTPs, verification codes, or decisions that belong to the user, use ask_user.
+9. You have at most ${maxSteps} actions. Be efficient. The "summary" in done must contain the real results (findings, versions, paths) — not just "done".`;
 }
 
 function parseStep(text: string): { thought: string; action: AgentAction } | null {
@@ -78,7 +92,6 @@ function parseStep(text: string): { thought: string; action: AgentAction } | nul
   if (start === -1 || end <= start) return null;
   try {
     const parsed = JSON.parse(text.slice(start, end + 1)) as {
-      observation?: string;
       thought?: string;
       action?: AgentAction;
     };
@@ -87,6 +100,13 @@ function parseStep(text: string): { thought: string; action: AgentAction } | nul
   } catch {
     return null;
   }
+}
+
+function formatShell(r: ShellResult): string {
+  const head = r.done
+    ? `exit code: ${r.exitCode}`
+    : `STILL RUNNING (job id ${r.jobId}). Call shell_check with this job id to wait for it.`;
+  return `${head}\n${r.output || "(no output yet)"}`.slice(0, 3800);
 }
 
 export async function POST(req: Request) {
@@ -104,6 +124,7 @@ export async function POST(req: Request) {
       hint,
       stepNo,
       maxSteps,
+      lastOutput,
       creds,
     }: {
       e2bKey: string;
@@ -117,6 +138,7 @@ export async function POST(req: Request) {
       hint?: string;
       stepNo?: number;
       maxSteps?: number;
+      lastOutput?: string;
       creds?: { email?: string; password?: string };
     } = body;
 
@@ -133,23 +155,23 @@ export async function POST(req: Request) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       if (msg.startsWith(GONE_PREFIX)) {
-        const newSandboxId = await createSandbox(e2bKey);
+        const created = await createSandbox(e2bKey);
         return NextResponse.json({
           done: false,
           thought: "",
           actionText:
             "The computer had expired, so a fresh one was started (files from the old one are gone).",
-          newSandboxId,
+          newSandboxId: created.sandboxId,
         });
       }
       throw err;
     }
 
-    const limit = maxSteps ?? 40;
+    const limit = maxSteps ?? 50;
     const current = stepNo ?? 1;
     const budgetHint =
       current >= limit - 3
-        ? "You are almost out of steps — wrap up NOW with done and a summary of what you found."
+        ? "You are almost out of steps — wrap up NOW with done and a summary of what you achieved."
         : "";
 
     const reply = await callProvider({
@@ -165,6 +187,7 @@ export async function POST(req: Request) {
             `Action ${current} of ${limit}.`,
             `Notes saved so far:\n${notes && notes.length > 0 ? notes.map((n) => `- ${n}`).join("\n") : "(none)"}`,
             `Steps so far:\n${history && history.length > 0 ? history.join("\n") : "(none yet)"}`,
+            lastOutput ? `Output of your previous action:\n${lastOutput}` : "",
             hint ? `IMPORTANT: ${hint}` : "",
             budgetHint ? `IMPORTANT: ${budgetHint}` : "",
             "Here is the current screen. Reply with the JSON for the next action.",
@@ -178,7 +201,6 @@ export async function POST(req: Request) {
 
     const step = parseStep(reply);
     if (!step) {
-      // Soft failure: let the loop try again instead of aborting the task.
       return NextResponse.json({
         done: false,
         invalid: true,
@@ -200,6 +222,60 @@ export async function POST(req: Request) {
         actionText: `noted: ${text.slice(0, 90)}`,
         note: text,
       });
+    }
+
+    if (action.type === "shell" || action.type === "shell_check") {
+      try {
+        const r =
+          action.type === "shell"
+            ? await shellStart(e2bKey, sandboxId, (action.command ?? "").trim())
+            : await shellCheck(e2bKey, sandboxId, (action.job ?? "").trim());
+        const label =
+          action.type === "shell"
+            ? `$ ${(action.command ?? "").trim().slice(0, 90)}`
+            : `check ${action.job}`;
+        return NextResponse.json({
+          done: false,
+          thought,
+          actionText: `${label} → ${r.done ? `exit ${r.exitCode}` : `still running (${r.jobId})`}`,
+          output: formatShell(r),
+        });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : "shell failed";
+        if (m.startsWith(GONE_PREFIX)) throw err;
+        return NextResponse.json({
+          done: false,
+          thought,
+          actionText: `FAILED ${action.type}: ${m}`,
+          output: `ERROR: ${m}`,
+        });
+      }
+    }
+
+    if (action.type === "web_search" || action.type === "web_read") {
+      try {
+        const text =
+          action.type === "web_search"
+            ? await webSearch((action.query ?? "").trim())
+            : await webRead((action.url ?? "").trim());
+        return NextResponse.json({
+          done: false,
+          thought,
+          actionText:
+            action.type === "web_search"
+              ? `web search "${(action.query ?? "").slice(0, 70)}"`
+              : `read ${(action.url ?? "").slice(0, 80)}`,
+          output: text.slice(0, 4500),
+        });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : "failed";
+        return NextResponse.json({
+          done: false,
+          thought,
+          actionText: `FAILED ${action.type}: ${m}`,
+          output: `ERROR: ${m} — try another source, or use search/open_url in the browser.`,
+        });
+      }
     }
 
     if (action.type === "need_login") {
@@ -248,7 +324,6 @@ export async function POST(req: Request) {
           actionText = `FAILED type_secret: no ${field} available — use need_login first.`;
         } else {
           await performAction(e2bKey, sandboxId, { type: "type", text: value });
-          // The real value is never returned or logged.
           actionText = `typed saved ${field} (hidden)`;
         }
       } else {
