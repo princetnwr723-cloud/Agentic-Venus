@@ -92,7 +92,7 @@ async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[])
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify({ model, max_tokens: 1024, system, messages: rest }),
+    body: JSON.stringify({ model, max_tokens: 4096, system, messages: rest }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
