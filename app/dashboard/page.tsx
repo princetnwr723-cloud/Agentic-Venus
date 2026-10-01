@@ -1129,7 +1129,11 @@ export default function DashboardPage() {
               </div>
               <div className="flex items-center gap-1">
                 <button
-                  onClick={() => router.push("/venus")}
+                  onClick={() =>
+                    router.push(
+                      `/venus?provider=${activeChat.provider}&model=${encodeURIComponent(activeChat.model)}`
+                    )
+                  }
                   title="Venus Pro — AI video editor"
                   className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2"
                 >
