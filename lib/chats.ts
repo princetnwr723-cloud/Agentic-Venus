@@ -27,8 +27,8 @@ export type Chat = {
   provider: ProviderId;
   model: string;
   messages: ChatMessage[];
-  // Each chat owns its own E2B computer.
   pcSandboxId?: string | null;
+  pcPaused?: boolean;
   createdAt?: Timestamp;
 };
 
@@ -44,45 +44,33 @@ export async function listChats(uid: string): Promise<Chat[]> {
 
 export async function createChat(
   uid: string,
-  init: {
-    agentName: string;
-    agentColor: AvatarColor;
-    provider: ProviderId;
-    model: string;
-  }
+  init: { agentName: string; agentColor: AvatarColor; provider: ProviderId; model: string }
 ): Promise<Chat> {
   const ref = await addDoc(chatsCol(uid), {
     ...init,
     messages: [],
     pcSandboxId: null,
+    pcPaused: false,
     createdAt: serverTimestamp(),
   });
-  return { id: ref.id, messages: [], pcSandboxId: null, ...init };
+  return { id: ref.id, messages: [], pcSandboxId: null, pcPaused: false, ...init };
 }
 
-export async function updateChatMessages(
-  uid: string,
-  chatId: string,
-  messages: ChatMessage[]
-) {
+export async function updateChatMessages(uid: string, chatId: string, messages: ChatMessage[]) {
   await updateDoc(doc(db, "users", uid, "chats", chatId), { messages });
 }
 
-export async function updateChatModel(
-  uid: string,
-  chatId: string,
-  provider: ProviderId,
-  model: string
-) {
+export async function updateChatModel(uid: string, chatId: string, provider: ProviderId, model: string) {
   await updateDoc(doc(db, "users", uid, "chats", chatId), { provider, model });
 }
 
 export async function updateChatPc(
   uid: string,
   chatId: string,
-  pcSandboxId: string | null
+  pcSandboxId: string | null,
+  pcPaused = false
 ) {
-  await updateDoc(doc(db, "users", uid, "chats", chatId), { pcSandboxId });
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { pcSandboxId, pcPaused });
 }
 
 export async function deleteChat(uid: string, chatId: string) {
