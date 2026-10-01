@@ -1,5 +1,6 @@
 import { Repeat } from "lucide-react";
 import type { ChatMessage } from "@/lib/chats";
+import Markdown from "@/components/Markdown";
 
 export default function ChatThread({
   messages,
@@ -17,15 +18,15 @@ export default function ChatThread({
           key={i}
           className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}
         >
-          <div
-            className={`max-w-[75%] whitespace-pre-wrap rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
-              m.role === "user"
-                ? "bg-ink text-bg"
-                : "border border-line bg-panel2 text-ink"
-            }`}
-          >
-            {m.content}
-          </div>
+          {m.role === "user" ? (
+            <div className="max-w-[75%] whitespace-pre-wrap rounded-xl bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">
+              {m.content}
+            </div>
+          ) : (
+            <div className="max-w-[85%] rounded-xl border border-line bg-panel2 px-4 py-2.5 text-sm leading-relaxed text-ink">
+              <Markdown text={m.content} />
+            </div>
+          )}
           {m.role === "user" && onSaveAsRoutine && (
             <button
               onClick={() => onSaveAsRoutine(m.content)}
