@@ -11,18 +11,12 @@ function extractJson(text: string): any | null {
   const a = text.indexOf("{");
   const b = text.lastIndexOf("}");
   if (a === -1 || b <= a) return null;
-  try {
-    return JSON.parse(text.slice(a, b + 1));
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(text.slice(a, b + 1)); } catch { return null; }
 }
-
 function extractCode(text: string): string {
   const m = /```(?:tsx|jsx|typescript|ts|javascript|js)?\s*\n([\s\S]*?)```/.exec(text);
   return (m ? m[1] : text).trim();
 }
-
 const PATCH_KEYS = new Set(["fontScale", "transition", "headline", "subhead", "text", "label", "caption"]);
 
 export async function POST(req: Request) {
@@ -31,9 +25,7 @@ export async function POST(req: Request) {
     const provider = body.provider as ProviderId;
     const apiKey = String(body.apiKey || "");
     const model = String(body.model || "");
-    if (!provider || !apiKey || !model) {
-      return NextResponse.json({ error: "Provider, API key and model are required." }, { status: 400 });
-    }
+    if (!provider || !apiKey || !model) return NextResponse.json({ error: "Provider, API key and model are required." }, { status: 400 });
     const ask = (content: string, image?: { mediaType: string; data: string }) =>
       callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }] });
 
@@ -42,12 +34,10 @@ export async function POST(req: Request) {
       const aspect = (["16:9", "9:16", "1:1"].includes(body.aspect) ? body.aspect : "16:9") as Aspect;
       const design = body.design === "library" ? "library" : "ai";
       const reply = await ask(
-        directorPrompt({ brief: String(body.brief || "").slice(0, 3000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design })
+        directorPrompt({ brief: String(body.brief || "").slice(0, 3000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design, context: typeof body.context === "string" ? body.context.slice(0, 3000) : undefined })
       );
       const raw = extractJson(reply);
-      if (!raw) {
-        return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
-      }
+      if (!raw) return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
       const storyboard = sanitizeStoryboard(raw, { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: seconds, keepFiles: false });
       return NextResponse.json({ storyboard });
     }
@@ -75,8 +65,7 @@ export async function POST(req: Request) {
 
     if (body.kind === "edit") {
       const scene = (body.scene ?? {}) as Record<string, unknown>;
-      const instruction = String(body.instruction || "").slice(0, 600);
-      const raw = extractJson(await ask(editPrompt(scene, instruction))) as { scene?: unknown; regenerateCode?: boolean } | null;
+      const raw = extractJson(await ask(editPrompt(scene, String(body.instruction || "").slice(0, 600)))) as { scene?: unknown; regenerateCode?: boolean } | null;
       if (!raw?.scene) return NextResponse.json({ error: "The agent could not apply that edit." }, { status: 422 });
       return NextResponse.json({ scene: sanitizeScene(raw.scene, true), regenerateCode: Boolean(raw.regenerateCode) });
     }
@@ -85,9 +74,7 @@ export async function POST(req: Request) {
       const img = body.image as { mediaType?: string; data?: string } | undefined;
       if (!img?.data) return NextResponse.json({ error: "Image missing." }, { status: 400 });
       const tiles = (Array.isArray(body.tiles) ? body.tiles : []).slice(0, 6);
-      const raw = extractJson(await ask(reviewPrompt(tiles), { mediaType: img.mediaType || "image/jpeg", data: img.data })) as
-        | { verdict?: string; issues?: any[] }
-        | null;
+      const raw = extractJson(await ask(reviewPrompt(tiles), { mediaType: img.mediaType || "image/jpeg", data: img.data })) as { verdict?: string; issues?: any[] } | null;
       const issues = (raw?.issues ?? []).slice(0, 8).map((i: any) => {
         const patch: Record<string, unknown> = {};
         for (const [k, v] of Object.entries((i?.patch ?? {}) as Record<string, unknown>)) {
