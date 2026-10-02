@@ -4,7 +4,10 @@ import { verifyUser } from "@/lib/server-auth";
 import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
 import { webRead, webSearch } from "@/lib/web-tools-server";
 import { writeBinary } from "@/lib/venus-server";
-import { ROOT, checkpoint, codeState, ensureWorkspace, listTree, q, resolvePath, runTool, startCodeSetup, wsRoot, type ToolResult } from "@/lib/code-server";
+import {
+  ROOT, checkpoint, codeState, ensureWorkspace, listTree, q, resolvePath, runTool, serveStart, serveStatus,
+  serveStop, startCodeSetup, wsRoot, type ToolResult,
+} from "@/lib/code-server";
 import type { ToolCall } from "@/lib/code-prompts";
 
 export const runtime = "nodejs";
@@ -68,6 +71,17 @@ export async function POST(req: Request) {
         const sha = mutated ? await checkpoint(sb, ws, `Step: ${calls.map((c) => c.name + (c.attrs.path ? " " + c.attrs.path : "")).join(", ")}`).catch(() => null) : null;
         return NextResponse.json({ results, checkpoint: sha });
       }
+
+      case "servestatus":
+        return NextResponse.json(await serveStatus(sb, ws));
+      case "serve": {
+        const port = Math.min(65535, Math.max(1024, Number(body.port) || 3000));
+        const r = await serveStart(sb, ws, port, body.cmd ? String(body.cmd) : undefined, Boolean(body.restart), 40_000);
+        return NextResponse.json(r);
+      }
+      case "servestop":
+        await serveStop(sb, ws);
+        return NextResponse.json({ ok: true });
 
       case "tree":
         return NextResponse.json({ files: await listTree(sb, ws) });
