@@ -1,11 +1,10 @@
 // Server-only. One E2B Desktop sandbox per chat.
 import type { Sandbox as SandboxClass } from "@e2b/desktop";
 
-const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour; extended on every connect
+const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000;
 
 type DesktopSandbox = InstanceType<typeof SandboxClass>;
 
-/** Loads the SDK lazily so a broken package can never crash a route at import time. */
 export async function loadSdk(): Promise<{ Sandbox: typeof SandboxClass }> {
   try {
     const mod = (await import("@e2b/desktop")) as unknown as {
@@ -26,10 +25,7 @@ function describeError(err: unknown, fallback: string): string {
     const issues = (err as { issues?: Array<{ path?: unknown[]; message?: string }> }).issues;
     if (Array.isArray(issues) && issues.length > 0) {
       return issues
-        .map((iss) => {
-          const field = Array.isArray(iss.path) && iss.path.length ? iss.path.join(".") : "input";
-          return `${field}: ${iss.message ?? "invalid value"}`;
-        })
+        .map((iss) => `${Array.isArray(iss.path) && iss.path.length ? iss.path.join(".") : "input"}: ${iss.message ?? "invalid value"}`)
         .join("; ");
     }
     const message = (err as { message?: string }).message;
@@ -45,6 +41,10 @@ function describeError(err: unknown, fallback: string): string {
   return `${fallback} (${String(err)})`;
 }
 
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 function cleanKey(apiKey: string): string {
   return apiKey.trim().replace(/^['"]|['"]$/g, "");
 }
@@ -55,10 +55,7 @@ export const GONE_PREFIX = "SANDBOX_GONE";
 export async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   const { Sandbox } = await loadSdk();
   try {
-    return (await Sandbox.connect(sandboxId, {
-      apiKey: cleanKey(apiKey),
-      timeoutMs: SANDBOX_TIMEOUT_MS,
-    } as never)) as unknown as DesktopSandbox;
+    return (await Sandbox.connect(sandboxId, { apiKey: cleanKey(apiKey), timeoutMs: SANDBOX_TIMEOUT_MS } as never)) as unknown as DesktopSandbox;
   } catch (err) {
     const msg = describeError(err, "Could not reach the computer.");
     if (/not found|404|does not exist|expired|doesn't exist/i.test(msg)) {
@@ -74,26 +71,21 @@ function loose(sandbox: DesktopSandbox) {
   return sandbox as unknown as {
     stream: {
       start: (opts?: Record<string, unknown>) => Promise<unknown>;
-      getUrl: (opts?: Record<string, unknown>) => string;
+      stop?: () => Promise<unknown>;
+      getUrl: (opts?: Record<string, unknown>) => unknown;
     };
     commands: { run: (cmd: string, opts?: Record<string, unknown>) => Promise<unknown> };
   };
 }
 
 /** Runs a shell command; a non-zero exit code is returned, not thrown. */
-export async function exec(
-  sandbox: DesktopSandbox,
-  cmd: string,
-  timeoutMs = 30_000
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+export async function exec(sandbox: DesktopSandbox, cmd: string, timeoutMs = 30_000): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   try {
     const r = (await loose(sandbox).commands.run(cmd, { timeoutMs })) as RunResult;
     return { stdout: r?.stdout ?? "", stderr: r?.stderr ?? "", exitCode: r?.exitCode ?? 0 };
   } catch (err) {
     const e = err as RunResult;
-    if (e && typeof e.exitCode === "number") {
-      return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", exitCode: e.exitCode };
-    }
+    if (e && typeof e.exitCode === "number") return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", exitCode: e.exitCode };
     throw err;
   }
 }
@@ -107,11 +99,11 @@ function pickString(value: unknown): string | null {
   return null;
 }
 
-/** Installs Chrome + VS Code inside the sandbox in the background; returns immediately. */
 async function startProvisioningInBackground(sandbox: DesktopSandbox) {
   const cmd = `
 cat > /tmp/provision.sh <<'EOF'
 set -e
+echo 'DPkg::Lock::Timeout "900";' | sudo tee /etc/apt/apt.conf.d/99locktimeout >/dev/null
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -y
 if ! command -v google-chrome >/dev/null 2>&1; then
@@ -128,11 +120,10 @@ EOF
 nohup bash /tmp/provision.sh > /tmp/provision.log 2>&1 < /dev/null &
 echo started
 `.trim();
-
   try {
     await exec(sandbox, cmd, 20_000);
   } catch {
-    // Not fatal.
+    // not fatal
   }
 }
 
@@ -143,16 +134,10 @@ export async function createSandbox(
   opts?: { provision?: boolean }
 ): Promise<{ sandboxId: string; persistence: PersistenceMode }> {
   const apiKey = cleanKey(apiKeyInput);
-  if (!apiKey) {
-    throw new Error("The E2B API key is empty after trimming — re-save it in Settings.");
-  }
+  if (!apiKey) throw new Error("The E2B API key is empty after trimming — re-save it in Settings.");
 
   const { Sandbox } = await loadSdk();
   const base = { apiKey, timeoutMs: SANDBOX_TIMEOUT_MS };
-
-  // Best option first: when the timer runs out the computer PAUSES (all data
-  // kept) instead of being killed. Older SDKs get the older option, and as a
-  // last resort a plain computer (then the app pauses it itself before expiry).
   const attempts: Array<{ mode: PersistenceMode; opts: Record<string, unknown> }> = [
     { mode: "lifecycle", opts: { ...base, lifecycle: { onTimeout: "pause", autoResume: true } } },
     { mode: "autoPause", opts: { ...base, autoPause: true } },
@@ -177,7 +162,6 @@ export async function createSandbox(
   return { sandboxId: (sandbox as unknown as { sandboxId: string }).sandboxId, persistence };
 }
 
-/** Turns the computer OFF without losing anything (files, apps, logins stay). */
 export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Promise<void> {
   const apiKey = cleanKey(apiKeyInput);
   const { Sandbox } = await loadSdk();
@@ -185,39 +169,19 @@ export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Prom
     pause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
     betaPause?: (id: string, o?: Record<string, unknown>) => Promise<unknown>;
   };
-
   try {
-    if (typeof S.pause === "function") {
-      await S.pause(sandboxId, { apiKey });
-      return;
-    }
-    if (typeof S.betaPause === "function") {
-      await S.betaPause(sandboxId, { apiKey });
-      return;
-    }
-    const sb = (await connect(apiKey, sandboxId)) as unknown as {
-      pause?: () => Promise<unknown>;
-      betaPause?: () => Promise<unknown>;
-    };
-    if (typeof sb.pause === "function") {
-      await sb.pause();
-      return;
-    }
-    if (typeof sb.betaPause === "function") {
-      await sb.betaPause();
-      return;
-    }
+    if (typeof S.pause === "function") { await S.pause(sandboxId, { apiKey }); return; }
+    if (typeof S.betaPause === "function") { await S.betaPause(sandboxId, { apiKey }); return; }
+    const sb = (await connect(apiKey, sandboxId)) as unknown as { pause?: () => Promise<unknown>; betaPause?: () => Promise<unknown> };
+    if (typeof sb.pause === "function") { await sb.pause(); return; }
+    if (typeof sb.betaPause === "function") { await sb.betaPause(); return; }
   } catch (err) {
     const msg = describeError(err, "Could not pause the computer.");
-    if (/already.*paus|paused/i.test(msg)) return; // already off
-    if (/not found|404|does not exist|expired/i.test(msg)) {
-      throw new Error(`${GONE_PREFIX}: this computer has expired or was deleted.`);
-    }
+    if (/already.*paus|paused/i.test(msg)) return;
+    if (/not found|404|does not exist|expired/i.test(msg)) throw new Error(`${GONE_PREFIX}: this computer has expired or was deleted.`);
     throw new Error(msg);
   }
-  throw new Error(
-    "This version of the E2B SDK has no pause feature, so the computer was left running (nothing was deleted)."
-  );
+  throw new Error("This version of the E2B SDK has no pause feature, so the computer was left running (nothing was deleted).");
 }
 
 export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<void> {
@@ -225,78 +189,29 @@ export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<
     const sandbox = await connect(apiKey, sandboxId);
     await (sandbox as unknown as { kill: () => Promise<void> }).kill();
   } catch (err) {
-    const message = err instanceof Error ? err.message : "";
-    if (message.startsWith(GONE_PREFIX)) return; // already gone
+    if ((err instanceof Error ? err.message : "").startsWith(GONE_PREFIX)) return;
     throw err;
   }
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 export async function getScreenUrl(apiKey: string, sandboxId: string): Promise<string> {
   const sandbox = await connect(apiKey, sandboxId);
-  const stream = (
-    sandbox as unknown as {
-      stream: {
-        start: (o?: Record<string, unknown>) => Promise<unknown>;
-        stop?: () => Promise<unknown>;
-        getUrl: (o?: Record<string, unknown>) => unknown;
-      };
-    }
-  ).stream;
-
+  const stream = loose(sandbox).stream;
   let problem = "";
 
-  // 1) Normal path.
-  try {
-    await stream.start();
-  } catch (e) {
-    problem = errMsg(e);
-  }
-  try {
-    const u = pickString(stream.getUrl());
-    if (u) return u;
-  } catch (e) {
-    problem ||= errMsg(e);
-  }
+  try { await stream.start(); } catch (e) { problem = errMsg(e); }
+  try { const u = pickString(stream.getUrl()); if (u) return u; } catch (e) { problem ||= errMsg(e); }
 
-  // 2) After a resume, the old screen servers are still in memory but this
-  //    connection doesn't know them. Clean them up and start fresh.
-  try {
-    await exec(
-      sandbox,
-      "pkill -f '[n]ovnc_proxy'; pkill -f '[w]ebsockify'; pkill -x x11vnc; sleep 1; true",
-      20_000
-    );
-  } catch {
-    // ignore
-  }
-  try {
-    await stream.stop?.();
-  } catch {
-    // ignore
-  }
-  try {
-    await stream.start();
-  } catch (e) {
-    problem = errMsg(e);
-  }
-  try {
-    const u = pickString(stream.getUrl());
-    if (u) return u;
-  } catch (e) {
-    problem ||= errMsg(e);
-  }
+  // After a resume the old screen servers are still in memory; clean up and start fresh.
+  try { await exec(sandbox, "pkill -f '[n]ovnc_proxy'; pkill -f '[w]ebsockify'; pkill -x x11vnc; sleep 1; true", 20_000); } catch { /* ignore */ }
+  try { await stream.stop?.(); } catch { /* ignore */ }
+  try { await stream.start(); } catch (e) { problem = errMsg(e); }
+  try { const u = pickString(stream.getUrl()); if (u) return u; } catch (e) { problem = errMsg(e); }
 
-  // 3) Last resort: the standard noVNC address of the running screen server.
   try {
     const host = (sandbox as unknown as { getHost?: (p: number) => string }).getHost?.(6080);
     if (host) return `https://${host}/vnc.html?autoconnect=true&resize=scale`;
-  } catch {
-    // ignore
-  }
+  } catch { /* ignore */ }
 
   throw new Error(`The live screen could not be started: ${problem || "unknown error"}`);
 }
@@ -305,10 +220,7 @@ export type Screenshot = { data: string; mediaType: string; width: number; heigh
 
 export async function takeScreenshot(apiKey: string, sandboxId: string): Promise<Screenshot> {
   const sandbox = await connect(apiKey, sandboxId);
-  const bytes = await (
-    sandbox as unknown as { screenshot: () => Promise<Uint8Array> }
-  ).screenshot();
-
+  const bytes = await (sandbox as unknown as { screenshot: () => Promise<Uint8Array> }).screenshot();
   const buf = Buffer.from(bytes);
   const isPng = buf.length > 24 && buf.toString("ascii", 1, 4) === "PNG";
   return {
@@ -319,47 +231,28 @@ export async function takeScreenshot(apiKey: string, sandboxId: string): Promise
   };
 }
 
-// ---- Shell jobs: run commands (even long installs) and read their output ----
+// ---- Shell jobs (run in a REAL terminal window so the user can watch) ----
 
-export type ShellResult = {
-  jobId: string;
-  done: boolean;
-  exitCode?: number;
-  output: string;
-};
+export type ShellResult = { jobId: string; done: boolean; exitCode?: number; output: string };
 
 function cleanOutput(s: string): string {
-  return s
-    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-    .replace(/\r/g, "")
-    .trim();
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").trim();
 }
 
 async function pollJob(sandbox: DesktopSandbox, jobId: string, maxMs: number): Promise<ShellResult> {
   const deadline = Date.now() + maxMs;
   for (;;) {
-    const r = await exec(
-      sandbox,
-      `cat /tmp/jobs/${jobId}.exit 2>/dev/null; echo ---; tail -c 3500 /tmp/jobs/${jobId}.log 2>/dev/null`,
-      10_000
-    );
+    const r = await exec(sandbox, `cat /tmp/jobs/${jobId}.exit 2>/dev/null; echo ---; tail -c 3500 /tmp/jobs/${jobId}.log 2>/dev/null`, 10_000);
     const idx = r.stdout.indexOf("---\n");
     const exitStr = (idx >= 0 ? r.stdout.slice(0, idx) : "").trim();
     const log = cleanOutput(idx >= 0 ? r.stdout.slice(idx + 4) : r.stdout);
     const done = exitStr !== "";
-    if (done || Date.now() >= deadline) {
-      return { jobId, done, exitCode: done ? Number(exitStr) : undefined, output: log };
-    }
+    if (done || Date.now() >= deadline) return { jobId, done, exitCode: done ? Number(exitStr) : undefined, output: log };
     await new Promise((res) => setTimeout(res, 2500));
   }
 }
 
-/** Runs a command in a REAL terminal window on the desktop (the user watches it live) and waits up to ~30s. */
-export async function shellStart(
-  apiKey: string,
-  sandboxId: string,
-  command: string
-): Promise<ShellResult> {
+export async function shellStart(apiKey: string, sandboxId: string, command: string): Promise<ShellResult> {
   const sandbox = await connect(apiKey, sandboxId);
   const jobId = "j" + Date.now().toString(36);
   const b64 = Buffer.from(command, "utf8").toString("base64");
@@ -367,6 +260,10 @@ export async function shellStart(
   const runner = `#!/bin/bash
 touch /tmp/jobs/${jobId}.started
 cd ~
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+sudo sh -c 'echo "DPkg::Lock::Timeout \\"900\\";" > /etc/apt/apt.conf.d/99locktimeout' >/dev/null 2>&1 || true
+grep -q 'npm-global' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
 printf '\\033[1;33m$ %s\\033[0m\\n\\n' "$(head -c 800 /tmp/jobs/${jobId}.sh)"
 bash /tmp/jobs/${jobId}.sh 2>&1 | tee /tmp/jobs/${jobId}.log
 code=\${PIPESTATUS[0]}
@@ -376,11 +273,7 @@ sleep 25
 `;
   const rb64 = Buffer.from(runner, "utf8").toString("base64");
 
-  await exec(
-    sandbox,
-    `mkdir -p /tmp/jobs && echo ${b64} | base64 -d > /tmp/jobs/${jobId}.sh && echo ${rb64} | base64 -d > /tmp/jobs/${jobId}.run.sh`,
-    15_000
-  );
+  await exec(sandbox, `mkdir -p /tmp/jobs && echo ${b64} | base64 -d > /tmp/jobs/${jobId}.sh && echo ${rb64} | base64 -d > /tmp/jobs/${jobId}.run.sh`, 15_000);
 
   const run = `/tmp/jobs/${jobId}.run.sh`;
   const launch = `export DISPLAY=:0
@@ -394,19 +287,11 @@ fi
 sleep 4
 test -f /tmp/jobs/${jobId}.started && echo visible || echo headless`;
   const l = await exec(sandbox, launch, 20_000);
-
-  if (!l.stdout.includes("visible")) {
-    // No terminal app could open: run it hidden so the task still works.
-    await exec(sandbox, `(nohup bash ${run} >/dev/null 2>&1 &); echo ok`, 10_000);
-  }
+  if (!l.stdout.includes("visible")) await exec(sandbox, `(nohup bash ${run} >/dev/null 2>&1 &); echo ok`, 10_000);
   return pollJob(sandbox, jobId, 28_000);
 }
 
-export async function shellCheck(
-  apiKey: string,
-  sandboxId: string,
-  jobId: string
-): Promise<ShellResult> {
+export async function shellCheck(apiKey: string, sandboxId: string, jobId: string): Promise<ShellResult> {
   if (!/^j[a-z0-9]+$/.test(jobId)) throw new Error("Invalid job id.");
   const sandbox = await connect(apiKey, sandboxId);
   return pollJob(sandbox, jobId, 30_000);
@@ -416,80 +301,36 @@ export async function shellCheck(
 
 export type PcAction = {
   type: string;
-  x?: number;
-  y?: number;
-  text?: string;
-  keys?: string;
-  direction?: string;
-  amount?: number;
-  seconds?: number;
-  summary?: string;
-  url?: string;
-  query?: string;
-  command?: string;
-  job?: string;
-  app?: string;
+  x?: number; y?: number; text?: string; keys?: string; direction?: string; amount?: number; seconds?: number;
+  summary?: string; url?: string; query?: string; command?: string; job?: string; app?: string;
 };
 
 const KEY_ALIASES: Record<string, string> = {
-  enter: "Return",
-  return: "Return",
-  esc: "Escape",
-  escape: "Escape",
-  backspace: "BackSpace",
-  delete: "Delete",
-  del: "Delete",
-  tab: "Tab",
-  space: "space",
-  control: "ctrl",
-  ctrl: "ctrl",
-  alt: "alt",
-  shift: "shift",
-  left: "Left",
-  right: "Right",
-  up: "Up",
-  down: "Down",
-  pageup: "Prior",
-  pagedown: "Next",
-  home: "Home",
-  end: "End",
+  enter: "Return", return: "Return", esc: "Escape", escape: "Escape", backspace: "BackSpace",
+  delete: "Delete", del: "Delete", tab: "Tab", space: "space", control: "ctrl", ctrl: "ctrl",
+  alt: "alt", shift: "shift", left: "Left", right: "Right", up: "Up", down: "Down",
+  pageup: "Prior", pagedown: "Next", home: "Home", end: "End",
 };
-
-function normalizeKey(k: string): string {
-  const t = k.trim();
-  return KEY_ALIASES[t.toLowerCase()] ?? t;
-}
+const normalizeKey = (k: string) => KEY_ALIASES[k.trim().toLowerCase()] ?? k.trim();
 
 function normalizeUrl(input: string): string {
   const raw = input.trim();
   if (!raw) throw new Error("open_url needs a url.");
   const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
-  if (!/^https?:\/\//i.test(withScheme)) {
-    throw new Error("Only http(s) links can be opened.");
-  }
+  if (!/^https?:\/\//i.test(withScheme)) throw new Error("Only http(s) links can be opened.");
   return withScheme;
 }
 
-/** Opens a link in the computer's default browser — far more reliable than clicking around. */
-async function openUrl(sandbox: DesktopSandbox, url: string) {
+export async function openUrl(sandbox: DesktopSandbox, url: string) {
   const d = sandbox as unknown as { open?: (target: string) => Promise<unknown> };
   try {
-    if (typeof d.open === "function") {
-      await d.open(url);
-      return;
-    }
-  } catch {
-    // fall through to the shell fallback
-  }
+    if (typeof d.open === "function") { await d.open(url); return; }
+  } catch { /* fall through */ }
   const safe = url.replace(/'/g, "%27");
   await exec(sandbox, `DISPLAY=:0 nohup xdg-open '${safe}' >/dev/null 2>&1 &`, 15_000);
 }
 
-export async function performAction(
-  apiKey: string,
-  sandboxId: string,
-  action: PcAction
-): Promise<string> {
+export async function performAction(apiKey: string, sandboxId: string, action: PcAction): Promise<string> {
   const sandbox = await connect(apiKey, sandboxId);
   const d = sandbox as unknown as {
     leftClick: (x: number, y: number) => Promise<void>;
@@ -503,22 +344,13 @@ export async function performAction(
   const y = Math.round(action.y ?? 0);
 
   switch (action.type) {
-    case "click":
-      await d.leftClick(x, y);
-      return `click (${x}, ${y})`;
-    case "double_click":
-      await d.doubleClick(x, y);
-      return `double-click (${x}, ${y})`;
-    case "right_click":
-      await d.rightClick(x, y);
-      return `right-click (${x}, ${y})`;
-    case "type":
-      await d.write(action.text ?? "");
-      return `type "${(action.text ?? "").slice(0, 60)}"`;
+    case "click": await d.leftClick(x, y); return `click (${x}, ${y})`;
+    case "double_click": await d.doubleClick(x, y); return `double-click (${x}, ${y})`;
+    case "right_click": await d.rightClick(x, y); return `right-click (${x}, ${y})`;
+    case "type": await d.write(action.text ?? ""); return `type "${(action.text ?? "").slice(0, 60)}"`;
     case "key": {
       const keys = action.keys ?? "";
-      const parts = keys.includes("+") ? keys.split("+").map(normalizeKey) : normalizeKey(keys);
-      await d.press(parts);
+      await d.press(keys.includes("+") ? keys.split("+").map(normalizeKey) : normalizeKey(keys));
       return `press ${keys}`;
     }
     case "scroll": {
@@ -548,15 +380,7 @@ export async function performAction(
       const app = (action.app ?? "").trim().toLowerCase();
       const chrome = "google-chrome --no-sandbox --no-first-run --no-default-browser-check";
       const code = "code --no-sandbox --user-data-dir=/home/user/.vscode-agent";
-      const apps: Record<string, string> = {
-        chrome,
-        "google-chrome": chrome,
-        firefox: "firefox",
-        terminal: "xfce4-terminal",
-        code,
-        vscode: code,
-        files: "thunar",
-      };
+      const apps: Record<string, string> = { chrome, "google-chrome": chrome, firefox: "firefox", terminal: "xfce4-terminal", code, vscode: code, files: "thunar" };
       const c = apps[app];
       if (!c) throw new Error("Unknown app. Use chrome, firefox, terminal, code or files.");
       await exec(sandbox, `DISPLAY=:0 nohup ${c} >/dev/null 2>&1 &`, 15_000);
