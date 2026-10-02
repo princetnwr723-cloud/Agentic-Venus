@@ -2,8 +2,7 @@ import type { ReactNode } from "react";
 
 function renderInline(text: string, prefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const re =
-    /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))|(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g;
+  const re = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[[^\]\n]+\]\((?:https?:\/\/|\/)[^\s)]+\))|(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g;
   let last = 0;
   let i = 0;
   let m: RegExpExecArray | null;
@@ -12,34 +11,14 @@ function renderInline(text: string, prefix: string): ReactNode[] {
     const tok = m[0];
     const k = `${prefix}-${i++}`;
     if (m[1]) {
-      nodes.push(
-        <code key={k} className="rounded bg-bg px-1 py-0.5 text-[12.5px] text-gold">
-          {tok.slice(1, -1)}
-        </code>
-      );
+      nodes.push(<code key={k} className="rounded bg-bg px-1 py-0.5 text-[12.5px] text-gold">{tok.slice(1, -1)}</code>);
     } else if (m[2]) {
-      nodes.push(
-        <strong key={k} className="font-semibold">
-          {tok.slice(2, -2)}
-        </strong>
-      );
+      nodes.push(<strong key={k} className="font-semibold">{tok.slice(2, -2)}</strong>);
     } else if (m[3]) {
-      const mm = /^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/.exec(tok);
-      if (mm) {
-        nodes.push(
-          <a key={k} href={mm[2]} target="_blank" rel="noreferrer" className="text-gold underline">
-            {mm[1]}
-          </a>
-        );
-      } else {
-        nodes.push(tok);
-      }
+      const mm = /^\[([^\]]+)\]\(((?:https?:\/\/|\/)[^)]+)\)$/.exec(tok);
+      nodes.push(mm ? <a key={k} href={mm[2]} target="_blank" rel="noreferrer" className="text-gold underline">{mm[1]}</a> : tok);
     } else {
-      nodes.push(
-        <a key={k} href={tok} target="_blank" rel="noreferrer" className="break-all text-gold underline">
-          {tok}
-        </a>
-      );
+      nodes.push(<a key={k} href={tok} target="_blank" rel="noreferrer" className="break-all text-gold underline">{tok}</a>);
     }
     last = m.index + tok.length;
   }
@@ -60,7 +39,6 @@ export default function Markdown({ text }: { text: string }) {
 
   while (i < lines.length) {
     const line = lines[i];
-
     if (isFence(line)) {
       const code: string[] = [];
       i++;
@@ -68,22 +46,14 @@ export default function Markdown({ text }: { text: string }) {
         code.push(lines[i]);
         i++;
       }
-      i++; // closing fence
+      i++;
       out.push(
-        <pre
-          key={key++}
-          className="my-2 overflow-x-auto rounded-lg border border-line bg-bg p-3 text-[12.5px] leading-relaxed text-ink"
-        >
+        <pre key={key++} className="my-2 overflow-x-auto rounded-lg border border-line bg-bg p-3 text-[12.5px] leading-relaxed text-ink">
           <code>{code.join("\n")}</code>
         </pre>
       );
     } else if (isHeading(line)) {
-      const content = line.replace(/^#{1,4}\s+/, "");
-      out.push(
-        <p key={key++} className="mb-1 mt-3 text-[15px] font-semibold text-ink">
-          {renderInline(content, `h${key}`)}
-        </p>
-      );
+      out.push(<p key={key++} className="mb-1 mt-3 text-[15px] font-semibold text-ink">{renderInline(line.replace(/^#{1,4}\s+/, ""), `h${key}`)}</p>);
       i++;
     } else if (isBullet(line)) {
       const items: string[] = [];
@@ -91,38 +61,19 @@ export default function Markdown({ text }: { text: string }) {
         items.push(lines[i].replace(/^\s*[-*•]\s+/, ""));
         i++;
       }
-      out.push(
-        <ul key={key++} className="my-1.5 list-disc space-y-1 pl-5">
-          {items.map((it, n) => (
-            <li key={n}>{renderInline(it, `u${key}-${n}`)}</li>
-          ))}
-        </ul>
-      );
+      out.push(<ul key={key++} className="my-1.5 list-disc space-y-1 pl-5">{items.map((it, n) => <li key={n}>{renderInline(it, `u${key}-${n}`)}</li>)}</ul>);
     } else if (isNumbered(line)) {
       const items: string[] = [];
       while (i < lines.length && isNumbered(lines[i])) {
         items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
         i++;
       }
-      out.push(
-        <ol key={key++} className="my-1.5 list-decimal space-y-1 pl-5">
-          {items.map((it, n) => (
-            <li key={n}>{renderInline(it, `o${key}-${n}`)}</li>
-          ))}
-        </ol>
-      );
+      out.push(<ol key={key++} className="my-1.5 list-decimal space-y-1 pl-5">{items.map((it, n) => <li key={n}>{renderInline(it, `o${key}-${n}`)}</li>)}</ol>);
     } else if (line.trim() === "") {
       i++;
     } else {
       const para: string[] = [];
-      while (
-        i < lines.length &&
-        lines[i].trim() !== "" &&
-        !isFence(lines[i]) &&
-        !isHeading(lines[i]) &&
-        !isBullet(lines[i]) &&
-        !isNumbered(lines[i])
-      ) {
+      while (i < lines.length && lines[i].trim() !== "" && !isFence(lines[i]) && !isHeading(lines[i]) && !isBullet(lines[i]) && !isNumbered(lines[i])) {
         para.push(lines[i]);
         i++;
       }
@@ -138,6 +89,5 @@ export default function Markdown({ text }: { text: string }) {
       );
     }
   }
-
   return <div className="break-words">{out}</div>;
 }
