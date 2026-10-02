@@ -1,10 +1,11 @@
 export const SCENE_TYPES = [
   "title", "kinetic", "bullets", "stat", "bar-chart", "line-chart",
-  "quote", "split", "timeline", "ranking", "image", "outro", "custom",
+  "quote", "split", "timeline", "ranking", "image", "footage", "outro", "custom",
 ] as const;
 export type SceneType = (typeof SCENE_TYPES)[number];
 
 export const FONT_NAMES = ["inter", "montserrat", "poppins", "spacegrotesk", "playfair", "oswald"];
+export const CAMERA_MOVES = ["push", "pull", "pan-left", "pan-right", "tilt-up", "tilt-down", "orbit", "handheld", "crash-zoom", "whip"];
 
 export const THEMES = [
   { id: "midnight", label: "Midnight", colors: ["#070b1f", "#5b8cff", "#a66bff"] },
@@ -29,21 +30,13 @@ export const OVERLAP = 12;
 
 export type Scene = { type: SceneType; seconds: number; [k: string]: unknown };
 export type Storyboard = {
-  title: string;
-  concept?: string;
-  fps: number;
-  width: number;
-  height: number;
-  theme: string;
-  palette?: Record<string, string>;
-  fonts?: { display?: string; body?: string };
-  captions: boolean;
-  scenes: Scene[];
+  title: string; concept?: string; fps: number; width: number; height: number; theme: string;
+  palette?: Record<string, string>; fonts?: { display?: string; body?: string };
+  music?: string; captions: boolean; scenes: Scene[];
 };
 
 const ALLOWED_IMPORTS = ["react", "remotion", "../kit", "../theme"];
 
-/** Static safety check for AI-written scene code. Returns a problem description or null. */
 export function checkCode(code: string): string | null {
   if (!code || code.length < 40) return "The scene code is empty.";
   if (code.length > 12000) return "The scene code is too long (max ~140 lines).";
@@ -61,9 +54,7 @@ function clean(v: unknown, depth = 0): unknown {
   if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
   if (typeof v === "boolean") return v;
   if (depth >= 3) return undefined;
-  if (Array.isArray(v)) {
-    return v.slice(0, 8).map((x) => clean(x, depth + 1)).filter((x) => x !== undefined);
-  }
+  if (Array.isArray(v)) return v.slice(0, 8).map((x) => clean(x, depth + 1)).filter((x) => x !== undefined);
   if (v && typeof v === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>).slice(0, 16)) {
@@ -76,7 +67,8 @@ function clean(v: unknown, depth = 0): unknown {
   return undefined;
 }
 
-const FILE_RE = /^p\/[A-Za-z0-9_-]+\/(img|vo)\/[A-Za-z0-9_.-]+$/;
+const FILE_RE = /^p\/[A-Za-z0-9_-]+\/(img|vo|vid)\/[A-Za-z0-9_.-]+$/;
+const MUSIC_RE = /^p\/[A-Za-z0-9_-]+\/music\.mp3$/;
 
 export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
   const rawObj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -85,11 +77,15 @@ export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
   const type = SCENE_TYPES.includes(base.type as SceneType) ? (base.type as SceneType) : "title";
   const seconds = Math.min(14, Math.max(2.5, Number(base.seconds) || 4));
   const out: Scene = { ...base, type, seconds };
-  for (const k of ["voice", "image"]) {
+  for (const k of ["voice", "image", "video"]) {
     if (!keepFiles || typeof out[k] !== "string" || !FILE_RE.test(String(out[k]))) delete out[k];
   }
   if (out.transition !== undefined && !TRANSITIONS.includes(String(out.transition))) delete out.transition;
   if (out.fontScale !== undefined) out.fontScale = Math.min(1.3, Math.max(0.5, Number(out.fontScale) || 1));
+  if (out.camera !== undefined) {
+    const list = (Array.isArray(out.camera) ? out.camera : [out.camera]).map(String).filter((c) => CAMERA_MOVES.includes(c)).slice(0, 3);
+    if (list.length) out.camera = list; else delete out.camera;
+  }
   if (type === "custom") {
     out.id = String(base.id ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12) || "c" + Date.now().toString(36).slice(-5);
     if (code) out.code = code;
@@ -110,9 +106,7 @@ export function sanitizeStoryboard(
 
   const list = Array.isArray(r.scenes) ? r.scenes.slice(0, 14) : [];
   let scenes = list.map((s) => sanitizeScene(s, Boolean(opts.keepFiles)));
-  if (scenes.length === 0) {
-    scenes = [{ type: "title", seconds: 4, headline: String(r.title ?? "Untitled") }];
-  }
+  if (scenes.length === 0) scenes = [{ type: "title", seconds: 4, headline: String(r.title ?? "Untitled") }];
 
   const seen = new Set<string>();
   scenes = scenes.map((s, i) => {
@@ -144,12 +138,10 @@ export function sanitizeStoryboard(
   return {
     title: String(clean(r.title) ?? "Untitled").slice(0, 80),
     concept: typeof r.concept === "string" ? r.concept.slice(0, 300) : undefined,
-    fps: 30,
-    width,
-    height,
-    theme,
+    fps: 30, width, height, theme,
     ...(Object.keys(palette).length >= 4 ? { palette } : {}),
     ...(fonts.display || fonts.body ? { fonts } : {}),
+    ...(opts.keepFiles && typeof r.music === "string" && MUSIC_RE.test(r.music) ? { music: r.music } : {}),
     captions: opts.captions ?? Boolean(r.captions),
     scenes,
   };
