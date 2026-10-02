@@ -3,7 +3,7 @@ import { db } from "@/lib/firebase";
 import type { Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
 
-export type Stage = "studio" | "script" | "assets" | "voice" | "preview" | "review" | "final" | "done";
+export type Stage = "studio" | "script" | "design" | "assets" | "voice" | "preview" | "review" | "final" | "done";
 
 export type VenusProject = {
   id: string;
@@ -17,6 +17,9 @@ export type VenusProject = {
   captions: boolean;
   quality: "720p" | "1080p";
   review: boolean;
+  design?: "ai" | "library";
+  music?: boolean;
+  origin?: "venus" | "chat";
   provider: ProviderId;
   model: string;
   stage: Stage;
@@ -31,13 +34,11 @@ export type VenusProject = {
 
 export async function listProjects(uid: string): Promise<VenusProject[]> {
   const snap = await getDocs(collection(db, "users", uid, "venusProjects"));
-  return snap.docs
-    .map((d) => d.data() as VenusProject)
-    .sort((a, b) => b.createdAt - a.createdAt);
+  return snap.docs.map((d) => d.data() as VenusProject).sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function saveProject(uid: string, p: VenusProject) {
-  const clean = JSON.parse(JSON.stringify(p)) as VenusProject; // drops undefined
+  const clean = JSON.parse(JSON.stringify(p)) as VenusProject;
   await setDoc(doc(db, "users", uid, "venusProjects", p.id), clean);
 }
 
