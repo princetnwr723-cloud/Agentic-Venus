@@ -5,8 +5,10 @@ import type { ToolCall } from "@/lib/code-prompts";
 
 export type Sb = Awaited<ReturnType<typeof connect>>;
 export const ROOT = "/home/user/work";
+const TOOLS_DIR = "/home/user/.venus-tools";
 export const q = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 
 export function wsRoot(ws: string): string {
   const id = ws.replace(/[^A-Za-z0-9_-]/g, "");
@@ -28,24 +30,68 @@ export function resolvePath(ws: string, p: string): string {
 
 export type ToolResult = { text: string; mutated?: boolean; image?: { mediaType: string; data: string }; preview?: string };
 
-const CODE_VERSION = "1";
+const CODE_VERSION = "2";
 export const CODE_SETUP_SCRIPT = `set -e
 export DEBIAN_FRONTEND=noninteractive
 echo 'DPkg::Lock::Timeout "900";' | sudo tee /etc/apt/apt.conf.d/99locktimeout >/dev/null
-echo "== [1/3] system packages"
+echo "== [1/4] system packages"
 sudo apt-get update -y || true
-sudo apt-get install -y git ripgrep zip unzip jq build-essential python3-pip curl ca-certificates
-echo "== [2/3] Node.js"
+sudo apt-get install -y git ripgrep zip unzip jq ffmpeg build-essential python3-pip curl ca-certificates
+echo "== [2/4] Node.js"
 if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
   sudo apt-get install -y nodejs
 fi
 node -v
-echo "== [3/3] tooling"
+echo "== [3/4] tooling"
 mkdir -p "$HOME/.npm-global" /home/user/work
 npm config set prefix "$HOME/.npm-global"
 grep -q npm-global ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
 sudo corepack enable >/dev/null 2>&1 || true
+echo "== [4/4] browser for visual checks"
+mkdir -p ${TOOLS_DIR} && cd ${TOOLS_DIR}
+[ -f package.json ] || npm init -y >/dev/null 2>&1
+npm install --no-audit --no-fund playwright >/dev/null 2>&1
+sudo env "PATH=$PATH" npx playwright install-deps chromium >/dev/null 2>&1 || true
+npx playwright install chromium
+cat > look.mjs <<'EOF'
+import { chromium } from "playwright";
+const [url, device, scroll, out] = process.argv.slice(2);
+const mobile = device === "mobile";
+const vw = mobile ? 390 : 1280;
+const vh = mobile ? 844 : 800;
+const browser = await chromium.launch({ args: ["--no-sandbox"] });
+const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, isMobile: mobile, hasTouch: mobile });
+const page = await ctx.newPage();
+const logs = [];
+page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") logs.push(m.type() + ": " + m.text().slice(0, 180)); });
+page.on("pageerror", (e) => logs.push("pageerror: " + String(e).slice(0, 180)));
+page.on("requestfailed", (r) => logs.push("requestfailed: " + r.url().slice(0, 100)));
+try {
+  await page.goto(url, { waitUntil: "load", timeout: 20000 });
+} catch (e) {
+  console.log(JSON.stringify({ error: "Could not open " + url + ": " + String(e).slice(0, 150) }));
+  await browser.close();
+  process.exit(0);
+}
+await page.waitForTimeout(1500);
+const total = await page.evaluate(() => document.documentElement.scrollHeight);
+let ys = [0];
+if (scroll === "auto") {
+  if (total > vh * 1.4) { ys.push(Math.round((total - vh) / 2)); ys.push(total - vh); }
+} else {
+  ys = String(scroll).split(",").map((n) => Math.max(0, Math.min(Math.max(0, total - vh), parseInt(n, 10) || 0))).slice(0, 4);
+}
+let i = 0;
+for (const y of ys) {
+  await page.evaluate((yy) => window.scrollTo(0, yy), y);
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: out + "-" + i + ".png" });
+  i++;
+}
+console.log(JSON.stringify({ total, ys, count: i, logs: logs.slice(0, 12), title: await page.title() }));
+await browser.close();
+EOF
 echo ${CODE_VERSION} > /home/user/.code-version
 touch /home/user/.code-ready
 echo "CODE COMPUTER READY"
@@ -65,9 +111,9 @@ export async function codeState(sb: Sb): Promise<{ state: "none" | "installing" 
   const ok = /ok=(\d)/.exec(head)?.[1] === "1";
   const started = /started=(\d)/.exec(head)?.[1] === "1";
   if (ok && v === CODE_VERSION) return { state: "ready", log };
-  if (!started) return { state: "none", log };
-  if (e === "") return { state: "installing", log };
-  return { state: "failed", log };
+  if (started && e === "") return { state: "installing", log };
+  if (started && e !== "" && e !== "0") return { state: "failed", log };
+  return { state: "none", log };
 }
 
 export async function startCodeSetup(sb: Sb) {
@@ -112,7 +158,7 @@ export async function ensureWorkspace(sb: Sb, ws: string, restoreUrl?: string): 
   }
   const again = await exec(sb, `test -d ${q(root + "/.git")} && echo yes || echo no`, 10_000);
   if (!again.stdout.includes("yes")) {
-    await exec(sb, `mkdir -p ${q(root)} && cd ${q(root)} && git init -q && printf 'node_modules\\n.next\\ndist\\nbuild\\n.env\\n.env.local\\n*.log\\n.DS_Store\\n' > .gitignore`, 20_000);
+    await exec(sb, `mkdir -p ${q(root)} && cd ${q(root)} && git init -q && printf 'node_modules\\n.next\\ndist\\nbuild\\n.venus\\n.env\\n.env.local\\n*.log\\n.DS_Store\\n' > .gitignore`, 20_000);
     await writeBinary(sb, `${root}/VENUS.md`, Buffer.from(VENUS_MD));
     await checkpoint(sb, ws, "Initial workspace");
   }
@@ -142,6 +188,83 @@ async function readJob(sb: Sb, id: string, tail = 8000) {
   return { done: exitStr !== "", exitCode: exitStr !== "" ? Number(exitStr) : undefined, log };
 }
 
+// ---------- Dev server manager (fixes "Closed Port Error") ----------
+
+async function devCommand(sb: Sb, root: string, port: number, cmd?: string): Promise<string> {
+  if (cmd && cmd.trim()) return cmd.trim();
+  const pj = await exec(sb, `cat ${q(root + "/package.json")} 2>/dev/null`, 8_000);
+  const staticCmd = `python3 -m http.server ${port} --bind 0.0.0.0`;
+  if (pj.exitCode !== 0 || !pj.stdout.trim()) return staticCmd;
+  let deps = "";
+  let scripts: Record<string, string> = {};
+  try {
+    const j = JSON.parse(pj.stdout);
+    deps = Object.keys({ ...(j.dependencies ?? {}), ...(j.devDependencies ?? {}) }).join(" ");
+    scripts = j.scripts ?? {};
+  } catch { /* use fallbacks */ }
+  if (/(^| )next( |$)/.test(deps)) return `npx next dev -H 0.0.0.0 -p ${port}`;
+  if (/(^| )vite( |$)/.test(deps)) return `npx vite --host 0.0.0.0 --port ${port}`;
+  if (/(^| )astro( |$)/.test(deps)) return `npx astro dev --host 0.0.0.0 --port ${port}`;
+  if (/react-scripts/.test(deps)) return `HOST=0.0.0.0 PORT=${port} BROWSER=none npx react-scripts start`;
+  if (scripts.dev) return `PORT=${port} HOST=0.0.0.0 npm run dev`;
+  if (scripts.start) return `PORT=${port} HOST=0.0.0.0 npm start`;
+  return staticCmd;
+}
+
+export async function serveStatus(sb: Sb, ws: string) {
+  const root = wsRoot(ws);
+  const cfgRaw = await exec(sb, `cat ${q(root + "/.venus/dev.json")} 2>/dev/null`, 8_000);
+  let cfg: { port?: number; cmd?: string } = {};
+  try { cfg = JSON.parse(cfgRaw.stdout); } catch { /* none yet */ }
+  const port = cfg.port ?? 3000;
+  const c = await exec(sb, `curl -s -o /dev/null -m 4 -w '%{http_code}' http://127.0.0.1:${port}; echo; tail -c 1500 ${q(root + "/.venus/dev.log")} 2>/dev/null`, 12_000);
+  const lines = c.stdout.split("\n");
+  const code = (lines[0] || "").trim();
+  const running = code !== "" && code !== "000";
+  const host = (sb as unknown as { getHost?: (p: number) => string }).getHost?.(port);
+  return { running, port, cmd: cfg.cmd ?? "", log: lines.slice(1).join("\n").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").trim(), url: host ? `https://${host}` : "" };
+}
+
+export async function serveStop(sb: Sb, ws: string) {
+  const root = wsRoot(ws);
+  await exec(sb, `cd ${q(root)} && [ -f .venus/dev.pid ] && (kill -- -$(cat .venus/dev.pid) 2>/dev/null || kill $(cat .venus/dev.pid) 2>/dev/null); true`, 15_000);
+}
+
+export async function serveStart(
+  sb: Sb, ws: string, port: number, cmdIn: string | undefined, restart: boolean, waitMs: number
+): Promise<{ text: string; running: boolean; url: string; job?: string }> {
+  const root = wsRoot(ws);
+  const cur = await serveStatus(sb, ws);
+  if (cur.running && cur.port === port && !restart && !cmdIn) return { text: `Server already running on port ${port}.`, running: true, url: cur.url };
+
+  const cmd = await devCommand(sb, root, port, cmdIn);
+  const script = `cd ${q(root)}
+mkdir -p .venus
+if [ -f .venus/dev.pid ]; then kill -- -$(cat .venus/dev.pid) 2>/dev/null || kill $(cat .venus/dev.pid) 2>/dev/null; sleep 1; fi
+echo ${b64(JSON.stringify({ port, cmd }))} | base64 -d > .venus/dev.json
+echo ${b64(cmd)} | base64 -d > .venus/dev.cmd
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH" HOST=0.0.0.0 HOSTNAME=0.0.0.0 PORT=${port} BROWSER=none
+if [ -f package.json ] && [ ! -d node_modules ]; then npm install --no-audit --no-fund; fi
+setsid nohup bash -lc "$(cat .venus/dev.cmd)" > .venus/dev.log 2>&1 < /dev/null &
+echo $! > .venus/dev.pid
+`;
+  const job = "s" + Date.now().toString(36);
+  await startJob(sb, job, script);
+
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    await sleep(2200);
+    const s = await serveStatus(sb, ws);
+    if (s.running) return { text: `Server is up on port ${port} (${cmd}).`, running: true, url: s.url };
+    if (Date.now() >= deadline) {
+      const j = await readJob(sb, job, 2000);
+      return { text: `Still starting (command: ${cmd}). Install log / server log:\n${(s.log || j.log).slice(-1500)}\nCall <serve/> again in a moment to check.`, running: false, url: s.url, job };
+    }
+  }
+}
+
+// ---------- Tools ----------
+
 export async function runTool(sb: Sb, ws: string, call: ToolCall, budgetMs: number): Promise<ToolResult> {
   const root = wsRoot(ws);
   const a = call.attrs;
@@ -170,7 +293,7 @@ export async function runTool(sb: Sb, ws: string, call: ToolCall, budgetMs: numb
       return { text: hits.length ? hits.join("\n") : "(no matches)" };
     }
     case "grep": {
-      const p64 = Buffer.from(a.pattern ?? "", "utf8").toString("base64");
+      const p64 = b64(a.pattern ?? "");
       const target = a.path ? q(resolvePath(ws, a.path)) : ".";
       const g = a.glob ? `-g ${q(a.glob)}` : "";
       const inc = a.glob ? `--include=${q(a.glob)}` : "";
@@ -200,9 +323,7 @@ export async function runTool(sb: Sb, ws: string, call: ToolCall, budgetMs: numb
       if (count > 1 && !all) return { text: `ERROR: the <old> text appears ${count} times in ${a.path}. Add more surrounding lines to make it unique, or set replace_all="true".` };
       const next = all ? cur.stdout.split(oldS).join(newS) : cur.stdout.replace(oldS, () => newS);
       await writeBinary(sb, abs, Buffer.from(next, "utf8"));
-      const o = oldS.split("\n");
-      const n = newS.split("\n");
-      return { text: `Edited ${a.path} (${count} replacement${count > 1 ? "s" : ""}: −${o.length} +${n.length} lines).`, mutated: true };
+      return { text: `Edited ${a.path} (${count} replacement${count > 1 ? "s" : ""}: −${oldS.split("\n").length} +${newS.split("\n").length} lines).`, mutated: true };
     }
     case "bash": {
       const command = call.body.trim();
@@ -225,23 +346,50 @@ export async function runTool(sb: Sb, ws: string, call: ToolCall, budgetMs: numb
       const s = await readJob(sb, id);
       return { text: `${s.done ? `exit code: ${s.exitCode}` : "STILL RUNNING"}\n${s.log.slice(-8000)}` };
     }
+    case "serve": {
+      const port = Math.min(65535, Math.max(1024, parseInt(a.port || "3000", 10) || 3000));
+      const r = await serveStart(sb, ws, port, (a.cmd || call.body).trim() || undefined, a.restart === "true", Math.min(34_000, Math.max(8_000, budgetMs - 6_000)));
+      return { text: r.running ? `${r.text}\nPreview URL: ${r.url}` : `Not responding yet. ${r.text}`, preview: r.running ? r.url : undefined, mutated: true };
+    }
     case "preview": {
       const port = parseInt(a.port || "3000", 10);
+      const s = await serveStatus(sb, ws);
       const host = (sb as unknown as { getHost?: (p: number) => string }).getHost?.(port);
-      const c = await exec(sb, `curl -s -o /dev/null -m 5 -w '%{http_code}' http://localhost:${port}`, 10_000);
-      const code = c.stdout.trim();
       if (!host) return { text: "ERROR: this E2B SDK cannot create preview URLs." };
-      return { text: `Preview URL: https://${host}\nlocalhost:${port} answers HTTP ${code || "no response"}${code === "000" || !code ? " — the server is not running or not bound to 0.0.0.0." : ""}`, preview: `https://${host}` };
+      const live = s.running && s.port === port;
+      return { text: `Preview URL: https://${host}\n${live ? "The server is running." : "No server answers on this port yet — start one with <serve port=\"" + port + "\"/>."}`, preview: `https://${host}` };
+    }
+    case "look": {
+      const device = a.device === "mobile" ? "mobile" : "desktop";
+      const url = a.url || `http://localhost:${parseInt(a.port || "3000", 10) || 3000}`;
+      if (!/^https?:\/\//i.test(url)) return { text: "ERROR: url must start with http:// or https://" };
+      const scroll = /^[0-9,]+$/.test(a.scroll ?? "") ? (a.scroll as string) : "auto";
+      const base = `/tmp/look${Date.now().toString(36)}`;
+      const r = await exec(sb, `cd ${TOOLS_DIR} 2>/dev/null && node look.mjs ${q(url)} ${device} ${q(scroll)} ${base}`, Math.min(45_000, Math.max(15_000, budgetMs - 6_000)));
+      const line = r.stdout.trim().split("\n").pop() ?? "";
+      let info: { total?: number; ys?: number[]; count?: number; logs?: string[]; title?: string; error?: string };
+      try { info = JSON.parse(line); } catch { return { text: "ERROR: the visual check failed: " + (r.stderr || r.stdout).slice(0, 300) + " (the Code computer may still be installing its browser)." }; }
+      if (info.error) return { text: `ERROR: ${info.error}. Start the dev server with <serve/> first.` };
+      const n = info.count ?? 1;
+      const w = device === "mobile" ? 360 : 720;
+      const ins = Array.from({ length: n }, (_, i) => `-i ${base}-${i}.png`).join(" ");
+      const sc = Array.from({ length: n }, (_, i) => `[${i}:v]scale=${w}:-1[s${i}]`).join(";");
+      const stack = Array.from({ length: n }, (_, i) => `[s${i}]`).join("") + `${device === "mobile" ? "hstack" : "vstack"}=inputs=${n}`;
+      const filter = n === 1 ? `[0:v]scale=${w}:-1` : `${sc};${stack}`;
+      const st = await exec(sb, `ffmpeg -y -loglevel error ${ins} -filter_complex "${filter}" -q:v 5 ${base}.jpg && base64 -w0 ${base}.jpg`, 20_000);
+      if (st.exitCode !== 0 || st.stdout.length < 200) return { text: "ERROR: could not build the screenshot: " + st.stderr.slice(0, 200) };
+      const errs = (info.logs ?? []).length ? `\nBrowser console / page errors:\n${(info.logs ?? []).join("\n")}` : "\nNo console errors.";
+      return {
+        text: `Page "${info.title ?? ""}" (${device}) — total height ${info.total}px. The image stacks screenshots at scrollY = ${(info.ys ?? []).join(", ")}.${errs}`,
+        image: { mediaType: "image/jpeg", data: st.stdout.trim() },
+      };
     }
     case "screenshot": {
-      if (a.url) {
-        await openUrl(sb, a.url);
-        await sleep(4500);
-      }
+      if (a.url) { await openUrl(sb, a.url); await sleep(4500); }
       const bytes = await (sb as unknown as { screenshot: () => Promise<Uint8Array> }).screenshot();
       const buf = Buffer.from(bytes);
       const isPng = buf.length > 24 && buf.toString("ascii", 1, 4) === "PNG";
-      return { text: "Screenshot attached (look at it).", image: { mediaType: isPng ? "image/png" : "image/jpeg", data: buf.toString("base64") } };
+      return { text: "Desktop screenshot attached.", image: { mediaType: isPng ? "image/png" : "image/jpeg", data: buf.toString("base64") } };
     }
     default:
       return { text: `ERROR: unknown tool ${call.name}` };
