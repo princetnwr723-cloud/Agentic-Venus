@@ -7,14 +7,19 @@ export type CodeEnv = {
   uid: string; token: () => Promise<string>; e2bKey: string;
   apiKeys: Partial<Record<ProviderId, string>>; provider: ProviderId; model: string;
 };
+export type DiffLine = { t: "+" | "-" | " "; n?: number; text: string };
+export type Approval = { tool: "write" | "edit" | "bash"; title: string; path?: string; lines?: DiffLine[]; command?: string };
+export type PermMode = "default" | "accept-edits" | "auto";
 export type CodeEvent = {
-  kind: "info" | "thought" | "tool" | "result" | "term" | "todo" | "error" | "preview" | "checkpoint" | "done" | "user";
-  text: string; depth?: number;
+  kind: "info" | "thought" | "tool" | "result" | "term" | "todo" | "error" | "preview" | "checkpoint" | "done" | "user" | "diff";
+  text: string; depth?: number; lines?: DiffLine[]; path?: string;
 };
 export type CodeHooks = {
   event: (e: CodeEvent) => void;
   ask: (q: string, options: string[]) => Promise<string>;
   cancelled: () => boolean;
+  approve?: (a: Approval) => Promise<"yes" | "always" | "no">;
+  mode?: () => PermMode;
 };
 
 type Msg = { role: "user" | "assistant"; content: string; image?: { mediaType: string; data: string } };
@@ -38,7 +43,7 @@ export async function wsCall(env: CodeEnv, action: string, extra: Record<string,
 export async function ensureCodeComputer(env: CodeEnv, hooks: CodeHooks): Promise<string> {
   let id = (await getCodeComputer(env.uid))?.sandboxId ?? null;
   const waitReady = async (sid: string) => {
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 160; i++) {
       if (hooks.cancelled()) throw new Error("Stopped.");
       await sleep(5000);
       const s = await wsCall(env, "status", { sandboxId: sid });
@@ -53,14 +58,17 @@ export async function ensureCodeComputer(env: CodeEnv, hooks: CodeHooks): Promis
     try {
       const s = await wsCall(env, "status", { sandboxId: id });
       if (s.state === "ready") return id;
-      if (s.state !== "installing") await wsCall(env, "setup", { sandboxId: id });
+      if (s.state !== "installing") {
+        hooks.event({ kind: "info", text: "Updating the Code computer (browser for visual checks) — a few minutes, once." });
+        await wsCall(env, "setup", { sandboxId: id });
+      }
       await waitReady(id);
       return id;
     } catch (e) {
       if (!String((e as Error).message).includes("SANDBOX_GONE")) throw e;
     }
   }
-  hooks.event({ kind: "info", text: "Creating your Code computer — the first setup takes 2-4 minutes." });
+  hooks.event({ kind: "info", text: "Creating your Code computer — the first setup takes 4-6 minutes." });
   const c = await wsCall(env, "create");
   id = c.sandboxId as string;
   await saveCodeComputer(env.uid, id);
@@ -71,15 +79,14 @@ export async function ensureCodeComputer(env: CodeEnv, hooks: CodeHooks): Promis
 
 type Ctx = {
   env: CodeEnv; hooks: CodeHooks; project: CodeProject; sandboxId: string; brain: Brain;
-  venusMd: string; tree: string; previewUrl?: string;
+  venusMd: string; tree: string; persona?: string; previewUrl?: string;
 };
 
 async function llm(env: CodeEnv, messages: Msg[]): Promise<string> {
   const apiKey = env.apiKeys[env.provider];
   if (!apiKey) throw new Error("No API key saved for the selected model's provider.");
   const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ provider: env.provider, apiKey, model: env.model, messages }),
   });
   const data = await readJson(res);
@@ -87,8 +94,28 @@ async function llm(env: CodeEnv, messages: Msg[]): Promise<string> {
   return String(data.reply ?? "");
 }
 
-const SERVER_TOOLS = new Set(["read", "ls", "glob", "grep", "write", "edit", "bash", "bash_output", "preview", "screenshot"]);
+const SERVER_TOOLS = new Set(["read", "ls", "glob", "grep", "write", "edit", "bash", "bash_output", "preview", "serve", "look", "screenshot"]);
 const WRITE_TOOLS = new Set(["write", "edit", "bash"]);
+const SAFE_CMD = /^\s*(ls|pwd|cat|head|tail|wc|echo|grep|rg|find|tree|which|date|node\s+-v|npm\s+-v|git\s+(status|log|diff|show|branch))\b/;
+
+function needsApproval(c: ToolCall, mode: PermMode): boolean {
+  if (mode === "auto") return false;
+  if (c.name === "bash") {
+    const cmd = c.body.trim();
+    return !(SAFE_CMD.test(cmd) && !/[;&>`]|\$\(|\|\|/.test(cmd));
+  }
+  return mode === "default";
+}
+
+function diffOf(c: ToolCall): DiffLine[] {
+  if (c.name === "write") {
+    const body = c.body.replace(/^\n/, "").replace(/\n$/, "");
+    return body.split("\n").slice(0, 80).map((l, i) => ({ t: "+" as const, n: i + 1, text: l }));
+  }
+  const o = (c.old ?? "").split("\n").slice(0, 40).map((l) => ({ t: "-" as const, text: l }));
+  const n = (c.new ?? "").split("\n").slice(0, 40).map((l) => ({ t: "+" as const, text: l }));
+  return [...o, ...n];
+}
 
 function parseTodo(body: string) {
   return body.split("\n")
@@ -103,21 +130,20 @@ function toolLabel(c: ToolCall): string {
     case "bash": return `$ ${c.body.trim().slice(0, 140)}${c.attrs.background === "true" ? "  (background)" : ""}`;
     case "grep": return `grep ${c.attrs.pattern ?? ""} ${c.attrs.path ?? ""}`;
     case "glob": return `glob ${c.attrs.pattern ?? ""}`;
+    case "look": return `look ${c.attrs.device ?? "desktop"} ${c.attrs.url ?? "localhost:" + (c.attrs.port ?? "3000")}`;
+    case "serve": return `serve ${c.attrs.port ?? "3000"}`;
     case "web_search": case "web_fetch": case "remember": return `${c.name} ${c.body.trim().slice(0, 100)}`;
     case "task": return `sub-agent (${c.attrs.type || "general"}): ${c.body.trim().slice(0, 100)}`;
     default: return `${c.name} ${c.attrs.path ?? c.attrs.url ?? c.attrs.port ?? c.attrs.name ?? ""}`.trim();
   }
 }
 
-async function agentLoop(
-  ctx: Ctx, instruction: string,
-  o: { readOnly: boolean; plan: boolean; maxSteps: number; depth: number }
-): Promise<string> {
+async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; plan: boolean; maxSteps: number; depth: number }): Promise<string> {
   const { env, hooks } = ctx;
   const d = o.depth;
   const skillList = ctx.brain.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
   const system = codeSystemPrompt({
-    plan: o.plan, readOnly: o.readOnly, ws: ctx.project.id,
+    plan: o.plan, readOnly: o.readOnly, ws: ctx.project.id, persona: ctx.persona,
     memory: brainPrompt(ctx.brain, instruction, { noSkills: true }),
     skills: skillList ? `## Skills (load one with <skill name="..."/> when it matches)\n${skillList}` : "",
     venusMd: ctx.venusMd, tree: ctx.tree,
@@ -127,6 +153,7 @@ async function agentLoop(
   let allowWrite = !o.readOnly && !o.plan;
   let noTool = 0;
   const sigs: string[] = [];
+  const mode = (): PermMode => hooks.mode?.() ?? "auto";
 
   for (let step = 0; step < o.maxSteps; step++) {
     if (hooks.cancelled()) throw new Error("Stopped.");
@@ -140,7 +167,7 @@ async function agentLoop(
 
     const reply = await llm(env, messages);
     const { calls, thought } = parseTools(reply);
-    if (thought) hooks.event({ kind: "thought", text: thought.slice(0, 600), depth: d });
+    if (thought) hooks.event({ kind: "thought", text: thought.slice(0, 700), depth: d });
     messages.push({ role: "assistant", content: reply });
 
     if (calls.length === 0) {
@@ -189,14 +216,23 @@ async function agentLoop(
           out[i] = o.readOnly ? "Blocked: this is a read-only agent." : "Blocked: plan mode — get the plan approved with <ask> first.";
           continue;
         }
+        if (WRITE_TOOLS.has(c.name) && hooks.approve && needsApproval(c, mode())) {
+          await flush();
+          const ans = await hooks.approve({
+            tool: c.name as "write" | "edit" | "bash",
+            title: c.name === "bash" ? "Run command" : c.name === "write" ? `Create file ${c.attrs.path}` : `Edit file ${c.attrs.path}`,
+            path: c.attrs.path, lines: c.name === "bash" ? undefined : diffOf(c), command: c.name === "bash" ? c.body.trim() : undefined,
+          });
+          if (ans === "no") { out[i] = "REJECTED by the user. Do not retry this action; ask what they would like instead."; continue; }
+        }
+        if (c.name === "write" || c.name === "edit") hooks.event({ kind: "diff", text: c.name, path: c.attrs.path, lines: diffOf(c), depth: d });
         pending.push({ idx: i, call: c });
         continue;
       }
       await flush();
 
       if (c.name === "todo") {
-        const t = parseTodo(c.body);
-        hooks.event({ kind: "todo", text: t, depth: d });
+        hooks.event({ kind: "todo", text: parseTodo(c.body), depth: d });
         out[i] = "Todo list updated.";
       } else if (c.name === "ask") {
         const [q, ...opts] = c.body.split("|").map((x) => x.trim()).filter(Boolean);
@@ -237,7 +273,7 @@ async function agentLoop(
 
 export async function runCodeAgent(
   env: CodeEnv, hooks: CodeHooks, project: CodeProject, instruction: string,
-  opts: { plan?: boolean; brain?: Brain; maxSteps?: number } = {}
+  opts: { plan?: boolean; brain?: Brain; maxSteps?: number; persona?: string } = {}
 ): Promise<{ ok: boolean; summary: string; project: CodeProject }> {
   let p: CodeProject = { ...project };
   try {
@@ -245,7 +281,7 @@ export async function runCodeAgent(
     const brain = opts.brain ?? (await loadBrain(env.uid));
     const ensured = await wsCall(env, "ensure", { sandboxId, ws: p.id, backupPath: p.backupPath });
     if (ensured.restored) hooks.event({ kind: "info", text: "Workspace restored from your backup." });
-    const ctx: Ctx = { env, hooks, project: p, sandboxId, brain, venusMd: ensured.venusMd, tree: ensured.tree };
+    const ctx: Ctx = { env, hooks, project: p, sandboxId, brain, venusMd: ensured.venusMd, tree: ensured.tree, persona: opts.persona };
 
     const summary = await agentLoop(ctx, instruction, { readOnly: false, plan: Boolean(opts.plan), maxSteps: opts.maxSteps ?? 80, depth: 0 });
     hooks.event({ kind: "done", text: summary });
