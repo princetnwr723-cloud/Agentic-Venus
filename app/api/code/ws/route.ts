@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { connect, createSandbox, exec } from "@/lib/e2b-server";
+import { connect, exec } from "@/lib/e2b-server";
 import { verifyUser } from "@/lib/server-auth";
 import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
 import { webRead, webSearch } from "@/lib/web-tools-server";
-import { writeBinary } from "@/lib/venus-server";
+import { DIR, safeId, writeBinary } from "@/lib/venus-server";
 import {
-  ROOT, checkpoint, codeState, ensureWorkspace, listTree, q, resolvePath, runTool, serveStart, serveStatus,
-  serveStop, startCodeSetup, wsRoot, type ToolResult,
+  ASSETS, ROOT, checkpoint, codeState, ensureWorkspace, htmlBundle, listAssets, listTree, q, resolvePath, runTool,
+  startCodeSetup, wsRoot, type ToolResult,
 } from "@/lib/code-server";
 import type { ToolCall } from "@/lib/code-prompts";
 
@@ -26,14 +26,10 @@ export async function POST(req: Request) {
     }
 
     const e2bKey = String(body.e2bKey || "");
-    if (!e2bKey) return fail("E2B key missing.", 400);
-    if (action === "create") {
-      const c = await createSandbox(e2bKey, { provision: false });
-      return NextResponse.json({ sandboxId: c.sandboxId });
-    }
     const sandboxId = String(body.sandboxId || "");
-    if (!sandboxId) return fail("sandboxId missing.", 400);
-    const sb = await connect(e2bKey, sandboxId);
+    if (!e2bKey) return fail("E2B key missing.", 400);
+    if (!sandboxId) return fail("This chat has no computer yet — turn it on first.", 400);
+    const sb = await connect(e2bKey, sandboxId); // resumes a paused computer
     const ws = String(body.ws || "");
 
     switch (action) {
@@ -72,16 +68,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ results, checkpoint: sha });
       }
 
-      case "servestatus":
-        return NextResponse.json(await serveStatus(sb, ws));
-      case "serve": {
-        const port = Math.min(65535, Math.max(1024, Number(body.port) || 3000));
-        const r = await serveStart(sb, ws, port, body.cmd ? String(body.cmd) : undefined, Boolean(body.restart), 40_000);
-        return NextResponse.json(r);
-      }
-      case "servestop":
-        await serveStop(sb, ws);
-        return NextResponse.json({ ok: true });
+      case "htmlpreview":
+        return NextResponse.json(await htmlBundle(sb, ws, body.entry ? String(body.entry) : undefined));
 
       case "tree":
         return NextResponse.json({ files: await listTree(sb, ws) });
@@ -102,9 +90,7 @@ export async function POST(req: Request) {
 
       case "checkpoints": {
         const r = await exec(sb, `cd ${q(wsRoot(ws))} && git log --pretty=format:'%h|%ar|%s' -n 40`, 15_000);
-        return NextResponse.json({
-          items: r.stdout.split("\n").filter(Boolean).map((l) => { const [sha, when, ...rest] = l.split("|"); return { sha, when, msg: rest.join("|") }; }),
-        });
+        return NextResponse.json({ items: r.stdout.split("\n").filter(Boolean).map((l) => { const [sha, when, ...rest] = l.split("|"); return { sha, when, msg: rest.join("|") }; }) });
       }
 
       case "restore": {
@@ -112,13 +98,6 @@ export async function POST(req: Request) {
         if (!/^[0-9a-f]{4,40}$/.test(sha)) return fail("Bad checkpoint id.", 400);
         const r = await exec(sb, `cd ${q(wsRoot(ws))} && git reset --hard ${sha} && git clean -fd`, 25_000);
         return r.exitCode === 0 ? NextResponse.json({ ok: true }) : fail("Restore failed: " + r.stderr.slice(0, 200));
-      }
-
-      case "previewurl": {
-        const port = Math.min(65535, Math.max(1, Number(body.port) || 3000));
-        const host = (sb as unknown as { getHost?: (p: number) => string }).getHost?.(port);
-        if (!host) return fail("This E2B SDK cannot create preview URLs.");
-        return NextResponse.json({ url: `https://${host}` });
       }
 
       case "backup": {
@@ -130,6 +109,32 @@ export async function POST(req: Request) {
         if (r.stdout.trim() !== "200") return fail("Backup upload failed (HTTP " + r.stdout.trim() + ").");
         const url = await createSignedDownload(objectPath, 3600).catch(() => "");
         return NextResponse.json({ path: objectPath, url });
+      }
+
+      // ---- assets the PC agent downloaded (Venus Pro uses them) ----
+      case "listassets":
+        return NextResponse.json({ files: await listAssets(sb) });
+
+      case "copyasset": {
+        const pid = safeId(body.pid);
+        const name = String(body.name || "");
+        if (!/^[A-Za-z0-9._ -]{1,120}$/.test(name) || name.includes("..")) return fail("Bad asset name.", 400);
+        const kind = body.kind === "vid" ? "vid" : "img";
+        const idx = Math.max(0, Math.min(60, Number(body.index) || 0));
+        const ext = (name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5) || "bin";
+        const rel = `p/${pid}/${kind}/asset-${idx}.${ext}`;
+        const r = await exec(sb, `mkdir -p ${DIR}/public/p/${pid}/${kind} && cp ${q(ASSETS + "/" + name)} ${q(DIR + "/public/" + rel)}`, 20_000);
+        return r.exitCode === 0 ? NextResponse.json({ path: rel }) : fail("Asset not found: " + name);
+      }
+
+      case "fetchasset": {
+        const url = String(body.url || "");
+        const name = String(body.name || "").replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 100);
+        let host = "";
+        try { host = new URL(url).hostname.toLowerCase(); } catch { /* invalid */ }
+        if (!/^https:\/\//.test(url) || !name || !host || host === "localhost" || /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return fail("Only public https links can be downloaded.", 400);
+        const r = await exec(sb, `mkdir -p ${ASSETS} && curl -fsSL --max-time 50 --max-filesize 83886080 -o ${q(ASSETS + "/" + name)} ${q(url)}`, 56_000);
+        return r.exitCode === 0 ? NextResponse.json({ name }) : fail("Download failed.");
       }
 
       default:
