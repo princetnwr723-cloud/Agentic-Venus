@@ -12,6 +12,7 @@ const OPENAI_COMPATIBLE_URLS: Partial<Record<ProviderId, string>> = {
   perplexity: "https://api.perplexity.ai/chat/completions",
   groq: "https://api.groq.com/openai/v1/chat/completions",
   deepseek: "https://api.deepseek.com/chat/completions",
+  apinex: "https://apinex.bond/v1/chat/completions",
 };
 
 function openAIStyleContent(m: ChatMsg) {
