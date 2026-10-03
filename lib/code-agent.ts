@@ -1,25 +1,23 @@
 import { addMemory, bumpSkillUse, brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
+import { listChats } from "@/lib/chats";
 import { codeSystemPrompt, parseTools, type ToolCall } from "@/lib/code-prompts";
-import { getCodeComputer, saveCodeComputer, saveCodeProject, type CodeProject } from "@/lib/code-store";
+import { saveCodeProject, watchCodeProject, type CodeLog, type CodeProject } from "@/lib/code-store";
 import type { ProviderId } from "@/lib/providers";
 
 export type CodeEnv = {
   uid: string; token: () => Promise<string>; e2bKey: string;
   apiKeys: Partial<Record<ProviderId, string>>; provider: ProviderId; model: string;
+  chatId: string; sandboxId?: string;
 };
 export type DiffLine = { t: "+" | "-" | " "; n?: number; text: string };
-export type Approval = { tool: "write" | "edit" | "bash"; title: string; path?: string; lines?: DiffLine[]; command?: string };
-export type PermMode = "default" | "accept-edits" | "auto";
 export type CodeEvent = {
-  kind: "info" | "thought" | "tool" | "result" | "term" | "todo" | "error" | "preview" | "checkpoint" | "done" | "user" | "diff";
+  kind: "info" | "thought" | "tool" | "result" | "term" | "todo" | "error" | "checkpoint" | "done" | "user" | "diff";
   text: string; depth?: number; lines?: DiffLine[]; path?: string;
 };
 export type CodeHooks = {
   event: (e: CodeEvent) => void;
   ask: (q: string, options: string[]) => Promise<string>;
   cancelled: () => boolean;
-  approve?: (a: Approval) => Promise<"yes" | "always" | "no">;
-  mode?: () => PermMode;
 };
 
 type Msg = { role: "user" | "assistant"; content: string; image?: { mediaType: string; data: string } };
@@ -40,47 +38,34 @@ export async function wsCall(env: CodeEnv, action: string, extra: Record<string,
   return data;
 }
 
-export async function ensureCodeComputer(env: CodeEnv, hooks: CodeHooks): Promise<string> {
-  let id = (await getCodeComputer(env.uid))?.sandboxId ?? null;
-  const waitReady = async (sid: string) => {
-    for (let i = 0; i < 160; i++) {
-      if (hooks.cancelled()) throw new Error("Stopped.");
-      await sleep(5000);
-      const s = await wsCall(env, "status", { sandboxId: sid });
-      const last = String(s.log || "").split("\n").filter(Boolean).slice(-1)[0];
-      if (last) hooks.event({ kind: "info", text: "⚙️ " + last.slice(0, 120) });
-      if (s.state === "ready") return;
-      if (s.state === "failed") throw new Error("Code computer setup failed:\n" + String(s.log).slice(-500));
-    }
-    throw new Error("Code computer setup timed out.");
-  };
-  if (id) {
-    try {
-      const s = await wsCall(env, "status", { sandboxId: id });
-      if (s.state === "ready") return id;
-      if (s.state !== "installing") {
-        hooks.event({ kind: "info", text: "Updating the Code computer (browser for visual checks) — a few minutes, once." });
-        await wsCall(env, "setup", { sandboxId: id });
-      }
-      await waitReady(id);
-      return id;
-    } catch (e) {
-      if (!String((e as Error).message).includes("SANDBOX_GONE")) throw e;
-    }
-  }
-  hooks.event({ kind: "info", text: "Creating your Code computer — the first setup takes 4-6 minutes." });
-  const c = await wsCall(env, "create");
-  id = c.sandboxId as string;
-  await saveCodeComputer(env.uid, id);
-  await wsCall(env, "setup", { sandboxId: id });
-  await waitReady(id);
-  return id;
+/** Venus Code runs on the chat's own computer — there is no separate server. */
+export async function resolveSandbox(env: CodeEnv): Promise<string> {
+  if (env.sandboxId) return env.sandboxId;
+  const c = (await listChats(env.uid)).find((x) => x.id === env.chatId);
+  if (!c?.pcSandboxId) throw new Error("This chat has no computer yet. Turn it on with the monitor button in the chat first.");
+  return c.pcSandboxId;
 }
 
-type Ctx = {
-  env: CodeEnv; hooks: CodeHooks; project: CodeProject; sandboxId: string; brain: Brain;
-  venusMd: string; tree: string; persona?: string; previewUrl?: string;
-};
+async function ensureCodeTools(env: CodeEnv, sid: string, hooks: CodeHooks) {
+  const s = await wsCall(env, "status", { sandboxId: sid });
+  if (s.state === "ready") return;
+  if (s.state !== "installing") {
+    hooks.event({ kind: "info", text: "Installing coding tools on the computer (one time, a few minutes)…" });
+    await wsCall(env, "setup", { sandboxId: sid });
+  }
+  for (let i = 0; i < 160; i++) {
+    if (hooks.cancelled()) throw new Error("Stopped.");
+    await sleep(5000);
+    const t = await wsCall(env, "status", { sandboxId: sid });
+    const last = String(t.log || "").split("\n").filter(Boolean).slice(-1)[0];
+    if (last) hooks.event({ kind: "info", text: "⚙️ " + last.slice(0, 120) });
+    if (t.state === "ready") return;
+    if (t.state === "failed") throw new Error("Coding tools setup failed:\n" + String(t.log).slice(-500));
+  }
+  throw new Error("Coding tools setup timed out.");
+}
+
+type Ctx = { env: CodeEnv; hooks: CodeHooks; project: CodeProject; sandboxId: string; brain: Brain; venusMd: string; tree: string; persona?: string };
 
 async function llm(env: CodeEnv, messages: Msg[]): Promise<string> {
   const apiKey = env.apiKeys[env.provider];
@@ -94,23 +79,12 @@ async function llm(env: CodeEnv, messages: Msg[]): Promise<string> {
   return String(data.reply ?? "");
 }
 
-const SERVER_TOOLS = new Set(["read", "ls", "glob", "grep", "write", "edit", "bash", "bash_output", "preview", "serve", "look", "screenshot"]);
+const SERVER_TOOLS = new Set(["read", "ls", "glob", "grep", "write", "edit", "bash", "bash_output", "look"]);
 const WRITE_TOOLS = new Set(["write", "edit", "bash"]);
-const SAFE_CMD = /^\s*(ls|pwd|cat|head|tail|wc|echo|grep|rg|find|tree|which|date|node\s+-v|npm\s+-v|git\s+(status|log|diff|show|branch))\b/;
-
-function needsApproval(c: ToolCall, mode: PermMode): boolean {
-  if (mode === "auto") return false;
-  if (c.name === "bash") {
-    const cmd = c.body.trim();
-    return !(SAFE_CMD.test(cmd) && !/[;&>`]|\$\(|\|\|/.test(cmd));
-  }
-  return mode === "default";
-}
 
 function diffOf(c: ToolCall): DiffLine[] {
   if (c.name === "write") {
-    const body = c.body.replace(/^\n/, "").replace(/\n$/, "");
-    return body.split("\n").slice(0, 80).map((l, i) => ({ t: "+" as const, n: i + 1, text: l }));
+    return c.body.replace(/^\n/, "").replace(/\n$/, "").split("\n").slice(0, 80).map((l, i) => ({ t: "+" as const, n: i + 1, text: l }));
   }
   const o = (c.old ?? "").split("\n").slice(0, 40).map((l) => ({ t: "-" as const, text: l }));
   const n = (c.new ?? "").split("\n").slice(0, 40).map((l) => ({ t: "+" as const, text: l }));
@@ -130,30 +104,26 @@ function toolLabel(c: ToolCall): string {
     case "bash": return `$ ${c.body.trim().slice(0, 140)}${c.attrs.background === "true" ? "  (background)" : ""}`;
     case "grep": return `grep ${c.attrs.pattern ?? ""} ${c.attrs.path ?? ""}`;
     case "glob": return `glob ${c.attrs.pattern ?? ""}`;
-    case "look": return `look ${c.attrs.device ?? "desktop"} ${c.attrs.url ?? "localhost:" + (c.attrs.port ?? "3000")}`;
-    case "serve": return `serve ${c.attrs.port ?? "3000"}`;
     case "web_search": case "web_fetch": case "remember": return `${c.name} ${c.body.trim().slice(0, 100)}`;
     case "task": return `sub-agent (${c.attrs.type || "general"}): ${c.body.trim().slice(0, 100)}`;
-    default: return `${c.name} ${c.attrs.path ?? c.attrs.url ?? c.attrs.port ?? c.attrs.name ?? ""}`.trim();
+    default: return `${c.name} ${c.attrs.path ?? c.attrs.url ?? c.attrs.name ?? ""}`.trim();
   }
 }
 
-async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; plan: boolean; maxSteps: number; depth: number }): Promise<string> {
+async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; maxSteps: number; depth: number }): Promise<string> {
   const { env, hooks } = ctx;
   const d = o.depth;
   const skillList = ctx.brain.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
   const system = codeSystemPrompt({
-    plan: o.plan, readOnly: o.readOnly, ws: ctx.project.id, persona: ctx.persona,
+    readOnly: o.readOnly, ws: ctx.project.id, persona: ctx.persona,
     memory: brainPrompt(ctx.brain, instruction, { noSkills: true }),
     skills: skillList ? `## Skills (load one with <skill name="..."/> when it matches)\n${skillList}` : "",
     venusMd: ctx.venusMd, tree: ctx.tree,
   });
-  const earlier = d === 0 && ctx.project.ctx ? `\n\n# Earlier sessions in this workspace\n${ctx.project.ctx.slice(-3500)}` : "";
+  const earlier = d === 0 && ctx.project.ctx ? `\n\n# Earlier work in this codespace\n${ctx.project.ctx.slice(-3500)}` : "";
   let messages: Msg[] = [{ role: "user", content: `${system}${earlier}\n\n# TASK\n${instruction}` }];
-  let allowWrite = !o.readOnly && !o.plan;
   let noTool = 0;
   const sigs: string[] = [];
-  const mode = (): PermMode => hooks.mode?.() ?? "auto";
 
   for (let step = 0; step < o.maxSteps; step++) {
     if (hooks.cancelled()) throw new Error("Stopped.");
@@ -197,11 +167,10 @@ async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; 
         sandboxId: ctx.sandboxId, ws: ctx.project.id,
         calls: batch.map((p) => ({ name: p.call.name, attrs: p.call.attrs, body: p.call.body, old: p.call.old, new: p.call.new })),
       });
-      (r.results as Array<{ text: string; image?: Msg["image"]; preview?: string }>).forEach((res, j) => {
+      (r.results as Array<{ text: string; image?: Msg["image"] }>).forEach((res, j) => {
         const c = batch[j].call;
         out[batch[j].idx] = res.text;
         if (res.image) image = res.image;
-        if (res.preview) { ctx.previewUrl = res.preview; hooks.event({ kind: "preview", text: res.preview, depth: d }); }
         hooks.event({ kind: c.name === "bash" ? "term" : "result", text: c.name === "bash" ? `$ ${c.body.trim()}\n${res.text}` : res.text.slice(0, 300), depth: d });
       });
       if (r.checkpoint) hooks.event({ kind: "checkpoint", text: String(r.checkpoint), depth: d });
@@ -212,19 +181,7 @@ async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; 
       hooks.event({ kind: "tool", text: toolLabel(c), depth: d });
 
       if (SERVER_TOOLS.has(c.name)) {
-        if (WRITE_TOOLS.has(c.name) && !allowWrite) {
-          out[i] = o.readOnly ? "Blocked: this is a read-only agent." : "Blocked: plan mode — get the plan approved with <ask> first.";
-          continue;
-        }
-        if (WRITE_TOOLS.has(c.name) && hooks.approve && needsApproval(c, mode())) {
-          await flush();
-          const ans = await hooks.approve({
-            tool: c.name as "write" | "edit" | "bash",
-            title: c.name === "bash" ? "Run command" : c.name === "write" ? `Create file ${c.attrs.path}` : `Edit file ${c.attrs.path}`,
-            path: c.attrs.path, lines: c.name === "bash" ? undefined : diffOf(c), command: c.name === "bash" ? c.body.trim() : undefined,
-          });
-          if (ans === "no") { out[i] = "REJECTED by the user. Do not retry this action; ask what they would like instead."; continue; }
-        }
+        if (WRITE_TOOLS.has(c.name) && o.readOnly) { out[i] = "Blocked: this is a read-only agent."; continue; }
         if (c.name === "write" || c.name === "edit") hooks.event({ kind: "diff", text: c.name, path: c.attrs.path, lines: diffOf(c), depth: d });
         pending.push({ idx: i, call: c });
         continue;
@@ -236,26 +193,22 @@ async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; 
         out[i] = "Todo list updated.";
       } else if (c.name === "ask") {
         const [q, ...opts] = c.body.split("|").map((x) => x.trim()).filter(Boolean);
-        const ans = await hooks.ask(q || "Need your input", opts);
-        if (o.plan && /^approve/i.test(ans)) allowWrite = true;
-        out[i] = `User answered: ${ans}`;
+        out[i] = `User answered: ${await hooks.ask(q || "Need your input", opts)}`;
       } else if (c.name === "skill") {
         const s = ctx.brain.skills.find((x) => x.name.toLowerCase() === (c.attrs.name ?? "").toLowerCase());
         if (s) { out[i] = `# Skill: ${s.name}\n${s.instructions.slice(0, 12000)}`; bumpSkillUse(env.uid, s); }
         else out[i] = `ERROR: no skill named "${c.attrs.name}". Available: ${ctx.brain.skills.map((x) => x.name).join(", ") || "none"}`;
       } else if (c.name === "remember") {
-        const m = await addMemory(env.uid, c.body, true);
-        out[i] = m ? "Saved to memory." : "Not saved (duplicate or not allowed).";
+        out[i] = (await addMemory(env.uid, c.body, true)) ? "Saved to memory." : "Not saved (duplicate or not allowed).";
       } else if (c.name === "web_search" || c.name === "web_fetch") {
         try {
-          const r = await wsCall(env, "web", c.name === "web_search" ? { query: c.body.trim() } : { url: c.body.trim() });
-          out[i] = String(r.text);
+          out[i] = String((await wsCall(env, "web", c.name === "web_search" ? { query: c.body.trim() } : { url: c.body.trim() })).text);
         } catch (e) { out[i] = "ERROR: " + (e instanceof Error ? e.message : "failed"); }
       } else if (c.name === "task") {
         if (d >= 2) out[i] = "ERROR: sub-agents cannot start more sub-agents.";
         else {
           const readOnly = (c.attrs.type ?? "explore") === "explore" || o.readOnly;
-          try { out[i] = await agentLoop(ctx, c.body.trim(), { readOnly, plan: false, maxSteps: 30, depth: d + 1 }); }
+          try { out[i] = await agentLoop(ctx, c.body.trim(), { readOnly, maxSteps: 30, depth: d + 1 }); }
           catch (e) { out[i] = "Sub-agent failed: " + (e instanceof Error ? e.message : "error"); }
         }
       } else if (c.name === "finish") {
@@ -271,36 +224,57 @@ async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; 
   return "Reached the step limit before finishing — see the todo list and files for progress.";
 }
 
+/** One codespace per chat: the workspace id is the chat id. Events are saved live so the Code page can follow along. */
 export async function runCodeAgent(
   env: CodeEnv, hooks: CodeHooks, project: CodeProject, instruction: string,
-  opts: { plan?: boolean; brain?: Brain; maxSteps?: number; persona?: string } = {}
+  opts: { brain?: Brain; maxSteps?: number; persona?: string } = {}
 ): Promise<{ ok: boolean; summary: string; project: CodeProject }> {
-  let p: CodeProject = { ...project };
+  let p: CodeProject = { ...project, running: true, stop: false };
+  const log: CodeLog[] = [...(p.log ?? [])];
+  let last = 0;
+  let stopped = false;
+  const flush = async (force = false) => {
+    if (!force && Date.now() - last < 2500) return;
+    last = Date.now();
+    await saveCodeProject(env.uid, { ...p, log, updatedAt: Date.now() }).catch(() => {});
+  };
+  const emit = (e: CodeEvent) => {
+    hooks.event(e);
+    if (e.kind === "todo") p.todo = e.text;
+    log.push({ kind: e.kind, text: e.text.slice(0, e.kind === "term" ? 1200 : 800), depth: e.depth, path: e.path, lines: e.lines?.slice(0, 40) });
+    void flush();
+  };
+  const wrapped: CodeHooks = { ...hooks, event: emit, cancelled: () => stopped || hooks.cancelled() };
+  await flush(true);
+  const unsub = watchCodeProject(env.uid, p.id, (d) => { if (d?.stop) stopped = true; });
+
   try {
-    const sandboxId = await ensureCodeComputer(env, hooks);
+    emit({ kind: "user", text: instruction });
+    const sandboxId = await resolveSandbox(env);
+    await ensureCodeTools(env, sandboxId, wrapped);
     const brain = opts.brain ?? (await loadBrain(env.uid));
     const ensured = await wsCall(env, "ensure", { sandboxId, ws: p.id, backupPath: p.backupPath });
-    if (ensured.restored) hooks.event({ kind: "info", text: "Workspace restored from your backup." });
-    const ctx: Ctx = { env, hooks, project: p, sandboxId, brain, venusMd: ensured.venusMd, tree: ensured.tree, persona: opts.persona };
+    if (ensured.restored) emit({ kind: "info", text: "Codespace restored from your backup." });
+    const ctx: Ctx = { env, hooks: wrapped, project: p, sandboxId, brain, venusMd: ensured.venusMd, tree: ensured.tree, persona: opts.persona };
 
-    const summary = await agentLoop(ctx, instruction, { readOnly: false, plan: Boolean(opts.plan), maxSteps: opts.maxSteps ?? 80, depth: 0 });
-    hooks.event({ kind: "done", text: summary });
-    p = { ...p, ctx: (p.ctx + `\n- ${instruction.slice(0, 120)} → ${summary.slice(0, 300)}`).slice(-4000), previewUrl: ctx.previewUrl ?? p.previewUrl, updatedAt: Date.now() };
-
-    try {
-      const b = await wsCall(env, "backup", { sandboxId, ws: p.id });
-      p = { ...p, backupPath: b.path };
-    } catch { /* backup is best-effort */ }
-    await saveCodeProject(env.uid, p).catch(() => {});
+    const summary = await agentLoop(ctx, instruction, { readOnly: false, maxSteps: opts.maxSteps ?? 80, depth: 0 });
+    emit({ kind: "done", text: summary });
+    p = { ...p, ctx: (p.ctx + `\n- ${instruction.slice(0, 120)} → ${summary.slice(0, 300)}`).slice(-4000) };
+    try { p = { ...p, backupPath: (await wsCall(env, "backup", { sandboxId, ws: p.id })).path }; } catch { /* best-effort */ }
 
     reflect(env.uid, { apiKeys: env.apiKeys, provider: env.provider, model: env.model }, brain, { task: instruction, outcome: summary })
       .then((l) => { if (l.length) hooks.event({ kind: "info", text: "🧠 Learned: " + l.join("; ") }); })
       .catch(() => {});
+    unsub();
+    p = { ...p, running: false, stop: false };
+    await flush(true);
     return { ok: true, summary, project: p };
   } catch (e) {
     const msg = e instanceof Error ? e.message : "The coding agent failed.";
-    hooks.event({ kind: "error", text: msg });
-    await saveCodeProject(env.uid, p).catch(() => {});
+    emit({ kind: "error", text: msg });
+    unsub();
+    p = { ...p, running: false, stop: false };
+    await flush(true);
     return { ok: false, summary: msg, project: p };
   }
 }
