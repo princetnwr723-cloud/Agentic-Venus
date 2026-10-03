@@ -27,6 +27,7 @@ const OPENAI_COMPATIBLE_MODELS_URL: Partial<Record<ProviderId, string>> = {
   mistral: "https://api.mistral.ai/v1/models",
   groq: "https://api.groq.com/openai/v1/models",
   deepseek: "https://api.deepseek.com/models",
+  apinex: "https://apinex.bond/v1/models",
 };
 
 export async function fetchModels(
