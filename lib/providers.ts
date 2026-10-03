@@ -1,4 +1,4 @@
-// The 10 providers AgenticVenus supports. Model lists here are convenient
+// The 11 providers AgenticVenus supports. Model lists here are convenient
 // starting points, not a live catalog — providers ship new models often,
 // so the UI also lets a person type any model id directly (see
 // ModelPicker.tsx). Update these arrays whenever you want new defaults.
@@ -13,7 +13,8 @@ export type ProviderId =
   | "cohere"
   | "perplexity"
   | "groq"
-  | "deepseek";
+  | "deepseek"
+  | "apinex";
 
 export type ProviderMeta = {
   id: ProviderId;
@@ -93,6 +94,13 @@ export const PROVIDERS: ProviderMeta[] = [
     placeholder: "sk-...",
     keysUrl: "https://platform.deepseek.com/api_keys",
     models: ["deepseek-chat", "deepseek-reasoner"],
+  },
+  {
+    id: "apinex",
+    label: "Apinex",
+    placeholder: "sk-...",
+    keysUrl: "https://apinex.bond",
+    models: ["gpt-4o", "gpt-4o-mini"],
   },
 ];
 
