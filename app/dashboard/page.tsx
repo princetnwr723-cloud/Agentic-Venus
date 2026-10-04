@@ -2,16 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowUp, Clock, Monitor, PanelLeftClose, PanelLeftOpen, Paperclip, Plug, Plus, Users } from "lucide-react";
+import { Plus } from "lucide-react";
 import { signOut } from "firebase/auth";
-import { auth } from "@/lib/firebase";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { useKeys, type SavedLogin } from "@/lib/keys-context";
 import { listChats, createChat, updateChatMessages, updateChatModel, updateChatPc, updateChatConnectors, type Chat, type ChatMessage } from "@/lib/chats";
 import { listCustomAgents, createCustomAgent, type CustomAgent } from "@/lib/agents";
 import { listRoutinesForChat, createRoutine, setRoutineEnabled, deleteRoutine, recordManualRun, type Routine } from "@/lib/routines";
-import { PROVIDERS, providerMeta, type ProviderId } from "@/lib/providers";
-import { getModelPref, setModelPref } from "@/lib/model-pref";
+import { setModelPref } from "@/lib/model-pref";
+import type { ProviderId } from "@/lib/providers";
 import { addMemory, brainPrompt, forgetMemory, loadBrain, parseSkillMarkdown, reflect, saveSkill, skillFromText, type Brain } from "@/lib/brain";
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
@@ -23,9 +24,19 @@ import type { AvatarColor } from "@/lib/bots";
 import { pickModel, fallbackChain, type Role } from "@/lib/router";
 import { beginTrace, addUsage, traceOf } from "@/lib/trace";
 import { verifyResult } from "@/lib/critic";
-import { labelOps, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
+import { describeStep, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
+import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOutcome, type PcPending } from "@/lib/pc-agent";
+import type { ToolSpec } from "@/lib/tools/types";
+import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
+import {
+  DEPLOY_PROMPT, EMPTY_SESSION, IDLE_PAUSE_MS, PC_PROMPT, RUN_CYCLE_MS, analyzePcMessage, defaultProviderAndModel, domainCount,
+  extractCommands, guessVenusOptions, normSite, readJson, type Cmd, type PcSession,
+} from "@/lib/dashboard/helpers";
 import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
+import ChatHeader from "@/components/dashboard/ChatHeader";
+import ChatComposer from "@/components/dashboard/ChatComposer";
+import RunBars from "@/components/dashboard/RunBars";
 import ModelPicker from "@/components/dashboard/ModelPicker";
 import NewChatModal from "@/components/dashboard/NewChatModal";
 import SettingsModal from "@/components/dashboard/SettingsModal";
@@ -33,122 +44,13 @@ import RoutinesPanel from "@/components/dashboard/RoutinesPanel";
 import FirstKeyGate from "@/components/dashboard/FirstKeyGate";
 import TeamPanel from "@/components/dashboard/TeamPanel";
 import ConnectorsModal from "@/components/dashboard/ConnectorsModal";
-import PcPanel, { type PcStatus, type AgentRequest, type RequestReply } from "@/components/dashboard/PcPanel";
-import BotAvatar from "@/components/BotAvatar";
+import PcPanel, { type AgentRequest, type RequestReply } from "@/components/dashboard/PcPanel";
 
-async function readJson(res: Response) {
-  const text = await res.text();
-  try { return JSON.parse(text); } catch { return { error: `Server returned ${res.status}: ${text.slice(0, 200) || "(empty response)"}` }; }
-}
-
-function defaultProviderAndModel(apiKeys: Partial<Record<ProviderId, string>>): { provider: ProviderId; model: string } {
-  const pref = getModelPref();
-  if (pref && apiKeys[pref.provider]) return pref;
-  const found = PROVIDERS.find((p) => apiKeys[p.id]);
-  const provider = found?.id ?? PROVIDERS[0].id;
-  return { provider, model: providerMeta(provider).models[0] };
-}
-
-const normSite = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-type PcSession = { status: PcStatus; error: string | null; screenUrl: string | null; steps: string[]; running: boolean; request: AgentRequest | null };
-const EMPTY_SESSION: PcSession = { status: "idle", error: null, screenUrl: null, steps: [], running: false, request: null };
-const IDLE_PAUSE_MS = 50 * 60 * 1000;
-const RUN_CYCLE_MS = 55 * 60 * 1000;
-
-type Cmd = { cmd: "start" | "stop" | "task" | "venus" | "code" | "skill" | "memory" | "team" | "deploy"; arg?: string };
-
-function extractCommands(text: string): { clean: string; cmds: Cmd[] } {
-  const cmds: Cmd[] = [];
-  const clean = text
-    .replace(/\[\[(PC|VENUS|CODE|SKILL|MEMORY|TEAM|DEPLOY):([\s\S]*?)\]\]/gi, (_m, tag: string, inner: string) => {
-      const t = String(inner).trim();
-      const T = tag.toUpperCase();
-      if (T === "VENUS" && t) cmds.push({ cmd: "venus", arg: t });
-      else if (T === "CODE" && t) cmds.push({ cmd: "code", arg: t });
-      else if (T === "TEAM" && t) cmds.push({ cmd: "team", arg: t });
-      else if (T === "DEPLOY") cmds.push({ cmd: "deploy", arg: t });
-      else if (T === "SKILL") cmds.push({ cmd: "skill", arg: t.replace(/^install\s*\|?\s*/i, "") });
-      else if (T === "MEMORY") cmds.push({ cmd: "memory", arg: t });
-      else if (T === "PC") {
-        const lower = t.toLowerCase();
-        if (lower === "start" || lower === "stop") cmds.push({ cmd: lower as "start" | "stop" });
-        else {
-          const mm = /^task\s*[|:]\s*([\s\S]*)$/i.exec(t);
-          const arg = (mm ? mm[1] : t.replace(/^\|/, "")).trim();
-          if (arg) cmds.push({ cmd: "task", arg });
-        }
-      }
-      return "";
-    })
-    .trim();
-  return { clean, cmds };
-}
-
-const PC_PROMPT = `
-
-You work through tools that you trigger by ending your reply with tags (never explain the tag syntax to the user; only use a tag when it is really needed):
-- Cloud computer (browser + terminal; also finds and downloads files/assets): [[PC:task|<clear, complete instruction>]]. Turn it on: [[PC:start]]. Shut it down (everything stays saved): [[PC:stop]].
-- Coding (build or change websites/apps/scripts; debug): [[CODE:<detailed instruction>]] — Venus Code. Every chat has ONE codespace; continue in it.
-- Motion-graphics video, reel, animation: [[VENUS:<detailed brief: topic, key points, tone, length in seconds, format 16:9, 9:16 or 1:1>]].
-- A big goal that spans several areas (e.g. build a site AND find leads AND email them): [[TEAM:<the full goal with every detail>]] — Chief assembles specialists and they work in parallel.
-- Save a durable fact about the user: [[MEMORY:add|<fact>]]. Forget something: [[MEMORY:forget|<keyword>]].
-- Install a skill the user shared (link or pasted text): [[SKILL:install|<link or text>]].
-The computer agent asks the user itself for logins and one-time codes, so never ask for passwords in chat.`;
-
-const DEPLOY_PROMPT = `
-
-Deploy: when the user wants their site/app live, end your reply with [[DEPLOY:]] (optionally a project name after the colon). The link is posted in chat automatically.`;
-
-const PC_WORDS = new Set(["pc", "computer", "desktop", "sandbox", "comp", "system"]);
-const START_WORDS = ["on", "start", "chalu", "chalao", "chala", "resume", "wake", "open", "kholo", "khol", "shuru", "launch", "boot"];
-const STOP_WORDS = ["off", "stop", "shutdown", "pause", "close", "band", "bandh", "bund", "sleep"];
-const FILLER = new Set(["ko", "kro", "kr", "karo", "kar", "karna", "kardo", "do", "de", "dena", "please", "plz", "pls", "the", "my", "apna", "apne", "mera", "meri", "ka", "ki", "ke", "liye", "ek", "bhai", "bro", "yrr", "yaar", "ab", "abhi", "now", "it", "hai", "hain", "hoga", "then", "phir", "fir", "and", "aur", "air", "se", "me", "mein", "par", "pe", "na", "to", "hi", "bhi", "a", "i"]);
-
-function lev1(a: string, b: string): boolean {
-  if (a === b) return true;
-  if (Math.abs(a.length - b.length) > 1) return false;
-  let i = 0, j = 0, edits = 0;
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) { i++; j++; }
-    else { if (++edits > 1) return false; if (a.length > b.length) i++; else if (a.length < b.length) j++; else { i++; j++; } }
-  }
-  return edits + (a.length - i) + (b.length - j) <= 1;
-}
-const isWordOf = (w: string, list: string[]) => list.includes(w) || (w.length >= 4 && list.some((x) => x.length >= 4 && lev1(w, x)));
-
-function analyzePcMessage(text: string): { pureCommand: "start" | "stop" | null; compound: boolean; stopAfter: boolean } {
-  const t = text.toLowerCase();
-  const words = t.split(/[^a-z\u0900-\u097f]+/).filter(Boolean);
-  if (!(words.some((w) => PC_WORDS.has(w)) || /कंप्यूटर|पीसी/.test(t))) return { pureCommand: null, compound: false, stopAfter: false };
-  const hasStop = words.some((w) => isWordOf(w, STOP_WORDS)) || /बंद/.test(t);
-  const hasStart = words.some((w) => isWordOf(w, START_WORDS)) || /चालू|शुरू/.test(t);
-  const rest = words.filter((w) => !PC_WORDS.has(w) && !FILLER.has(w) && !isWordOf(w, START_WORDS) && !isWordOf(w, STOP_WORDS));
-  if ((hasStart || hasStop) && rest.length <= 1) return { pureCommand: hasStop && !hasStart ? "stop" : hasStart ? "start" : "stop", compound: false, stopAfter: false };
-  if (hasStart && rest.length >= 2) return { pureCommand: null, compound: true, stopAfter: hasStop };
-  return { pureCommand: null, compound: false, stopAfter: false };
-}
-
-const DOMAINS: RegExp[] = [/\b(build|code|website|web ?site|landing|app|script|api)\b/i, /\b(leads?|prospects?|scrape|research|find (me )?(companies|contacts))\b/i, /\b(e-?mail|mail|outreach|newsletter)\b/i, /\b(video|reel|animation|motion)\b/i];
-const domainCount = (t: string) => DOMAINS.filter((r) => r.test(t)).length;
-
-function stuckHint(history: string[]): string | undefined {
-  const last = history.slice(-3).map((l) => l.split("→").pop()?.trim() ?? "");
-  if (last.length === 3 && last[0] && last[0] === last[1] && last[1] === last[2]) return "You repeated the same action 3 times with no progress. Do something different: use another tool instead of repeating this one.";
-  return undefined;
-}
-
-function guessVenusOptions(brief: string): { seconds: number; aspect: "16:9" | "9:16" | "1:1" } {
-  const b = brief.toLowerCase();
-  const aspect = /9:16|reel|shorts?|tiktok|vertical|story/.test(b) ? "9:16" : /1:1|square/.test(b) ? "1:1" : "16:9";
-  let seconds = 30;
-  const m = /(\d{2})\s*(?:s\b|sec|second)/.exec(b);
-  if (m) seconds = Number(m[1]);
-  else if (/(1|one|a)\s*minute|60\s*s/.test(b)) seconds = 60;
-  return { seconds: Math.min(60, Math.max(15, seconds)), aspect };
-}
-
-type PlanStep = { title: string; goal: string; tool?: string };
+const toRequest = (p: PcPending): AgentRequest =>
+  p.kind === "login" ? { kind: "login", site: p.site ?? "" }
+  : p.kind === "choice" ? { kind: "choice", question: p.question ?? "", options: p.options ?? [] }
+  : p.kind === "handoff" ? { kind: "handoff", message: p.message ?? "" }
+  : { kind: "text", question: p.question ?? "" };
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
@@ -161,6 +63,8 @@ export default function DashboardPage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [attach, setAttach] = useState<{ name: string; text: string } | null>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectorsOpen, setConnectorsOpen] = useState(false);
@@ -175,9 +79,6 @@ export default function DashboardPage() {
   const [teamOpen, setTeamOpen] = useState(false);
   const [pcFullscreen, setPcFullscreen] = useState(false);
   const [sessions, setSessions] = useState<Record<string, PcSession>>({});
-  const [streaming, setStreaming] = useState(false);
-  const [attach, setAttach] = useState<{ name: string; text: string } | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const sessionsRef = useRef<Record<string, PcSession>>({});
   const sandboxRef = useRef<Record<string, string | null>>({});
@@ -186,12 +87,15 @@ export default function DashboardPage() {
   const resolverRef = useRef<Record<string, ((r: RequestReply) => void) | null>>({});
   const lastTouchRef = useRef<Record<string, number>>({});
   const runStartRef = useRef<Record<string, number>>({});
+  const beatRef = useRef<Record<string, number>>({});
+  const busyChats = useRef<Set<string>>(new Set());
   const chatsRef = useRef<Chat[]>([]);
   const activeIdRef = useRef<string | null>(null);
   const venusBusyRef = useRef(false);
   const codeBusyRef = useRef(false);
   const teamBusyRef = useRef(false);
   const brainRef = useRef<Brain>({ memories: [], skills: [] });
+  const toolCache = useRef<Record<string, { sig: string; specs: ToolSpec[] }>>({});
 
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [routinesOpen, setRoutinesOpen] = useState(false);
@@ -223,6 +127,17 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, activeChat?.id]);
 
+  // Re-attach to a background job that was started earlier (tab closed / reloaded).
+  useEffect(() => {
+    if (!user || !activeChat || !e2bKey || runningRef.current[activeChat.id]) return;
+    const chat = activeChat;
+    getDoc(doc(db, "users", user.uid, "pcJobs", chat.id)).then((s) => {
+      const d = s.data() as { running?: boolean; task?: string; job?: { id: string; sandboxId: string } } | undefined;
+      if (d?.running && d.job && !runningRef.current[chat.id]) void runPcTask(chat, d.task ?? "Background task", false, { resume: { jobId: d.job.id, sandboxId: d.job.sandboxId } });
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, activeChat?.id, e2bKey]);
+
   const hasAnyKey = Object.values(apiKeys).some(Boolean);
   const patchChat = (id: string, patch: Partial<Chat>) => setChats((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
 
@@ -247,7 +162,14 @@ export default function DashboardPage() {
     traceOf(chatId)?.add("step", line);
     patchSession(chatId, (s) => ({ steps: [...s.steps, line] }));
   };
-  const touch = (chatId: string) => { lastTouchRef.current[chatId] = Date.now(); };
+
+  // Heartbeat: tells the server this computer is in use, so the idle reaper leaves it alone.
+  const beat = (chatId: string) => {
+    if (!user || Date.now() - (beatRef.current[chatId] ?? 0) < 50_000) return;
+    beatRef.current[chatId] = Date.now();
+    updateDoc(doc(db, "users", user.uid, "chats", chatId), { pcActiveAt: Date.now() }).catch(() => {});
+  };
+  const touch = (chatId: string) => { lastTouchRef.current[chatId] = Date.now(); beat(chatId); };
 
   function setSandboxId(chatId: string, id: string | null, paused = false) {
     sandboxRef.current[chatId] = id;
@@ -279,7 +201,7 @@ export default function DashboardPage() {
     await updateChatModel(user.uid, activeChat.id, provider, model);
   }
 
-  // ---- This chat's computer (the ONLY E2B machine: Venus Code and Venus Pro run on it too) ----
+  // ---- This chat's computer (the ONLY E2B machine: Venus Code, Venus Pro and the background agent use it) ----
 
   async function loadScreen(chatId: string, sandboxId: string): Promise<"ok" | "gone" | "error"> {
     if (!e2bKey) { setSettingsOpen(true); return "error"; }
@@ -318,7 +240,7 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
       setSandboxId(chatId, data.sandboxId);
       runStartRef.current[chatId] = Date.now();
-      if (data.persistence === "none") setPcMessage("ℹ️ This E2B version has no auto-pause. The app will pause/resume the computer for you (data stays safe), so keep this tab open.");
+      if (data.persistence === "none") setPcMessage("ℹ️ This E2B version has no auto-pause. The server pauses idle computers for you (data stays safe).");
       const r = await loadScreen(chatId, data.sandboxId);
       return r === "ok" ? (data.sandboxId as string) : null;
     } catch (err) {
@@ -360,18 +282,6 @@ export default function DashboardPage() {
     }
   }
 
-  async function cyclePc(chatId: string): Promise<boolean> {
-    const id = sandboxRef.current[chatId] ?? null;
-    if (!id || !e2bKey) return false;
-    try {
-      const res = await fetch("/api/e2b/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: e2bKey, sandboxId: id }) });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data?.error || "pause failed");
-      patchSession(chatId, { screenUrl: null, status: "paused" });
-      return (await loadScreen(chatId, id)) === "ok";
-    } catch { return false; }
-  }
-
   async function deletePc(chatId: string) {
     const id = sandboxRef.current[chatId] ?? null;
     if (!user || !e2bKey || !id) return;
@@ -405,15 +315,17 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pcOpen, activeChat?.id]);
 
+  // Client-side idle pause + heartbeat for work that only this tab drives (Venus Pro, Venus Code).
   useEffect(() => {
     if (!user || !e2bKey) return;
     const iv = setInterval(() => {
+      busyChats.current.forEach((id) => beat(id));
       for (const [chatId, s] of Object.entries(sessionsRef.current)) {
         if (s.status !== "ready" || s.running || runningRef.current[chatId] || codeBusyRef.current || venusBusyRef.current) continue;
         const last = lastTouchRef.current[chatId] ?? 0;
         const started = runStartRef.current[chatId] ?? 0;
         if ((last > 0 && Date.now() - last > IDLE_PAUSE_MS) || (started > 0 && Date.now() - started > RUN_CYCLE_MS)) {
-          void pausePc(chatId).then((r) => { if (r.ok) setPcMessage("💾 A computer was safe-paused before E2B's 1-hour limit. Your data is saved — press Turn on to continue."); });
+          void pausePc(chatId).then((r) => { if (r.ok) setPcMessage("💾 A computer was safe-paused. Your data is saved — press Turn on to continue."); });
         }
       }
     }, 60_000);
@@ -438,14 +350,15 @@ export default function DashboardPage() {
     return null;
   }
 
+  // ---- Models: router + fallback + streaming ----
+
   async function callLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }> = [], role: Role = "act"): Promise<string> {
     const pick = pickModel(role, apiKeys, chat);
     if (!pick.apiKey) throw new Error("No API key saved for this chat's model.");
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        provider: pick.provider, apiKey: pick.apiKey, model: pick.model,
-        fallbacks: fallbackChain(apiKeys, pick.provider),
+        provider: pick.provider, apiKey: pick.apiKey, model: pick.model, fallbacks: fallbackChain(apiKeys, pick.provider),
         systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }],
       }),
     });
@@ -474,41 +387,59 @@ export default function DashboardPage() {
       onText(full);
     }
     const i = full.indexOf("[[ERROR]]");
-    if (i < 0) {
-      addUsage(chat.id, chat.model, system.length + prompt.length, full.length);
-      return full.trim();
-    }
+    if (i < 0) { addUsage(chat.id, chat.model, system.length + prompt.length, full.length); return full.trim(); }
     const partial = full.slice(0, i).trim();
     const msg = full.slice(i + 9).trim();
     if (!partial) throw new Error(msg);
     return `${partial}\n\n⚠️ ${msg}`;
   }
 
-  async function composeReport(chat: Chat, m: { task: string; summary: string; notes: string[]; steps: string[]; outputs: string[] }): Promise<string | null> {
+  async function composeReport(chat: Chat, m: { task: string; summary: string; steps: string[] }): Promise<string | null> {
     try {
       return await callLLM(chat, "", [
         "You are writing the FINAL message to the user after a computer agent finished their task.",
         "Rules: write in clear English. Use markdown. Start with ONE line for the outcome (✅ done / ⚠️ partly done / ❌ failed). Then short bullets of what was done. Then the concrete results: facts, names, numbers, versions, file paths, and links with their source names. If anything failed or is unfinished, say exactly what and the next step. Never invent anything that is not in the material below. Be concise — no filler.",
-        "", `USER'S TASK:\n${m.task}`, "", `RESULT PER STEP:\n${m.summary}`, "",
-        `NOTES THE AGENT SAVED:\n${m.notes.length ? m.notes.map((n) => `- ${n}`).join("\n") : "(none)"}`, "",
-        `LAST STEPS:\n${m.steps.slice(-25).join("\n")}`, "",
-        `KEY COMMAND / PAGE OUTPUTS:\n${m.outputs.length ? m.outputs.join("\n---\n") : "(none)"}`,
+        "", `USER'S TASK:\n${m.task}`, "", `AGENT'S RESULT:\n${m.summary}`, "", `LAST STEPS:\n${m.steps.slice(-25).join("\n")}`,
       ].join("\n"), [], "report");
     } catch { return null; }
   }
 
-  async function makePlan(chat: Chat, key: string, task: string, ctx: string): Promise<PlanStep[]> {
-    const single: PlanStep[] = [{ title: "Do the task", goal: task }];
-    if (task.length < 70 && !/\b(and then|then|after that|also|next)\b|\d\./i.test(task)) return single;
+  // ---- Tools (free pack + plugins + MCP + API) used from chat ----
+
+  async function loadTools(chat: Chat): Promise<ToolSpec[]> {
+    if (!user) return [];
+    const conn = (chatsRef.current.find((c) => c.id === chat.id) ?? chat).connectors ?? {};
+    const sig = JSON.stringify(conn);
+    const hit = toolCache.current[chat.id];
+    if (hit && hit.sig === sig) return hit.specs;
     try {
-      const p = pickModel("plan", apiKeys, chat);
-      const res = await fetch("/api/e2b/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: p.provider, apiKey: p.apiKey || key, model: p.model, task, context: ctx }) });
-      const data = await readJson(res);
-      return Array.isArray(data.subtasks) && data.subtasks.length ? (data.subtasks as PlanStep[]) : single;
-    } catch { return single; }
+      const r = await readJson(await fetch("/api/tools", {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+        body: JSON.stringify({ action: "list", uid: user.uid, chatId: chat.id, connectors: conn }),
+      }));
+      const specs = Array.isArray(r.specs) ? (r.specs as ToolSpec[]) : [];
+      toolCache.current[chat.id] = { sig, specs };
+      return specs;
+    } catch { return []; }
   }
 
-  // ---- Venus Code: ONE codespace per chat, runs on the chat's computer ----
+  async function execTool(chat: Chat, name: string, args: Record<string, unknown>): Promise<string> {
+    if (!user) return "ERROR: not signed in.";
+    const conn = (chatsRef.current.find((c) => c.id === chat.id) ?? chat).connectors ?? {};
+    const post = async (approved: boolean) =>
+      readJson(await fetch("/api/tools", {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+        body: JSON.stringify({ action: "call", uid: user.uid, chatId: chat.id, connectors: conn, name, args, approved }),
+      }));
+    let r = await post(false);
+    if (r.needsApproval) {
+      if (!window.confirm(`Approve this action?\n\n${r.needsApproval.summary}`)) return "The user declined this action. Do not retry it.";
+      r = await post(true);
+    }
+    return r.ok ? String(r.text) : `ERROR: ${r.text || r.error || "tool failed"}`;
+  }
+
+  // ---- Venus Code ----
 
   async function runCodeFor(chat: Chat, instruction: string, opts: { silent?: boolean; persona?: string; onLine?: (l: string) => void } = {}): Promise<string> {
     if (!user) return "";
@@ -517,6 +448,7 @@ export default function DashboardPage() {
     if (!apiKeys[chat.provider]) return out("No API key is saved for this chat's model.");
     if (codeBusyRef.current) return out("Venus Code is already working on something. Wait for it to finish, then ask again.");
     codeBusyRef.current = true;
+    busyChats.current.add(chat.id);
     try {
       const sid = await startOrResumePc(chat.id);
       if (!sid) return out("This chat's computer could not be started — turn it on with the monitor button first.");
@@ -542,12 +474,56 @@ export default function DashboardPage() {
       return res.summary;
     } catch (err) {
       return out(`⚠️ Venus Code failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { codeBusyRef.current = false; setCodeRun(null); }
+    } finally { codeBusyRef.current = false; busyChats.current.delete(chat.id); setCodeRun(null); }
   }
 
-  // ---- Running a task on this chat's computer (plan → steps) ----
+  // ---- The background computer agent ----
 
-  async function runPcTask(chat: Chat, task: string, logTask: boolean, opts?: { stopAfter?: boolean; quiet?: boolean }): Promise<string> {
+  async function finishPcRun(chat: Chat, task: string, out: PcOutcome, opts?: { quiet?: boolean; heal?: HealCtx }): Promise<string> {
+    if (!user || !e2bKey) return out.summary;
+    const chatId = chat.id;
+    const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
+    const steps = sessionsRef.current[chatId]?.steps ?? [];
+    const summary = out.summary || "Finished.";
+    if (out.status === "stopped") { pushStep(chatId, "■ Stopped."); return "Stopped before finishing."; }
+    if (out.status !== "done") return `⚠️ ${summary}`;
+
+    let replay = "";
+    if (out.proof) { const url = await proofUrl(env, out.proof).catch(() => ""); if (url) replay = `\n\n🎥 [Watch the replay](${url}) (link works for 6 hours)`; }
+    if (opts?.quiet) return summary + replay;
+
+    pushStep(chatId, "🔎 Verifier is checking the result…");
+    const v = await verifyResult((s, p) => callLLM(chat, s, p, [], "verify"), { task, summary, evidence: [steps.slice(-25).join("\n")] });
+    traceOf(chatId)?.add("verify", `${v.verdict}: ${v.reason}`);
+    pushStep(chatId, `${v.verdict === "pass" ? "✅" : "⚠️"} Verifier: ${v.verdict} — ${v.reason}`);
+
+    pushStep(chatId, "✍️ Writing the final report…");
+    let text = (await composeReport(chat, { task, summary, steps })) ?? summary;
+    if (v.verdict !== "pass") text = `⚠️ **Verifier (${v.verdict}):** ${v.reason}\n\n${text}`;
+    text += replay;
+
+    // Workflow compiler: a verified run becomes a recipe (browser + tool + shell steps) that replays with no AI.
+    if (v.verdict === "pass" && out.recipe && out.recipe.length) {
+      const all: RecipeStep[] = opts?.heal ? [...opts.heal.keep, ...out.recipe] : out.recipe;
+      const first = all.find((s) => (s.kind ?? "browse") === "browse" && "url" in s && s.url) as { url?: string } | undefined;
+      let site = "";
+      try { site = new URL(/^https?:/i.test(first?.url ?? "") ? (first?.url as string) : `https://${first?.url}`).hostname; } catch { /* no site */ }
+      const name = opts?.heal ? opts.heal.recipe.name : task.slice(0, 60);
+      saveRecipe(user.uid, { name, task: opts?.heal ? opts.heal.recipe.task : task, site, steps: all })
+        .then(() => say(chatId, opts?.heal ? `🩹 Recipe **${name}** repaired — only the broken part was re-learned.` : `💾 Saved as a recipe. Next time run it free (no AI): \`/recipe ${task.slice(0, 30)}\``))
+        .catch(() => {});
+    }
+    if (steps.length >= 4) {
+      reflect(user.uid, { apiKeys, provider: chat.provider, model: chat.model }, brainRef.current, { task, outcome: summary, steps: steps.join("\n") })
+        .then((l) => { if (l.length) { say(chatId, "🧠 Learned: " + l.join("; ")); refreshBrain(); } }).catch(() => {});
+    }
+    return text;
+  }
+
+  async function runPcTask(
+    chat: Chat, task: string, logTask: boolean,
+    opts?: { stopAfter?: boolean; quiet?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string } }
+  ): Promise<string> {
     const chatId = chat.id;
     if (!user || !e2bKey) return "";
     if (runningRef.current[chatId]) { const m = "This chat's computer is already running a task — one at a time."; setPcMessage(m); return m; }
@@ -556,209 +532,43 @@ export default function DashboardPage() {
 
     runningRef.current[chatId] = true;
     stopRef.current[chatId] = false;
+    busyChats.current.add(chatId);
     patchSession(chatId, { running: true, steps: [`▶ ${task}`], request: null });
     if (activeIdRef.current === chatId && !opts?.quiet) { setPcOpen(true); setTeamOpen(false); }
-
-    const PER_STEP = 25, TOTAL_CAP = 90;
-    const history: string[] = [], notes: string[] = [], outputs: string[] = [];
-    const subResults: Array<{ title: string; ok: boolean; summary: string }> = [];
-    let lastOutput = "", summary = "", finalText = "";
-    let activeJob: { id: string; command: string } | null = null;
-    let creds: SavedLogin | null = null;
-    let browserState: unknown = null;
-    let totalActions = 0, invalidStreak = 0, completed = false;
-    const ctxText = brainPrompt(brainRef.current, task);
     const trace = beginTrace(user.uid, chatId, task.slice(0, 80), "computer");
-    const rec: RecipeStep[] = [];
-    let recOk = true, lastBrowse = "";
+    const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
+    let finalText = "";
 
     try {
-      const startedId = await startOrResumePc(chatId);
-      if (!startedId) throw new Error(sessionsRef.current[chatId]?.error || "The computer could not be started — see the panel for the reason.");
-      const plan = await makePlan(chat, key, task, ctxText);
-      if (plan.length > 1) pushStep(chatId, "🗺️ Plan:\n" + plan.map((s, i) => `${i + 1}. ${s.title}`).join("\n"));
+      const sid = opts?.resume?.sandboxId ?? (await startOrResumePc(chatId));
+      if (!sid) throw new Error(sessionsRef.current[chatId]?.error || "The computer could not be started — see the panel for the reason.");
+      let jobId = opts?.resume?.jobId;
+      if (!jobId) {
+        pushStep(chatId, "⚙️ Preparing the computer…");
+        await ensureNode(env, sid, (l) => pushStep(chatId, l));
+        jobId = await startPcJob(env, { sandboxId: sid, chatId, task, provider: chat.provider, model: chat.model, apiKey: key, context: brainPrompt(brainRef.current, task), heal: opts?.heal });
+        pushStep(chatId, "🚀 Working in the background — you can close this tab; I will report here.");
+      } else pushStep(chatId, "🔗 Re-attached to the running task.");
 
-      outer: for (let si = 0; si < plan.length; si++) {
-        const sub = plan[si];
-        if (plan.length > 1) pushStep(chatId, `📌 Step ${si + 1}/${plan.length}: ${sub.title}`);
-        const subTask = plan.length > 1
-          ? `OVERALL GOAL: ${task}\nPLAN:\n${plan.map((s, i) => `${i + 1}. ${s.title}`).join("\n")}\nCURRENT STEP (${si + 1}/${plan.length}): ${sub.goal}${sub.tool ? `\nSuggested tool: ${sub.tool}` : ""}\nWork ONLY on the current step and call done when it is complete.`
-          : task;
-        history.length = 0;
-        subResults.forEach((r) => history.push(`Finished step "${r.title}": ${r.summary.slice(0, 200)}`));
-        let actions = 0, guard = 0, subDone = false, subSummary = "";
-
-        while (actions < PER_STEP && guard < 120 && totalActions < TOTAL_CAP) {
-          guard++;
-          if (stopRef.current[chatId]) break outer;
-          const startedAt = runStartRef.current[chatId] ?? Date.now();
-          if (Date.now() - startedAt > RUN_CYCLE_MS) {
-            pushStep(chatId, "♻️ Close to the 1-hour limit — saving and restarting the computer (data stays safe)…");
-            const ok = await cyclePc(chatId);
-            pushStep(chatId, ok ? "✅ Computer is back on, continuing." : "⚠️ Could not refresh it — continuing anyway.");
-            if (!ok) runStartRef.current[chatId] = Date.now();
+      const out = await followPcJob({
+        env, chatId, sandboxId: sid, jobId,
+        onStep: (l) => { pushStep(chatId, l); touch(chatId); },
+        cancelled: () => Boolean(stopRef.current[chatId]),
+        onAsk: async (p) => {
+          if (p.kind === "login" && findCredential(p.site ?? "")) return { type: "login_saved", site: p.site ?? "" };
+          const reply = await askUser(chatId, toRequest(p));
+          if (stopRef.current[chatId]) return { type: "answer", text: "" };
+          if (reply.type === "login") {
+            // The password goes to YOUR account document; the server injects it into the browser. The model never sees it.
+            await savePcCredential(normSite(p.site ?? ""), { email: reply.email, password: reply.password });
+            return { type: "login_saved", site: p.site ?? "" };
           }
-
-          const res = await fetch("/api/e2b/step", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              e2bKey, sandboxId: sandboxRef.current[chatId], provider: chat.provider, apiKey: key, model: chat.model,
-              task: subTask, history: history.slice(-16), notes: notes.slice(-25), hint: stuckHint(history),
-              stepNo: actions + 1, maxSteps: PER_STEP, lastOutput: lastOutput || undefined,
-              runningJob: activeJob ?? undefined, context: ctxText || undefined, creds: creds ?? undefined,
-            }),
-          });
-          const data = await readJson(res);
-          if (!res.ok) throw new Error(data?.error || "A step failed.");
-          touch(chatId);
-
-          if (data.newSandboxId) {
-            setSandboxId(chatId, data.newSandboxId);
-            runStartRef.current[chatId] = Date.now();
-            activeJob = null;
-            patchSession(chatId, { screenUrl: null });
-            await loadScreen(chatId, data.newSandboxId);
-            history.push(data.actionText);
-            pushStep(chatId, `↻ ${data.actionText}`);
-            continue;
-          }
-          if (data.invalid) {
-            if (++invalidStreak >= 4) throw new Error("The model keeps answering in the wrong format. Pick a stronger vision model in the model picker (Claude Sonnet / GPT-4o).");
-            continue;
-          }
-          invalidStreak = 0;
-          if (data.done) { subSummary = data.summary || "Done."; subDone = true; pushStep(chatId, `✓ ${subSummary}`); break; }
-
-          if (data.ask) {
-            lastOutput = "";
-            const ask = data.ask as { kind: "login" | "choice" | "text"; site?: string; question?: string; options?: string[] };
-            if (ask.kind === "login") {
-              const site = ask.site || "this site";
-              let cred = findCredential(site);
-              if (!cred) {
-                const reply = await askUser(chatId, { kind: "login", site });
-                if (stopRef.current[chatId]) break outer;
-                if (reply.type === "login") {
-                  cred = { email: reply.email, password: reply.password };
-                  if (reply.remember) savePcCredential(normSite(site), cred).catch(() => {});
-                }
-              }
-              if (cred) {
-                creds = cred;
-                history.push(`Login details for ${site} are ready. Use browse with op "secret" (field "email" then "password") on the login inputs, or on the screen click the email field and use type_secret "email", click the password field and use type_secret "password", then submit.`);
-                pushStep(chatId, `🔑 Login details ready for ${site}`);
-              } else {
-                pushStep(chatId, `✋ Waiting while you log in to ${site} yourself…`);
-                await askUser(chatId, { kind: "handoff", message: `Log in to ${site} on the computer (you have control now), then press Continue.` });
-                if (stopRef.current[chatId]) break outer;
-                history.push(`The user logged in to ${site} themselves. Continue the task.`);
-              }
-            } else {
-              const q = ask.question || "The agent needs your input.";
-              const reply = await askUser(chatId, ask.kind === "choice" ? { kind: "choice", question: q, options: ask.options ?? [] } : { kind: "text", question: q });
-              if (stopRef.current[chatId]) break outer;
-              const answer = reply.type === "answer" ? reply.text : "";
-              history.push(`Asked the user: "${q}" → the user answered: "${answer}"`);
-              pushStep(chatId, `❓ ${q} → ${answer}`);
-            }
-            continue;
-          }
-
-          if (data.delegate?.kind === "browse") {
-            const d = data.delegate as { url?: string; ops?: unknown[] };
-            pushStep(chatId, `🌐 browse ${(d.url || "same page").slice(0, 80)}`);
-            let out: string;
-            try {
-              const br = await readJson(await fetch("/api/browser", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-                body: JSON.stringify({ uid: user.uid, url: d.url, ops: d.ops, session: browserState, creds }),
-              }));
-              if (br.error) throw new Error(br.error);
-              browserState = br.session;
-              out = String(br.snapshot);
-            } catch (e) {
-              out = `ERROR: ${e instanceof Error ? e.message : "browse failed"} — try again, or use the screen browser.`;
-            }
-            lastOutput = out;
-            const failed = out.startsWith("ERROR:") || /^FAILED /m.test(out);
-            if (failed) recOk = false;
-            else {
-              const lab = labelOps((d.ops as unknown[]) ?? [], lastBrowse);
-              if (!lab) recOk = false;
-              else if (lab.length || d.url) rec.push({ url: d.url || undefined, ops: lab });
-            }
-            lastBrowse = out;
-            outputs.push(`browse\n${out.slice(0, 700)}`);
-            if (outputs.length > 5) outputs.shift();
-            actions++; totalActions++;
-            history.push(`${actions}. browse ${(d.url || "").slice(0, 60)} → ${out.split("\n")[0].slice(0, 100)}`);
-            pushStep(chatId, `${actions}. 🌐 ${out.split("\n").find((l) => l.startsWith("URL:")) ?? out.slice(0, 100)}`);
-            continue;
-          }
-
-          if (data.delegate?.kind === "code") {
-            recOk = false;
-            pushStep(chatId, `💻 Handing this to Venus Code: ${String(data.delegate.instruction).slice(0, 100)}`);
-            const sum = await runCodeFor(chat, String(data.delegate.instruction), { silent: true, onLine: (l) => pushStep(chatId, l) });
-            lastOutput = sum;
-            outputs.push(`code → ${sum.slice(0, 600)}`);
-            if (outputs.length > 5) outputs.shift();
-            actions++; totalActions++;
-            history.push(`${actions}. code → ${sum.slice(0, 200)}`);
-            pushStep(chatId, `💻 ${sum.slice(0, 200)}`);
-            continue;
-          }
-
-          if (data.note) notes.push(String(data.note));
-          if (!/^(web search|read |noted:)/.test(String(data.actionText ?? ""))) recOk = false;
-          if (data.job) activeJob = data.job.done ? null : { id: data.job.id, command: data.job.command };
-          if (typeof data.output === "string" && data.output) {
-            lastOutput = data.output;
-            outputs.push(`${data.actionText}\n${data.output.slice(0, 700)}`);
-            if (outputs.length > 5) outputs.shift();
-          } else lastOutput = "";
-
-          actions++; totalActions++;
-          const line = `${actions}. ${data.thought ? data.thought + " → " : ""}${data.actionText}`;
-          history.push(line);
-          pushStep(chatId, line);
-        }
-        subResults.push({ title: sub.title, ok: subDone, summary: subSummary || "Step limit reached before finishing." });
-        if (!subDone) notes.push(`Step "${sub.title}" did not finish.`);
-      }
-
-      if (stopRef.current[chatId]) { summary = "Stopped before finishing."; pushStep(chatId, "■ Stopped."); }
-      else {
-        summary = plan.length > 1 ? subResults.map((r, i) => `${r.ok ? "✓" : "✗"} ${i + 1}. ${r.title}: ${r.summary}`).join("\n") : subResults[0]?.summary || "Step limit reached.";
-        completed = subResults.some((r) => r.ok);
-      }
-      finalText = summary;
-      if (completed) {
-        pushStep(chatId, "🔎 Verifier is checking the result…");
-        const v = await verifyResult((s, p) => callLLM(chat, s, p, [], "verify"), { task, summary, evidence: outputs });
-        trace.add("verify", `${v.verdict}: ${v.reason}`);
-        pushStep(chatId, `${v.verdict === "pass" ? "✅" : "⚠️"} Verifier: ${v.verdict} — ${v.reason}`);
-
-        pushStep(chatId, "✍️ Writing the final report…");
-        const report = await composeReport(chat, { task, summary, notes, steps: history, outputs });
-        if (report) finalText = report;
-        if (v.verdict !== "pass") finalText = `⚠️ **Verifier (${v.verdict}):** ${v.reason}\n\n${finalText}`;
-
-        // Workflow compiler: a verified, pure-browser run becomes a recipe that replays with no AI.
-        if (v.verdict === "pass" && recOk && rec.length > 0) {
-          const firstUrl = rec.find((s) => s.url)?.url ?? "";
-          let site = "";
-          try { site = new URL(/^https?:/i.test(firstUrl) ? firstUrl : `https://${firstUrl}`).hostname; } catch { /* no site */ }
-          saveRecipe(user.uid, { name: task.slice(0, 60), task, site, steps: rec })
-            .then(() => say(chatId, `💾 Saved as a recipe. Next time run it free (no AI): \`/recipe ${task.slice(0, 30)}\``))
-            .catch(() => {});
-        }
-        if (totalActions >= 4 && !opts?.quiet) {
-          reflect(user.uid, { apiKeys, provider: chat.provider, model: chat.model }, brainRef.current, { task, outcome: summary, steps: history.join("\n") })
-            .then((l) => { if (l.length) { say(chatId, "🧠 Learned: " + l.join("; ")); refreshBrain(); } }).catch(() => {});
-        }
-      }
+          if (reply.type === "self") return { type: "self" };
+          if (reply.type === "answer") return { type: "answer", text: reply.text };
+          return { type: "handoff_done" };
+        },
+      });
+      finalText = await finishPcRun(chat, task, out, opts);
     } catch (err) {
       finalText = `⚠️ ${err instanceof Error ? err.message : "The task failed."}`;
       pushStep(chatId, finalText);
@@ -766,6 +576,7 @@ export default function DashboardPage() {
       await trace.end(stopRef.current[chatId] ? "stopped" : finalText.startsWith("⚠️") ? "error" : "done");
       runningRef.current[chatId] = false;
       resolverRef.current[chatId] = null;
+      busyChats.current.delete(chatId);
       patchSession(chatId, { running: false, request: null });
     }
 
@@ -782,7 +593,54 @@ export default function DashboardPage() {
     return finalText;
   }
 
-  // ---- Venus Pro: runs on the chat's computer; the PC agent can download assets first ----
+  // ---- Recipes: replay with no AI, heal only the broken part ----
+
+  async function runRecipeCmd(chat: Chat, arg: string) {
+    if (!user) return;
+    const list = await listRecipes(user.uid);
+    if (!arg.trim()) {
+      return say(chat.id, list.length
+        ? "📒 **Your recipes**\n" + list.map((r) => `- **${r.name}** — ${r.steps.length} steps · ran ${r.runs}×${r.fails ? ` · ${r.fails} broke` : ""}`).join("\n") + "\n\nRun one with `/recipe <name>`."
+        : "No recipes yet. Finish a task on the computer and it is saved automatically.");
+    }
+    const hit = matchRecipes(list, arg)[0];
+    if (!hit) return say(chat.id, "No recipe matches that. Send `/recipe` to see the list.");
+    say(chat.id, `▶️ Running recipe **${hit.name}** (${hit.steps.length} steps) — no AI model used.`);
+    try {
+      const r = await replayRecipe({
+        token: () => user.getIdToken(), uid: user.uid, chatId: chat.id,
+        connectors: chatsRef.current.find((c) => c.id === chat.id)?.connectors ?? {},
+        recipe: hit, creds: findCredential(hit.site) ?? undefined,
+        shell: async (command) => {
+          if (!e2bKey) return { ok: false, text: "Add an E2B key first." };
+          const id = await startOrResumePc(chat.id);
+          if (!id) return { ok: false, text: "The computer could not be started." };
+          const res = await readJson(await fetch("/api/e2b/shell", {
+            method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+            body: JSON.stringify({ uid: user.uid, e2bKey, sandboxId: id, command }),
+          }));
+          return { ok: !res.error && (res.done ? res.exitCode === 0 : true), text: String(res.error ?? res.output ?? "") };
+        },
+        approve: async (summary) => window.confirm(`Approve this recipe action?\n\n${summary}`),
+      });
+      await markRecipe(user.uid, hit, r.ok);
+      if (r.ok) return say(chat.id, `✅ Recipe finished.\n\n${r.snapshot.slice(0, 1500)}`);
+
+      const k = r.failedAt ?? 0;
+      if (!e2bKey) return say(chat.id, `⚠️ Recipe broke at step ${k + 1}. Add an E2B key and I can repair it.\n\n${r.snapshot.slice(0, 400)}`);
+      say(chat.id, `🩹 Step ${k + 1} of ${hit.steps.length} broke (${describeStep(hit.steps[k])}). I will re-learn only that part and keep the steps before it.`);
+      const healTask =
+        `A saved recipe "${hit.name}" (original goal: ${hit.task}) broke at step ${k + 1} of ${hit.steps.length} because the site changed.\n` +
+        `The browser is already open${r.url ? ` on ${r.url}` : ""} with the login kept: do NOT start over and do NOT repeat the finished steps.\n` +
+        `Do what the broken step intended, then finish the rest of the goal. Steps still to do, for reference:\n` +
+        hit.steps.slice(k).map((s, i) => `${k + i + 1}. ${describeStep(s)}`).join("\n");
+      await runPcTask(chat, healTask, true, { heal: { recipe: hit, keep: hit.steps.slice(0, k), session: r.session, snapshot: r.snapshot, url: r.url } });
+    } catch (e) {
+      say(chat.id, `⚠️ Recipe failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  }
+
+  // ---- Venus Pro ----
 
   async function startVenus(chat: Chat, brief: string, opts: { silent?: boolean } = {}): Promise<string> {
     if (!user) return "";
@@ -793,14 +651,14 @@ export default function DashboardPage() {
     if (!apiKeys[chat.provider]) return out("No API key is saved for this chat's model.");
 
     venusBusyRef.current = true;
+    busyChats.current.add(chat.id);
     const opt = guessVenusOptions(brief);
     setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting the computer…", value: null });
     try {
       const sid = await startOrResumePc(chat.id);
       if (!sid) return out("This chat's computer could not be started — turn it on with the monitor button first.");
-      if (!opts.silent) say(chat.id, `🎬 Venus Pro is making your video (${opt.seconds}s, ${opt.aspect}) on this chat's computer. Progress shows above the message box. The first video can take 15-30 minutes.`);
+      if (!opts.silent) say(chat.id, `🎬 Venus Pro is making your video (${opt.seconds}s, ${opt.aspect}) on this chat's computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
 
-      // The PC agent can fetch real assets first (images, clips, logos…).
       if (/\b(assets?|footage|stock|photos?|images?|logos?|clips?|b-?roll|download)\b/i.test(brief)) {
         setVenusRun((p) => (p ? { ...p, label: "The computer is downloading assets…" } : p));
         await runPcTask(chat, `Find and download 5-10 royalty-free images or short video clips (and logos if the brief names a brand) for a video about: ${brief.slice(0, 400)}. Save them into the folder ~/venus-assets (create it if needed) with short file names using only letters, numbers and dashes (e.g. skyline-night.jpg). Use free sources (Pexels, Pixabay, Unsplash, Wikimedia). Finish by listing the file names you saved.`, false, { quiet: true });
@@ -825,7 +683,7 @@ export default function DashboardPage() {
       return out(`⚠️ The video could not be finished: ${final.error ?? "unknown error"}\n\n[Open it in Venus Pro](/venus?project=${final.id}) to retry from the failed step.`);
     } catch (err) {
       return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { venusBusyRef.current = false; setVenusRun(null); }
+    } finally { venusBusyRef.current = false; busyChats.current.delete(chat.id); setVenusRun(null); }
   }
 
   // ---- Connectors & deploy ----
@@ -833,8 +691,7 @@ export default function DashboardPage() {
   async function testConnector(kind: string, token: string): Promise<{ ok: boolean; label?: string; error?: string }> {
     if (!user) return { ok: false, error: "Not signed in." };
     const res = await fetch("/api/connectors/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
       body: JSON.stringify({ uid: user.uid, kind, token }),
     });
     return readJson(res);
@@ -842,7 +699,7 @@ export default function DashboardPage() {
 
   async function saveConnector(kind: string, token: string) {
     if (!user || !activeChat) return;
-    const next = { ...(activeChat.connectors ?? {}) };
+    const next = { ...(chatsRef.current.find((c) => c.id === activeChat.id)?.connectors ?? activeChat.connectors ?? {}) };
     if (token) next[kind] = token; else delete next[kind];
     patchChat(activeChat.id, { connectors: next });
     await updateChatConnectors(user.uid, activeChat.id, next).catch(() => {});
@@ -860,8 +717,7 @@ export default function DashboardPage() {
     say(chat.id, "🚀 Deploying to Vercel… this takes up to a minute.");
     try {
       const res = await fetch("/api/deploy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
         body: JSON.stringify({ uid: user.uid, e2bKey, sandboxId: sid, ws: chat.id, vercelToken: token, name: name?.trim() || undefined }),
       });
       const data = await readJson(res);
@@ -898,6 +754,20 @@ export default function DashboardPage() {
     } finally { teamBusyRef.current = false; setTeamRun(null); }
   }
 
+  async function applyMemoryCommand(chat: Chat, arg: string, quiet = false) {
+    if (!user) return;
+    const m = /^(add|forget)\s*\|\s*([\s\S]+)$/i.exec(arg);
+    if (!m) return;
+    if (m[1].toLowerCase() === "add") {
+      const saved = await addMemory(user.uid, m[2]);
+      if (saved && !quiet) say(chat.id, `🧠 Remembered: ${saved.text}`);
+    } else {
+      const n = await forgetMemory(user.uid, m[2]);
+      if (!quiet) say(chat.id, n ? `🧠 Forgot ${n} item${n > 1 ? "s" : ""} about “${m[2]}”.` : `I had nothing saved about “${m[2]}”.`);
+    }
+    await refreshBrain();
+  }
+
   async function runMemberCommands(cmds: Cmd[], chat: Chat, who: Member): Promise<string> {
     const outs: string[] = [];
     for (const c of cmds) {
@@ -914,7 +784,7 @@ export default function DashboardPage() {
       who.tool === "pc" ? "To do work on the computer (browse, search, download, terminal), end your reply with [[PC:task|<clear instruction>]]."
       : who.tool === "code" ? "To build or change code, end your reply with [[CODE:<detailed instruction>]]."
       : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]."
-      : who.tool === "email" ? "You draft emails (sending needs the Gmail connector, which is not connected yet): write the full draft in your reply."
+      : who.tool === "email" ? "You draft emails (sending needs a Gmail MCP connector): write the full draft in your reply."
       : "Answer directly and concretely.";
     const reply = await callLLM(chat, `${personaOf(who)}\n${hint}${brainPrompt(brainRef.current, text)}`, text, history.slice(-12).map((m) => ({ role: m.role, content: m.content })));
     const parsed = extractCommands(reply);
@@ -946,44 +816,6 @@ export default function DashboardPage() {
     return { names, message: names.length ? `🧩 Skill saved: **${names.join(", ")}**. I'll use it automatically whenever it fits a task (manage skills on the [Skills page](/skills)).` : "⚠️ I could not read that as a skill. Send a link to a SKILL.md or paste its text." };
   }
 
-  async function applyMemoryCommand(chat: Chat, arg: string, quiet = false) {
-    if (!user) return;
-    const m = /^(add|forget)\s*\|\s*([\s\S]+)$/i.exec(arg);
-    if (!m) return;
-    if (m[1].toLowerCase() === "add") {
-      const saved = await addMemory(user.uid, m[2]);
-      if (saved && !quiet) say(chat.id, `🧠 Remembered: ${saved.text}`);
-    } else {
-      const n = await forgetMemory(user.uid, m[2]);
-      if (!quiet) say(chat.id, n ? `🧠 Forgot ${n} item${n > 1 ? "s" : ""} about “${m[2]}”.` : `I had nothing saved about “${m[2]}”.`);
-    }
-    await refreshBrain();
-  }
-
-  // ---- Recipes (replay a saved browser workflow with NO AI) ----
-
-  async function runRecipeCmd(chat: Chat, arg: string) {
-    if (!user) return;
-    const list = await listRecipes(user.uid);
-    if (!arg.trim()) {
-      return say(chat.id, list.length
-        ? "📒 **Your recipes**\n" + list.map((r) => `- **${r.name}** — ${r.steps.length} steps · ran ${r.runs}×${r.fails ? ` · ${r.fails} broke` : ""}`).join("\n") + "\n\nRun one with `/recipe <name>`."
-        : "No recipes yet. Finish a browser task and it is saved automatically.");
-    }
-    const hit = matchRecipes(list, arg)[0];
-    if (!hit) return say(chat.id, "No recipe matches that. Send `/recipe` to see the list.");
-    say(chat.id, `▶️ Running recipe **${hit.name}** — no AI model used.`);
-    try {
-      const r = await replayRecipe({ token: () => user.getIdToken(), uid: user.uid, recipe: hit, creds: findCredential(hit.site) ?? undefined });
-      await markRecipe(user.uid, hit, r.ok);
-      say(chat.id, r.ok
-        ? `✅ Recipe finished.\n\n${r.snapshot.slice(0, 1500)}`
-        : `⚠️ Recipe broke at step ${(r.failedAt ?? 0) + 1} (the site probably changed). Give the same task again and I will re-learn it.\n\n${r.snapshot.slice(0, 500)}`);
-    } catch (e) {
-      say(chat.id, `⚠️ Recipe failed: ${e instanceof Error ? e.message : "unknown error"}`);
-    }
-  }
-
   async function runCommands(cmds: Cmd[], chat: Chat) {
     for (const c of cmds) {
       if (c.cmd === "start") await startOrResumePc(chat.id);
@@ -996,6 +828,13 @@ export default function DashboardPage() {
       else if (c.cmd === "skill" && c.arg) say(chat.id, (await installSkillFrom(chat, c.arg)).message);
       else if (c.cmd === "memory" && c.arg) await applyMemoryCommand(chat, c.arg);
     }
+  }
+
+  async function handleAttach(f: File) {
+    if (f.size > 200_000) { setPcMessage("File is too big (max 200 KB of text)."); return; }
+    const t = await f.text();
+    if (/[\u0000-\u0008]/.test(t.slice(0, 2000))) { setPcMessage("Only text-based files for now (txt, md, csv, json, code)."); return; }
+    setAttach({ name: f.name, text: t });
   }
 
   // ---- Chat ----
@@ -1017,10 +856,9 @@ export default function DashboardPage() {
     const key = apiKeys[chat.provider];
     if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !key) { setSettingsOpen(true); return; }
 
-    const payload = attach && !recipe ? `${text}\n\n📎 File: ${attach.name}\n\`\`\`\n${attach.text}\n\`\`\`` : text;
+    const payload = attach && !slash ? `${text}\n\n📎 File: ${attach.name}\n\`\`\`\n${attach.text}\n\`\`\`` : text;
     appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now() }]);
-    setAttach(null);
-    setDraft("");
+    setDraft(""); setAttach(null);
 
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
     if (deploy) { void runDeploy(chat, deploy[1]); return; }
@@ -1057,40 +895,50 @@ export default function DashboardPage() {
       if (text.replace(/https?:\/\/\S+/g, "").length < 90) return;
     }
 
-    // A goal that spans several areas goes to the team.
     if (e2bKey && text.length > 60 && domainCount(text) >= 2) { void runTeam(chat, text); return; }
 
     if (e2bKey && (computerMode || analysis.compound)) {
-      say(chat.id, "On it — starting the computer and working on your task. Progress shows in the panel.");
+      say(chat.id, "On it — starting the computer and working on your task in the background. Progress shows in the panel.");
       void runPcTask(chat, text, false, { stopAfter: analysis.stopAfter });
       return;
     }
 
     setSending(true);
     let cmds: Cmd[] = [];
-    const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
-    // While streaming, a partial assistant message is shown in the UI only; this puts the real messages back before saving the final reply.
-    const restoreBase = () => {
-      chatsRef.current = chatsRef.current.map((c) => (c.id === chat.id ? { ...c, messages: base } : c));
-      patchChat(chat.id, { messages: base });
-    };
     try {
-      const history = base.map((m) => ({ role: m.role, content: m.content }));
+      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
+      const specs = await loadTools(chat);
       const system =
         `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
-        brainPrompt(brainRef.current, text) + (e2bKey ? PC_PROMPT : "") + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + extraSystem;
+        brainPrompt(brainRef.current, text) + (e2bKey ? PC_PROMPT : "") + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem;
+      const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
       const at = Date.now();
+      const userPrompt = history.pop()?.content ?? text;
+
       setStreaming(true);
-      const reply = await streamLLM(chat, system, history.pop()?.content ?? text, history, (t) => {
-        // hide [[TOOL:...]] tags while they stream in
+      let reply = await streamLLM(chat, system, userPrompt, history, (t) => {
         patchChat(chat.id, { messages: [...base, { role: "assistant", content: t.replace(/\[\[[\s\S]*$/, "").trim() || "…", at }] });
       });
-      restoreBase();
-      const parsed = extractCommands(reply);
+
+      let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
+      for (let round = 0; round < 3; round++) {
+        const tc = extractToolCalls(reply);
+        if (!tc.calls.length) break;
+        const results: string[] = [];
+        for (const c of tc.calls.slice(0, 4)) {
+          patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
+          results.push(`### ${c.name}\n${await execTool(chat, c.name, c.args)}`);
+        }
+        const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nAnswer the user now using these results. Call another tool only if it is really needed.`;
+        const prev = reply;
+        reply = await callLLM(chat, system, resultsMsg, [...convo, { role: "assistant", content: prev }]);
+        convo = [...convo, { role: "assistant", content: prev }, { role: "user", content: resultsMsg }];
+      }
+
+      const parsed = extractCommands(extractToolCalls(reply).clean);
       cmds = parsed.cmds;
       say(chat.id, parsed.clean || (cmds.length ? "On it." : "…"));
     } catch (err) {
-      restoreBase();
       say(chat.id, `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`);
     } finally { setSending(false); setStreaming(false); }
     if (cmds.length > 0) void runCommands(cmds, chat);
@@ -1139,35 +987,14 @@ export default function DashboardPage() {
       <div className="flex min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           {activeChat && (
-            <header className="flex items-center justify-between border-b border-line px-6 py-3.5">
-              <div className="flex items-center gap-2.5">
-                <button onClick={() => setFocusMode((v) => !v)} title={focusMode ? "Show chat list" : "Focus mode — hide the chat list"} className="rounded-lg p-1.5 text-muted hover:bg-panel2 hover:text-ink">{focusMode ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
-                <BotAvatar color={activeChat.agentColor} size={26} />
-                <span className="text-sm font-medium text-ink">{activeChat.agentName}</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <button onClick={() => router.push(`/code?chat=${activeChat.id}`)} title="Venus Code — this chat's codespace" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2">Code</button>
-                <button onClick={() => router.push("/venus")} title="Venus Pro — motion graphics" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2">Venus Pro</button>
-                <button onClick={() => router.push("/skills")} title="Memory & skills" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2">Skills</button>
-                <button onClick={() => router.push("/runs")} title="Runs — every agent run, step by step" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2"><Activity size={13} className="mr-1 inline" />Runs</button>
-                <button onClick={() => setConnectorsOpen(true)} title="Connectors" className="relative rounded-lg p-2 text-muted hover:bg-panel2 hover:text-ink">
-                  <Plug size={17} />
-                  {Object.keys(activeChat.connectors ?? {}).length > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />}
-                </button>
-                <button onClick={() => setRoutinesOpen(true)} title="Routines" className="relative rounded-lg p-2 text-muted hover:bg-panel2 hover:text-ink">
-                  <Clock size={17} />
-                  {routines.some((r) => r.enabled) && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />}
-                </button>
-                <button onClick={handleTeamClick} title="Team — specialists working for this chat" className={`relative rounded-lg p-2 hover:bg-panel2 hover:text-ink ${teamOpen ? "bg-panel2 text-ink" : "text-muted"}`}>
-                  <Users size={17} />
-                  {teamRun && <span className="absolute right-1 top-1 h-1.5 w-1.5 animate-pulse rounded-full bg-gold" />}
-                </button>
-                <button onClick={handlePcClick} title={pcOpen ? "Hide this chat's computer" : activeSandboxId ? "Show this chat's computer" : "Give this chat a cloud computer"} className={`relative rounded-lg p-2 hover:bg-panel2 hover:text-ink ${pcOpen ? "bg-panel2 text-ink" : "text-muted"}`}>
-                  <Monitor size={17} />
-                  {activeSandboxId && <span className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${session.status === "paused" ? "bg-faint" : "bg-avatar-teal"}`} />}
-                </button>
-              </div>
-            </header>
+            <ChatHeader
+              name={activeChat.agentName} color={activeChat.agentColor} focusMode={focusMode} onToggleFocus={() => setFocusMode((v) => !v)}
+              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push("/skills")} onRuns={() => router.push("/runs")}
+              onConnectors={() => setConnectorsOpen(true)} hasConnectors={Object.keys(activeChat.connectors ?? {}).some((k) => !k.startsWith("auto:"))}
+              onRoutines={() => setRoutinesOpen(true)} hasRoutines={routines.some((r) => r.enabled)}
+              onTeam={handleTeamClick} teamOpen={teamOpen} teamRunning={Boolean(teamRun)}
+              onPc={handlePcClick} pcOpen={pcOpen} hasComputer={Boolean(activeSandboxId)} pcPaused={session.status === "paused"}
+            />
           )}
 
           {pcMessage && <div className="flex items-center justify-between border-b border-line bg-panel px-6 py-2 text-xs text-muted">{pcMessage}<button onClick={() => setPcMessage(null)} className="text-faint hover:text-ink">Dismiss</button></div>}
@@ -1186,47 +1013,13 @@ export default function DashboardPage() {
               <div className="flex-1 overflow-y-auto px-6 py-6">
                 <div className="mx-auto max-w-2xl"><ChatThread messages={activeChat.messages} pending={sending && !streaming} onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }} /></div>
               </div>
-
-              {(venusRun || codeRun || teamRun) && (
-                <div className="mx-auto w-full max-w-2xl space-y-2 px-6 pb-2">
-                  {venusRun && (
-                    <div className="rounded-lg border border-line bg-panel p-3 text-xs text-muted">
-                      <div className="flex justify-between"><span className="text-ink">🎬 Venus Pro · {venusRun.title}</span><span>{venusRun.value === null ? "…" : Math.round(venusRun.value * 100) + "%"}</span></div>
-                      <p className="mt-1 truncate">{venusRun.label}</p>
-                      <div className="mt-2 h-1 overflow-hidden rounded-full bg-panel2"><div className={`h-full rounded-full bg-gold ${venusRun.value === null ? "w-1/3 animate-pulse" : ""}`} style={venusRun.value === null ? undefined : { width: Math.round(venusRun.value * 100) + "%" }} /></div>
-                    </div>
-                  )}
-                  {codeRun && (
-                    <div className="rounded-lg border border-line bg-panel p-3 text-xs text-muted">
-                      <span className="text-ink">💻 Venus Code · {codeRun.title}</span><p className="mt-1 truncate">{codeRun.label}</p>
-                      <div className="mt-2 h-1 overflow-hidden rounded-full bg-panel2"><div className="h-full w-1/3 animate-pulse rounded-full bg-gold" /></div>
-                    </div>
-                  )}
-                  {teamRun && <div className="rounded-lg border border-line bg-panel p-3 text-xs text-muted"><span className="text-ink">👥 Team working · {teamRun}</span> — open the Team panel to follow along.</div>}
-                </div>
-              )}
-
+              <RunBars venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
-
-              <form onSubmit={handleSend} className="mx-auto flex w-full max-w-2xl items-center gap-2 border-t border-line px-6 py-4">
-                <input ref={fileRef} type="file" hidden accept=".txt,.md,.csv,.json,.js,.ts,.tsx,.py,.html,.css,.log" onChange={async (e) => {
-                  const f = e.target.files?.[0]; e.target.value = "";
-                  if (!f) return;
-                  if (f.size > 200_000) { setPcMessage("File is too big (max 200 KB of text)."); return; }
-                  const t = await f.text();
-                  if (/[\u0000-\u0008]/.test(t.slice(0, 2000))) { setPcMessage("Only text-based files for now (txt, md, csv, json, code)."); return; }
-                  setAttach({ name: f.name, text: t });
-                }} />
-                <button type="button" aria-label="Attach file" onClick={() => fileRef.current?.click()} className="rounded-full p-2 text-muted hover:bg-panel2"><Paperclip size={18} /></button>
-                {attach && <span className="flex items-center gap-1 rounded-full bg-panel2 px-2.5 py-1 text-[11px] text-ink">📎 {attach.name}<button type="button" onClick={() => setAttach(null)} className="text-faint hover:text-ink">×</button></span>}
-                {e2bKey && (
-                  <button type="button" onClick={() => setComputerMode((v) => !v)} aria-pressed={computerMode} title={computerMode ? "Computer mode ON — your message goes straight to the computer as a task" : "Computer mode — send your message straight to the computer as a task"} className={`flex items-center gap-1.5 rounded-full px-2.5 py-2 text-xs ${computerMode ? "bg-gold font-medium text-bg" : "text-muted hover:bg-panel2 hover:text-ink"}`}>
-                    <Monitor size={15} />{computerMode && "Computer"}
-                  </button>
-                )}
-                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={computerMode ? "Give the computer a task…" : `Message ${activeChat.agentName}  ·  /code  /video  /team  /deploy  /recipe`} className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold" />
-                <button type="submit" aria-label="Send" disabled={!draft.trim() || sending} className="rounded-full bg-white p-2.5 text-bg hover:opacity-90 disabled:opacity-40"><ArrowUp size={16} /></button>
-              </form>
+              <ChatComposer
+                draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
+                hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
+                attach={attach} onPickFile={(f) => void handleAttach(f)} onClearAttach={() => setAttach(null)}
+              />
             </>
           )}
         </div>
