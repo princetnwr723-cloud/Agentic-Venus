@@ -17,6 +17,7 @@ export type Chat = {
   pcSandboxId?: string | null;
   pcPaused?: boolean;
   codeWs?: string | null;
+  connectors?: Record<string, string>;
   createdAt?: Timestamp;
 };
 
@@ -54,6 +55,10 @@ export async function updateChatPc(uid: string, chatId: string, pcSandboxId: str
 
 export async function updateChatCode(uid: string, chatId: string, codeWs: string | null) {
   await updateDoc(doc(db, "users", uid, "chats", chatId), { codeWs });
+}
+
+export async function updateChatConnectors(uid: string, chatId: string, connectors: Record<string, string>) {
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { connectors });
 }
 
 export async function deleteChat(uid: string, chatId: string) {
