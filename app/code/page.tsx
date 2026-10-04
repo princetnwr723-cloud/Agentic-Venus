@@ -2,11 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { doc, onSnapshot } from "firebase/firestore";
 import { ArrowLeft, Download, File as FileIcon, Maximize2, RefreshCw, RotateCcw, Square, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Markdown from "@/components/Markdown";
 import { useAuth } from "@/lib/auth-context";
 import { useKeys } from "@/lib/keys-context";
+import { db } from "@/lib/firebase";
+import { touch } from "@/lib/computers";
 import { listChats, type Chat } from "@/lib/chats";
 import { setStop, watchCodeProject, type CodeProject } from "@/lib/code-store";
 import { wsCall, type CodeEnv } from "@/lib/code-agent";
@@ -17,6 +20,8 @@ const fmtTool = (t: string): [string, string] => {
   const n = i < 0 ? t : t.slice(0, i);
   return [n.charAt(0).toUpperCase() + n.slice(1), i < 0 ? "" : t.slice(i + 1)];
 };
+
+const hash = (s: string) => { let h = 0; for (let i = 0; i < s.length; i += 7) h = (h * 31 + s.charCodeAt(i)) | 0; return h; };
 
 function DiffBox({ lines }: { lines: NonNullable<CodeProject["log"][number]["lines"]> }) {
   return (
@@ -32,6 +37,8 @@ function DiffBox({ lines }: { lines: NonNullable<CodeProject["log"][number]["lin
   );
 }
 
+type Live = { state: "idle" | "starting" | "ready" | "failed"; url: string | null; log: string };
+
 export default function CodePage() {
   const { user, loading } = useAuth();
   const { apiKeys, e2bKey } = useKeys();
@@ -43,17 +50,21 @@ export default function CodePage() {
   const [tree, setTree] = useState<string[]>([]);
   const [file, setFile] = useState<{ path: string; content: string } | null>(null);
   const [checks, setChecks] = useState<Array<{ sha: string; when: string; msg: string }>>([]);
-  const [page, setPage] = useState<{ html: string; entry: string; files: string[] } | null>(null);
+  const [page, setPage] = useState<{ html: string; entry: string; files: string[]; hasPackage?: boolean } | null>(null);
   const [entry, setEntry] = useState("");
   const [device, setDevice] = useState<"desktop" | "tablet" | "mobile">("desktop");
+  const [mode, setMode] = useState<"static" | "live">("static");
+  const [live, setLive] = useState<Live>({ state: "idle", url: null, log: "" });
   const [zipUrl, setZipUrl] = useState("");
   const [err, setErr] = useState("");
   const [full, setFull] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
 
   const chat = chats.find((c) => c.id === chatId) ?? null;
-  // Venus Code has its OWN coding computer (slot "code"), separate from the chat's computer.
-  const sandboxId = (chat as unknown as { computers?: Record<string, string> } | null)?.computers?.code ?? null;
+  // The dashboard runs code on the chat's computer; older chats may have a separate "code" computer.
+  const sandboxId =
+    (chat as unknown as { computers?: Record<string, string> } | null)?.computers?.code ?? chat?.pcSandboxId ?? null;
 
   useEffect(() => { if (!loading && !user) router.replace("/"); }, [loading, user, router]);
   useEffect(() => {
@@ -64,9 +75,21 @@ export default function CodePage() {
       setChatId(want && l.some((c) => c.id === want) ? want : l[0]?.id ?? null);
     });
   }, [user]);
+
+  // keep the chat's computer id fresh (it is created after this page may have loaded)
+  useEffect(() => {
+    if (!user || !chatId) return;
+    return onSnapshot(doc(db, "users", user.uid, "chats", chatId), (s) => {
+      if (!s.exists()) return;
+      const data = s.data() as Omit<Chat, "id">;
+      setChats((prev) => prev.map((c) => (c.id === s.id ? { ...c, pcSandboxId: data.pcSandboxId, ...(data as object) } : c)));
+    }, () => {});
+  }, [user, chatId]);
+
   useEffect(() => {
     if (!user || !chatId) return;
     setProj(null); setTree([]); setFile(null); setChecks([]); setPage(null); setEntry(""); setZipUrl("");
+    setLive({ state: "idle", url: null, log: "" });
     return watchCodeProject(user.uid, chatId, setProj);
   }, [user, chatId]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [proj?.log?.length]);
@@ -74,10 +97,23 @@ export default function CodePage() {
   const env = (): CodeEnv | null =>
     user && chat && e2bKey ? { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, provider: chat.provider, model: chat.model, chatId: chat.id, sandboxId: sandboxId ?? undefined } : null;
 
+  async function pv(action: string, extra: Record<string, unknown> = {}) {
+    if (!user || !e2bKey || !sandboxId) throw new Error("The computer is not available yet.");
+    const res = await fetch("/api/code/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+      body: JSON.stringify({ action, uid: user.uid, e2bKey, sandboxId, ws: chatId, ...extra }),
+    });
+    const text = await res.text();
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = { error: `Server returned ${res.status}` }; }
+    if (!res.ok) throw new Error(data?.error || "Preview failed.");
+    touch(sandboxId, e2bKey);
+    return data;
+  }
+
   async function refreshPreview(en = entry) {
-    const e = env();
-    if (!e || !sandboxId) return;
-    try { const r = await wsCall(e, "htmlpreview", { sandboxId, ws: chatId, entry: en || undefined }); setPage(r); setErr(""); } catch (x) { setErr(x instanceof Error ? x.message : "Preview failed."); }
+    try { setPage(await pv("html", { entry: en || undefined })); setErr(""); } catch (x) { setErr(x instanceof Error ? x.message : "Preview failed."); }
   }
   async function refreshSide() {
     const e = env();
@@ -88,16 +124,71 @@ export default function CodePage() {
     } catch { /* computer may be off */ }
   }
 
-  // live: refresh whenever the agent saved something new (and every 6s while it works)
+  // refresh when the agent saved something new (checkpoint) and every 6s while it works
+  const ckpt = (proj?.log ?? []).filter((l) => l.kind === "checkpoint").length;
   useEffect(() => {
-    if (!sandboxId || !chatId) return;
-    if (tab === "preview") refreshPreview();
+    if (!sandboxId || !chatId || !user || !e2bKey) return;
+    if (tab === "preview" && mode === "static") refreshPreview();
     if (tab === "files" || tab === "checkpoints") refreshSide();
     if (!proj?.running) return;
-    const iv = setInterval(() => { if (tab === "preview") refreshPreview(); else refreshSide(); }, 6000);
+    const iv = setInterval(() => { if (tab === "preview") { if (mode === "static") refreshPreview(); } else refreshSide(); }, 6000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, sandboxId, chatId, proj?.running, proj?.log?.length && (proj.log[proj.log.length - 1]?.kind === "checkpoint")]);
+  }, [tab, mode, sandboxId, chatId, user, e2bKey, proj?.running, ckpt]);
+
+  // live server: detect an already running server when switching to it
+  useEffect(() => {
+    if (mode !== "live" || !sandboxId || !user || !e2bKey) return;
+    pv("serve_status").then((r) => { if (r.ready) setLive({ state: "ready", url: r.url ?? null, log: r.log ?? "" }); }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, sandboxId, user, e2bKey]);
+
+  useEffect(() => {
+    if (live.state !== "starting") return;
+    let n = 0;
+    const iv = setInterval(async () => {
+      n++;
+      try {
+        const r = await pv("serve_status");
+        if (r.ready) setLive({ state: "ready", url: r.url ?? null, log: r.log ?? "" });
+        else if (r.exited || n > 80) setLive({ state: "failed", url: null, log: r.log ?? "" });
+        else setLive((l) => ({ ...l, log: r.log ?? l.log }));
+      } catch (x) {
+        setLive({ state: "failed", url: null, log: x instanceof Error ? x.message : "failed" });
+      }
+    }, 3000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.state]);
+
+  async function startLive() {
+    setLive({ state: "starting", url: null, log: "Starting the dev server…" });
+    try { await pv("serve"); } catch (x) { setLive({ state: "failed", url: null, log: x instanceof Error ? x.message : "failed" }); }
+  }
+  async function stopLive() {
+    try { await pv("serve_stop"); } catch { /* ignore */ }
+    setLive({ state: "idle", url: null, log: "" });
+  }
+
+  // links between local pages inside the static preview
+  useEffect(() => {
+    const on = (e: MessageEvent) => {
+      if (!page || e.source !== frameRef.current?.contentWindow) return;
+      const h = e.data && typeof e.data === "object" ? (e.data as { venusNav?: unknown }).venusNav : null;
+      if (typeof h !== "string") return;
+      const cur = entry || page.entry;
+      const base = cur.includes("/") ? cur.slice(0, cur.lastIndexOf("/")) : "";
+      const raw = h.split("?")[0].split("#")[0];
+      const parts = (raw.startsWith("/") ? raw.slice(1) : (base ? base + "/" : "") + raw).split("/");
+      const out: string[] = [];
+      for (const p of parts) { if (!p || p === ".") continue; if (p === "..") out.pop(); else out.push(p); }
+      const target = out.join("/");
+      if (page.files.includes(target)) { setEntry(target); refreshPreview(target); }
+    };
+    window.addEventListener("message", on);
+    return () => window.removeEventListener("message", on);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, entry]);
 
   async function openFile(path: string) {
     const e = env();
@@ -122,6 +213,7 @@ export default function CodePage() {
   const shown = log.filter((e) => e.kind !== "term");
   const term = log.filter((e) => e.kind === "term");
   const devW = device === "mobile" ? 390 : device === "tablet" ? 768 : undefined;
+  const frameCls = `mx-auto rounded-md border border-line bg-white ${full ? "h-[calc(100vh-24px)]" : "h-full min-h-[420px]"}`;
 
   return (
     <div className="flex h-screen bg-bg">
@@ -136,7 +228,7 @@ export default function CodePage() {
             <span className="min-w-0 truncate text-sm text-ink">{chat.agentName}</span>
           </div>
         )}
-        <p className="px-4 text-[11px] leading-relaxed text-faint">Only this chat&apos;s codespace. Ask for code in the chat — this page shows the work live. The coding computer starts when needed and switches off by itself right after.</p>
+        <p className="px-4 text-[11px] leading-relaxed text-faint">Only this chat&apos;s codespace. Ask for code in the chat — this page shows the work live. The agent runs inside the computer, so it keeps working even if you close this tab.</p>
       </aside>
 
       <main className="flex min-h-0 min-w-0 flex-1">
@@ -148,6 +240,7 @@ export default function CodePage() {
               <div className="flex items-center gap-2 border-b border-line px-3 py-2">
                 <span className="h-3 w-3 rounded-full bg-[#ff5f57]" /><span className="h-3 w-3 rounded-full bg-[#febc2e]" /><span className="h-3 w-3 rounded-full bg-[#28c840]" />
                 <span className="ml-2 text-xs text-muted">✳ Venus Code — {chat.agentName}</span>
+                {proj?.runnerJob && <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300">background runner · keeps going if you close this tab</span>}
                 {proj?.running && <button onClick={() => user && chatId && setStop(user.uid, chatId, true)} className="ml-auto flex items-center gap-1.5 rounded bg-red-500 px-2.5 py-1 text-xs text-white"><Square size={11} /> Stop</button>}
               </div>
               <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-4 py-3">
@@ -192,21 +285,47 @@ export default function CodePage() {
             <aside className="flex w-[46%] min-w-[340px] flex-col p-3">
               <div className="flex gap-1 pb-2">
                 {(["preview", "files", "terminal", "checkpoints"] as const).map((t) => <button key={t} onClick={() => setTab(t)} className={`rounded-md px-3 py-1 text-xs capitalize ${tab === t ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{t}</button>)}
-                <button onClick={() => { refreshSide(); refreshPreview(); }} className="ml-auto text-muted hover:text-ink"><RefreshCw size={13} /></button>
+                <button onClick={() => { refreshSide(); if (mode === "static") refreshPreview(); }} className="ml-auto text-muted hover:text-ink"><RefreshCw size={13} /></button>
               </div>
               <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-panel">
-                {!sandboxId && <p className="p-4 text-xs text-muted">The coding computer starts automatically the first time you ask for code in the chat.</p>}
+                {!e2bKey && <p className="p-4 text-xs text-muted">Add your E2B key under API keys in the dashboard to see the computer.</p>}
+                {e2bKey && !sandboxId && <p className="p-4 text-xs text-muted">This chat has no computer yet. It starts automatically the first time you ask for code in the chat.</p>}
                 {sandboxId && tab === "preview" && (
                   <div className="flex h-full flex-col">
                     <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs">
-                      <span className="text-ink">Instant HTML preview</span>
-                      {page && page.files.length > 1 && <select value={entry || page.entry} onChange={(e) => { setEntry(e.target.value); refreshPreview(e.target.value); }} className="rounded border border-line bg-bg px-1.5 py-0.5 text-ink">{page.files.map((f) => <option key={f}>{f}</option>)}</select>}
+                      <span className="flex overflow-hidden rounded border border-line">
+                        {(["static", "live"] as const).map((m) => <button key={m} onClick={() => setMode(m)} className={`px-2 py-0.5 ${mode === m ? "bg-panel2 text-ink" : "text-muted"}`}>{m === "static" ? "Instant" : "Live server"}</button>)}
+                      </span>
+                      {mode === "static" && page && page.files.length > 1 && <select value={entry || page.entry} onChange={(e) => { setEntry(e.target.value); refreshPreview(e.target.value); }} className="rounded border border-line bg-bg px-1.5 py-0.5 text-ink">{page.files.map((f) => <option key={f}>{f}</option>)}</select>}
+                      {mode === "live" && (
+                        <>
+                          <button onClick={startLive} disabled={live.state === "starting"} className="rounded border border-line px-2 py-0.5 text-ink hover:bg-panel2 disabled:opacity-50">{live.state === "ready" ? "Restart" : live.state === "starting" ? "Starting…" : "Start server"}</button>
+                          {live.state !== "idle" && <button onClick={stopLive} className="text-muted underline">Stop</button>}
+                          {live.url && <a href={live.url} target="_blank" rel="noreferrer" className="text-gold underline">Open in new tab</a>}
+                        </>
+                      )}
                       <span className="ml-auto flex gap-1">{(["desktop", "tablet", "mobile"] as const).map((d) => <button key={d} onClick={() => setDevice(d)} className={`rounded px-1.5 py-0.5 ${device === d ? "bg-panel2 text-ink" : "text-muted"}`}>{d === "desktop" ? "🖥" : d === "tablet" ? "▭" : "📱"}</button>)}</span>
                     </div>
                     <div className={full ? "fixed inset-0 z-50 overflow-auto bg-[#0b0c10] p-3" : "relative min-h-0 flex-1 overflow-auto bg-[#0b0c10] p-2"}>
                       <button onClick={() => setFull((v) => !v)} title={full ? "Exit fullscreen" : "Fullscreen preview"} className="absolute right-3 top-3 z-10 rounded-md bg-black/60 p-1.5 text-white hover:bg-black/80">{full ? <X size={15} /> : <Maximize2 size={15} />}</button>
-                      {page?.html ? <iframe key={page.html.length} sandbox="allow-scripts allow-forms allow-popups" srcDoc={page.html} title="Preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className={`mx-auto rounded-md border border-line bg-white ${full ? "h-[calc(100vh-24px)]" : "h-full min-h-[420px]"}`} />
-                        : <p className="mx-auto mt-10 max-w-xs text-center text-xs text-muted">{err || "No HTML page yet. Ask the agent in the chat to build a website — it shows up here instantly."}</p>}
+                      {mode === "static" ? (
+                        page?.html ? (
+                          <iframe ref={frameRef} key={page.entry + ":" + hash(page.html)} sandbox="allow-scripts allow-forms allow-popups" srcDoc={page.html} title="Preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className={frameCls} />
+                        ) : (
+                          <div className="mx-auto mt-10 max-w-xs space-y-3 text-center text-xs text-muted">
+                            <p>{err || "No HTML page yet. Ask the agent in the chat to build a website — it shows up here instantly."}</p>
+                            {page?.hasPackage && <button onClick={() => { setMode("live"); startLive(); }} className="rounded-md border border-line px-3 py-1.5 text-ink hover:bg-panel2">This looks like an app — start the live server</button>}
+                          </div>
+                        )
+                      ) : live.state === "ready" && live.url ? (
+                        <iframe key={live.url} src={live.url} sandbox="allow-scripts allow-forms allow-popups allow-same-origin" title="Live preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className={frameCls} />
+                      ) : (
+                        <div className="mx-auto mt-10 max-w-sm space-y-2 text-center text-xs text-muted">
+                          <p>{live.state === "starting" ? "Starting the dev server… the first start can take a minute (it installs packages)." : live.state === "failed" ? "The server did not start. Last output:" : "Runs your project on port 3000 inside the computer (Next.js, Vite, npm dev, or a static server)."}</p>
+                          {live.log && <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-left font-mono text-[10px] text-faint">{live.log}</pre>}
+                          {live.state === "idle" && <button onClick={startLive} className="rounded-md bg-white px-3 py-1.5 font-medium text-bg">Start live server</button>}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
