@@ -30,7 +30,7 @@ export default function RunsPage() {
         <h1 className="flex items-center gap-2 text-xl font-semibold text-ink"><Activity size={20} className="text-gold" /> Runs</h1>
         <p className="mt-1 text-sm text-muted">Every agent run, step by step. Cost is an estimate from text size and list prices (last {traces.length} runs ≈ ${total.toFixed(3)}).</p>
         <div className="mt-6 space-y-2">
-          {traces.length === 0 && <p className="text-xs text-faint">No runs yet — give a chat's computer a task.</p>}
+          {traces.length === 0 && <p className="text-xs text-faint">No runs yet — give a chat&apos;s computer a task.</p>}
           {traces.map((t) => (
             <div key={t.id} className="rounded-lg border border-line bg-panel">
               <button onClick={() => setOpen(open === t.id ? null : t.id)} className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left">
