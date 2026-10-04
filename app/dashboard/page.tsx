@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUp, Clock, Monitor, PanelLeftClose, PanelLeftOpen, Plug, Plus, Users } from "lucide-react";
+import { Activity, ArrowUp, Clock, Monitor, PanelLeftClose, PanelLeftOpen, Paperclip, Plug, Plus, Users } from "lucide-react";
 import { signOut } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
@@ -20,6 +20,10 @@ import { runPipeline, signedUrl, type PipelineEnv } from "@/lib/venus-pipeline";
 import { personaOf, type Member } from "@/lib/team-catalog";
 import { runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
 import type { AvatarColor } from "@/lib/bots";
+import { pickModel, fallbackChain, type Role } from "@/lib/router";
+import { beginTrace, addUsage, traceOf } from "@/lib/trace";
+import { verifyResult } from "@/lib/critic";
+import { labelOps, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
 import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import ModelPicker from "@/components/dashboard/ModelPicker";
@@ -171,6 +175,9 @@ export default function DashboardPage() {
   const [teamOpen, setTeamOpen] = useState(false);
   const [pcFullscreen, setPcFullscreen] = useState(false);
   const [sessions, setSessions] = useState<Record<string, PcSession>>({});
+  const [streaming, setStreaming] = useState(false);
+  const [attach, setAttach] = useState<{ name: string; text: string } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const sessionsRef = useRef<Record<string, PcSession>>({});
   const sandboxRef = useRef<Record<string, string | null>>({});
@@ -236,7 +243,10 @@ export default function DashboardPage() {
     sessionsRef.current = next;
     setSessions(next);
   }
-  const pushStep = (chatId: string, line: string) => patchSession(chatId, (s) => ({ steps: [...s.steps, line] }));
+  const pushStep = (chatId: string, line: string) => {
+    traceOf(chatId)?.add("step", line);
+    patchSession(chatId, (s) => ({ steps: [...s.steps, line] }));
+  };
   const touch = (chatId: string) => { lastTouchRef.current[chatId] = Date.now(); };
 
   function setSandboxId(chatId: string, id: string | null, paused = false) {
@@ -428,16 +438,50 @@ export default function DashboardPage() {
     return null;
   }
 
-  async function callLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }> = []): Promise<string> {
-    const key = apiKeys[chat.provider];
-    if (!key) throw new Error("No API key saved for this chat's model.");
+  async function callLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }> = [], role: Role = "act"): Promise<string> {
+    const pick = pickModel(role, apiKeys, chat);
+    if (!pick.apiKey) throw new Error("No API key saved for this chat's model.");
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: chat.provider, apiKey: key, model: chat.model, systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }] }),
+      body: JSON.stringify({
+        provider: pick.provider, apiKey: pick.apiKey, model: pick.model,
+        fallbacks: fallbackChain(apiKeys, pick.provider),
+        systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }],
+      }),
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data?.error || "Request failed.");
-    return String(data.reply ?? "").trim();
+    const reply = String(data.reply ?? "").trim();
+    addUsage(chat.id, pick.model, system.length + prompt.length + history.reduce((n, m) => n + m.content.length, 0), reply.length);
+    return reply;
+  }
+
+  async function streamLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }>, onText: (t: string) => void): Promise<string> {
+    const key = apiKeys[chat.provider];
+    if (!key) throw new Error("No API key saved for this chat's model.");
+    const res = await fetch("/api/chat/stream", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: chat.provider, apiKey: key, model: chat.model, systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }] }),
+    });
+    if (!res.ok || !res.body) throw new Error((await readJson(res))?.error || "Stream failed.");
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let full = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      full += dec.decode(value, { stream: true });
+      onText(full);
+    }
+    const i = full.indexOf("[[ERROR]]");
+    if (i < 0) {
+      addUsage(chat.id, chat.model, system.length + prompt.length, full.length);
+      return full.trim();
+    }
+    const partial = full.slice(0, i).trim();
+    const msg = full.slice(i + 9).trim();
+    if (!partial) throw new Error(msg);
+    return `${partial}\n\n⚠️ ${msg}`;
   }
 
   async function composeReport(chat: Chat, m: { task: string; summary: string; notes: string[]; steps: string[]; outputs: string[] }): Promise<string | null> {
@@ -449,7 +493,7 @@ export default function DashboardPage() {
         `NOTES THE AGENT SAVED:\n${m.notes.length ? m.notes.map((n) => `- ${n}`).join("\n") : "(none)"}`, "",
         `LAST STEPS:\n${m.steps.slice(-25).join("\n")}`, "",
         `KEY COMMAND / PAGE OUTPUTS:\n${m.outputs.length ? m.outputs.join("\n---\n") : "(none)"}`,
-      ].join("\n"));
+      ].join("\n"), [], "report");
     } catch { return null; }
   }
 
@@ -457,7 +501,8 @@ export default function DashboardPage() {
     const single: PlanStep[] = [{ title: "Do the task", goal: task }];
     if (task.length < 70 && !/\b(and then|then|after that|also|next)\b|\d\./i.test(task)) return single;
     try {
-      const res = await fetch("/api/e2b/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: chat.provider, apiKey: key, model: chat.model, task, context: ctx }) });
+      const p = pickModel("plan", apiKeys, chat);
+      const res = await fetch("/api/e2b/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: p.provider, apiKey: p.apiKey || key, model: p.model, task, context: ctx }) });
       const data = await readJson(res);
       return Array.isArray(data.subtasks) && data.subtasks.length ? (data.subtasks as PlanStep[]) : single;
     } catch { return single; }
@@ -523,6 +568,9 @@ export default function DashboardPage() {
     let browserState: unknown = null;
     let totalActions = 0, invalidStreak = 0, completed = false;
     const ctxText = brainPrompt(brainRef.current, task);
+    const trace = beginTrace(user.uid, chatId, task.slice(0, 80), "computer");
+    const rec: RecipeStep[] = [];
+    let recOk = true, lastBrowse = "";
 
     try {
       const startedId = await startOrResumePc(chatId);
@@ -633,6 +681,14 @@ export default function DashboardPage() {
               out = `ERROR: ${e instanceof Error ? e.message : "browse failed"} — try again, or use the screen browser.`;
             }
             lastOutput = out;
+            const failed = out.startsWith("ERROR:") || /^FAILED /m.test(out);
+            if (failed) recOk = false;
+            else {
+              const lab = labelOps((d.ops as unknown[]) ?? [], lastBrowse);
+              if (!lab) recOk = false;
+              else if (lab.length || d.url) rec.push({ url: d.url || undefined, ops: lab });
+            }
+            lastBrowse = out;
             outputs.push(`browse\n${out.slice(0, 700)}`);
             if (outputs.length > 5) outputs.shift();
             actions++; totalActions++;
@@ -642,6 +698,7 @@ export default function DashboardPage() {
           }
 
           if (data.delegate?.kind === "code") {
+            recOk = false;
             pushStep(chatId, `💻 Handing this to Venus Code: ${String(data.delegate.instruction).slice(0, 100)}`);
             const sum = await runCodeFor(chat, String(data.delegate.instruction), { silent: true, onLine: (l) => pushStep(chatId, l) });
             lastOutput = sum;
@@ -654,6 +711,7 @@ export default function DashboardPage() {
           }
 
           if (data.note) notes.push(String(data.note));
+          if (!/^(web search|read |noted:)/.test(String(data.actionText ?? ""))) recOk = false;
           if (data.job) activeJob = data.job.done ? null : { id: data.job.id, command: data.job.command };
           if (typeof data.output === "string" && data.output) {
             lastOutput = data.output;
@@ -677,9 +735,25 @@ export default function DashboardPage() {
       }
       finalText = summary;
       if (completed) {
+        pushStep(chatId, "🔎 Verifier is checking the result…");
+        const v = await verifyResult((s, p) => callLLM(chat, s, p, [], "verify"), { task, summary, evidence: outputs });
+        trace.add("verify", `${v.verdict}: ${v.reason}`);
+        pushStep(chatId, `${v.verdict === "pass" ? "✅" : "⚠️"} Verifier: ${v.verdict} — ${v.reason}`);
+
         pushStep(chatId, "✍️ Writing the final report…");
         const report = await composeReport(chat, { task, summary, notes, steps: history, outputs });
         if (report) finalText = report;
+        if (v.verdict !== "pass") finalText = `⚠️ **Verifier (${v.verdict}):** ${v.reason}\n\n${finalText}`;
+
+        // Workflow compiler: a verified, pure-browser run becomes a recipe that replays with no AI.
+        if (v.verdict === "pass" && recOk && rec.length > 0) {
+          const firstUrl = rec.find((s) => s.url)?.url ?? "";
+          let site = "";
+          try { site = new URL(/^https?:/i.test(firstUrl) ? firstUrl : `https://${firstUrl}`).hostname; } catch { /* no site */ }
+          saveRecipe(user.uid, { name: task.slice(0, 60), task, site, steps: rec })
+            .then(() => say(chatId, `💾 Saved as a recipe. Next time run it free (no AI): \`/recipe ${task.slice(0, 30)}\``))
+            .catch(() => {});
+        }
         if (totalActions >= 4 && !opts?.quiet) {
           reflect(user.uid, { apiKeys, provider: chat.provider, model: chat.model }, brainRef.current, { task, outcome: summary, steps: history.join("\n") })
             .then((l) => { if (l.length) { say(chatId, "🧠 Learned: " + l.join("; ")); refreshBrain(); } }).catch(() => {});
@@ -689,6 +763,7 @@ export default function DashboardPage() {
       finalText = `⚠️ ${err instanceof Error ? err.message : "The task failed."}`;
       pushStep(chatId, finalText);
     } finally {
+      await trace.end(stopRef.current[chatId] ? "stopped" : finalText.startsWith("⚠️") ? "error" : "done");
       runningRef.current[chatId] = false;
       resolverRef.current[chatId] = null;
       patchSession(chatId, { running: false, request: null });
@@ -885,6 +960,30 @@ export default function DashboardPage() {
     await refreshBrain();
   }
 
+  // ---- Recipes (replay a saved browser workflow with NO AI) ----
+
+  async function runRecipeCmd(chat: Chat, arg: string) {
+    if (!user) return;
+    const list = await listRecipes(user.uid);
+    if (!arg.trim()) {
+      return say(chat.id, list.length
+        ? "📒 **Your recipes**\n" + list.map((r) => `- **${r.name}** — ${r.steps.length} steps · ran ${r.runs}×${r.fails ? ` · ${r.fails} broke` : ""}`).join("\n") + "\n\nRun one with `/recipe <name>`."
+        : "No recipes yet. Finish a browser task and it is saved automatically.");
+    }
+    const hit = matchRecipes(list, arg)[0];
+    if (!hit) return say(chat.id, "No recipe matches that. Send `/recipe` to see the list.");
+    say(chat.id, `▶️ Running recipe **${hit.name}** — no AI model used.`);
+    try {
+      const r = await replayRecipe({ token: () => user.getIdToken(), uid: user.uid, recipe: hit, creds: findCredential(hit.site) ?? undefined });
+      await markRecipe(user.uid, hit, r.ok);
+      say(chat.id, r.ok
+        ? `✅ Recipe finished.\n\n${r.snapshot.slice(0, 1500)}`
+        : `⚠️ Recipe broke at step ${(r.failedAt ?? 0) + 1} (the site probably changed). Give the same task again and I will re-learn it.\n\n${r.snapshot.slice(0, 500)}`);
+    } catch (e) {
+      say(chat.id, `⚠️ Recipe failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  }
+
   async function runCommands(cmds: Cmd[], chat: Chat) {
     for (const c of cmds) {
       if (c.cmd === "start") await startOrResumePc(chat.id);
@@ -910,16 +1009,20 @@ export default function DashboardPage() {
     const code = /^\/code\s+([\s\S]+)/i.exec(text);
     const team = /^\/team\s+([\s\S]+)/i.exec(text);
     const deploy = /^\/deploy(?:\s+([\s\S]+))?$/i.exec(text);
+    const recipe = /^\/recipe(?:\s+([\s\S]*))?$/i.exec(text);
     const forget = /^\/forget\s+([\s\S]+)/i.exec(text);
     const remember = /^\/remember\s+([\s\S]+)/i.exec(text) ?? /^(?:please\s+)?remember(?:\s+that)?[:\s]+([\s\S]{3,})/i.exec(text);
-    const slash = Boolean(video || code || team || deploy);
+    const slash = Boolean(video || code || team || deploy || recipe);
     const analysis = e2bKey && !slash ? analyzePcMessage(text) : { pureCommand: null, compound: false, stopAfter: false };
     const key = apiKeys[chat.provider];
-    if (!analysis.pureCommand && !forget && !remember && !deploy && !key) { setSettingsOpen(true); return; }
+    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !key) { setSettingsOpen(true); return; }
 
-    appendMessages(chat.id, [{ role: "user", content: text, at: Date.now() }]);
+    const payload = attach && !recipe ? `${text}\n\n📎 File: ${attach.name}\n\`\`\`\n${attach.text}\n\`\`\`` : text;
+    appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now() }]);
+    setAttach(null);
     setDraft("");
 
+    if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
     if (deploy) { void runDeploy(chat, deploy[1]); return; }
     if (video) { void startVenus(chat, video[1].trim()); return; }
     if (code) { void runCodeFor(chat, code[1].trim()); return; }
@@ -965,20 +1068,31 @@ export default function DashboardPage() {
 
     setSending(true);
     let cmds: Cmd[] = [];
+    const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
+    // While streaming, a partial assistant message is shown in the UI only; this puts the real messages back before saving the final reply.
+    const restoreBase = () => {
+      chatsRef.current = chatsRef.current.map((c) => (c.id === chat.id ? { ...c, messages: base } : c));
+      patchChat(chat.id, { messages: base });
+    };
     try {
-      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
-      const reply = await callLLM(
-        chat,
-        `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` + brainPrompt(brainRef.current, text) + (e2bKey ? PC_PROMPT : "") + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + extraSystem,
-        history.pop()?.content ?? text,
-        history
-      );
+      const history = base.map((m) => ({ role: m.role, content: m.content }));
+      const system =
+        `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
+        brainPrompt(brainRef.current, text) + (e2bKey ? PC_PROMPT : "") + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + extraSystem;
+      const at = Date.now();
+      setStreaming(true);
+      const reply = await streamLLM(chat, system, history.pop()?.content ?? text, history, (t) => {
+        // hide [[TOOL:...]] tags while they stream in
+        patchChat(chat.id, { messages: [...base, { role: "assistant", content: t.replace(/\[\[[\s\S]*$/, "").trim() || "…", at }] });
+      });
+      restoreBase();
       const parsed = extractCommands(reply);
       cmds = parsed.cmds;
       say(chat.id, parsed.clean || (cmds.length ? "On it." : "…"));
     } catch (err) {
+      restoreBase();
       say(chat.id, `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`);
-    } finally { setSending(false); }
+    } finally { setSending(false); setStreaming(false); }
     if (cmds.length > 0) void runCommands(cmds, chat);
   }
 
@@ -1035,6 +1149,7 @@ export default function DashboardPage() {
                 <button onClick={() => router.push(`/code?chat=${activeChat.id}`)} title="Venus Code — this chat's codespace" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2">Code</button>
                 <button onClick={() => router.push("/venus")} title="Venus Pro — motion graphics" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2">Venus Pro</button>
                 <button onClick={() => router.push("/skills")} title="Memory & skills" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2">Skills</button>
+                <button onClick={() => router.push("/runs")} title="Runs — every agent run, step by step" className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-gold hover:bg-panel2"><Activity size={13} className="mr-1 inline" />Runs</button>
                 <button onClick={() => setConnectorsOpen(true)} title="Connectors" className="relative rounded-lg p-2 text-muted hover:bg-panel2 hover:text-ink">
                   <Plug size={17} />
                   {Object.keys(activeChat.connectors ?? {}).length > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-avatar-teal" />}
@@ -1069,7 +1184,7 @@ export default function DashboardPage() {
           ) : (
             <>
               <div className="flex-1 overflow-y-auto px-6 py-6">
-                <div className="mx-auto max-w-2xl"><ChatThread messages={activeChat.messages} pending={sending} onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }} /></div>
+                <div className="mx-auto max-w-2xl"><ChatThread messages={activeChat.messages} pending={sending && !streaming} onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }} /></div>
               </div>
 
               {(venusRun || codeRun || teamRun) && (
@@ -1094,13 +1209,22 @@ export default function DashboardPage() {
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
 
               <form onSubmit={handleSend} className="mx-auto flex w-full max-w-2xl items-center gap-2 border-t border-line px-6 py-4">
-                <button type="button" aria-label="Attach" className="rounded-full p-2 text-muted hover:bg-panel2"><Plus size={18} /></button>
+                <input ref={fileRef} type="file" hidden accept=".txt,.md,.csv,.json,.js,.ts,.tsx,.py,.html,.css,.log" onChange={async (e) => {
+                  const f = e.target.files?.[0]; e.target.value = "";
+                  if (!f) return;
+                  if (f.size > 200_000) { setPcMessage("File is too big (max 200 KB of text)."); return; }
+                  const t = await f.text();
+                  if (/[\u0000-\u0008]/.test(t.slice(0, 2000))) { setPcMessage("Only text-based files for now (txt, md, csv, json, code)."); return; }
+                  setAttach({ name: f.name, text: t });
+                }} />
+                <button type="button" aria-label="Attach file" onClick={() => fileRef.current?.click()} className="rounded-full p-2 text-muted hover:bg-panel2"><Paperclip size={18} /></button>
+                {attach && <span className="flex items-center gap-1 rounded-full bg-panel2 px-2.5 py-1 text-[11px] text-ink">📎 {attach.name}<button type="button" onClick={() => setAttach(null)} className="text-faint hover:text-ink">×</button></span>}
                 {e2bKey && (
                   <button type="button" onClick={() => setComputerMode((v) => !v)} aria-pressed={computerMode} title={computerMode ? "Computer mode ON — your message goes straight to the computer as a task" : "Computer mode — send your message straight to the computer as a task"} className={`flex items-center gap-1.5 rounded-full px-2.5 py-2 text-xs ${computerMode ? "bg-gold font-medium text-bg" : "text-muted hover:bg-panel2 hover:text-ink"}`}>
                     <Monitor size={15} />{computerMode && "Computer"}
                   </button>
                 )}
-                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={computerMode ? "Give the computer a task…" : `Message ${activeChat.agentName}  ·  /code  /video  /team  /deploy`} className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold" />
+                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={computerMode ? "Give the computer a task…" : `Message ${activeChat.agentName}  ·  /code  /video  /team  /deploy  /recipe`} className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold" />
                 <button type="submit" aria-label="Send" disabled={!draft.trim() || sending} className="rounded-full bg-white p-2.5 text-bg hover:opacity-90 disabled:opacity-40"><ArrowUp size={16} /></button>
               </form>
             </>
