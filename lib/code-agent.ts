@@ -2,7 +2,8 @@ import { addMemory, bumpSkillUse, brainPrompt, loadBrain, reflect, type Brain } 
 import { listChats } from "@/lib/chats";
 import { touch } from "@/lib/computers";
 import { codeSystemPrompt, parseTools, type ToolCall } from "@/lib/code-prompts";
-import { saveCodeProject, watchCodeProject, type CodeLog, type CodeProject } from "@/lib/code-store";
+import { saveCodeProject, watchCodeProject, type CodeLog, type CodeProject, type RunnerJob } from "@/lib/code-store";
+import { runCodeViaRunner, RunnerStartError } from "@/lib/runner-client";
 import type { ProviderId } from "@/lib/providers";
 
 export type CodeEnv = {
@@ -44,7 +45,7 @@ export async function wsCall(env: CodeEnv, action: string, extra: Record<string,
 export async function resolveSandbox(env: CodeEnv): Promise<string> {
   if (env.sandboxId) return env.sandboxId;
   const c = (await listChats(env.uid)).find((x) => x.id === env.chatId);
-  const id = (c as unknown as { computers?: Record<string, string> } | undefined)?.computers?.code;
+  const id = (c as unknown as { computers?: Record<string, string> } | undefined)?.computers?.code ?? c?.pcSandboxId ?? undefined;
   if (!id) throw new Error("This chat has no coding computer yet. Ask for code in the chat and it starts automatically.");
   return id;
 }
@@ -227,7 +228,11 @@ async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; 
   return "Reached the step limit before finishing — see the todo list and files for progress.";
 }
 
-/** One codespace per chat: the workspace id is the chat id. Events are saved live so the Code page can follow along. */
+/**
+ * One codespace per chat: the workspace id is the chat id. Events are saved live so the Code page can follow along.
+ * The agent loop itself runs INSIDE the computer as a background runner (keeps working with the tab closed).
+ * If the runner cannot start, it falls back to the old in-tab loop.
+ */
 export async function runCodeAgent(
   env: CodeEnv, hooks: CodeHooks, project: CodeProject, instruction: string,
   opts: { brain?: Brain; maxSteps?: number; persona?: string } = {}
@@ -248,6 +253,10 @@ export async function runCodeAgent(
     void flush();
   };
   const wrapped: CodeHooks = { ...hooks, event: emit, cancelled: () => stopped || hooks.cancelled() };
+  const setJob = (j: RunnerJob | null) => {
+    p = { ...p, runnerJob: j ?? undefined };
+    void flush();
+  };
   await flush(true);
   const unsub = watchCodeProject(env.uid, p.id, (d) => { if (d?.stop) stopped = true; });
 
@@ -260,7 +269,17 @@ export async function runCodeAgent(
     if (ensured.restored) emit({ kind: "info", text: "Codespace restored from your backup." });
     const ctx: Ctx = { env, hooks: wrapped, project: p, sandboxId, brain, venusMd: ensured.venusMd, tree: ensured.tree, persona: opts.persona };
 
-    const summary = await agentLoop(ctx, instruction, { readOnly: false, maxSteps: opts.maxSteps ?? 80, depth: 0 });
+    let summary: string;
+    try {
+      summary = await runCodeViaRunner({
+        env, hooks: wrapped, emit, project: p, sandboxId, brain, instruction,
+        maxSteps: opts.maxSteps, persona: opts.persona, setJob,
+      });
+    } catch (e) {
+      if (!(e instanceof RunnerStartError)) throw e;
+      emit({ kind: "info", text: `Background runner unavailable (${e.message.slice(0, 120)}) — running in this tab instead.` });
+      summary = await agentLoop(ctx, instruction, { readOnly: false, maxSteps: opts.maxSteps ?? 80, depth: 0 });
+    }
     emit({ kind: "done", text: summary });
     p = { ...p, ctx: (p.ctx + `\n- ${instruction.slice(0, 120)} → ${summary.slice(0, 300)}`).slice(-4000) };
     try { p = { ...p, backupPath: (await wsCall(env, "backup", { sandboxId, ws: p.id })).path }; } catch { /* best-effort */ }
@@ -269,14 +288,14 @@ export async function runCodeAgent(
       .then((l) => { if (l.length) hooks.event({ kind: "info", text: "🧠 Learned: " + l.join("; ") }); })
       .catch(() => {});
     unsub();
-    p = { ...p, running: false, stop: false };
+    p = { ...p, running: false, stop: false, runnerJob: undefined };
     await flush(true);
     return { ok: true, summary, project: p };
   } catch (e) {
     const msg = e instanceof Error ? e.message : "The coding agent failed.";
     emit({ kind: "error", text: msg });
     unsub();
-    p = { ...p, running: false, stop: false };
+    p = { ...p, running: false, stop: false, runnerJob: undefined };
     await flush(true);
     return { ok: false, summary: msg, project: p };
   }
