@@ -2,15 +2,9 @@
 
 import { useState } from "react";
 import { ExternalLink, X } from "lucide-react";
+import { FREE_PACK, PLUGINS, safeId, unpack } from "@/lib/tools/catalog";
 
 type TestResult = { ok: boolean; label?: string; error?: string };
-
-const CATALOG = [
-  { id: "vercel", label: "Vercel", note: "Agent deploys your site and gives you a live link.", keysUrl: "https://vercel.com/account/tokens", placeholder: "Vercel token", ready: true },
-  { id: "github", label: "GitHub", note: "Token is saved and checked. Pushing code comes in the next update.", keysUrl: "https://github.com/settings/tokens", placeholder: "ghp_… or github_pat_…", ready: true },
-  { id: "gmail", label: "Gmail", note: "Coming soon.", keysUrl: "", placeholder: "", ready: false },
-  { id: "calendar", label: "Google Calendar", note: "Coming soon.", keysUrl: "", placeholder: "", ready: false },
-];
 
 export default function ConnectorsModal({
   open, onClose, chatName, connectors, onTest, onSave,
@@ -22,72 +16,162 @@ export default function ConnectorsModal({
   onTest: (kind: string, token: string) => Promise<TestResult>;
   onSave: (kind: string, token: string) => Promise<void>;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [tab, setTab] = useState<"plugins" | "custom">("plugins");
+  const [drafts, setDrafts] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
+  const [ctype, setCtype] = useState<"mcp" | "api">("mcp");
+  const [f, setF] = useState({ name: "", url: "", auth: "", desc: "", header: "Authorization", value: "" });
 
   if (!open) return null;
 
-  async function connect(id: string) {
-    const token = (drafts[id] ?? "").trim();
-    if (!token) return;
+  const box = "w-full rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold";
+  const say = (id: string, m: string) => setMsg((x) => ({ ...x, [id]: m }));
+
+  async function connect(kind: string, token: string, id = kind) {
     setBusy(id);
-    setMsg((m) => ({ ...m, [id]: "" }));
+    say(id, "");
     let r: TestResult;
-    try {
-      r = await onTest(id, token);
-    } catch {
-      r = { ok: false, error: "Could not check the token." };
-    }
+    try { r = await onTest(kind, token); } catch { r = { ok: false, error: "Could not check it." }; }
     if (r.ok) {
-      await onSave(id, token);
-      setDrafts((d) => ({ ...d, [id]: "" }));
-      setMsg((m) => ({ ...m, [id]: r.label ? `Connected as ${r.label}` : "Connected" }));
-    } else {
-      setMsg((m) => ({ ...m, [id]: r.error || "Token not accepted." }));
-    }
+      await onSave(kind, token);
+      say(id, r.label ? `Connected · ${r.label}` : "Connected");
+    } else say(id, r.error || "Not accepted.");
     setBusy(null);
+    return r.ok;
+  }
+
+  const Toggle = ({ id, label }: { id: string; label: string }) => {
+    const on = connectors["auto:" + id] === "1";
+    return (
+      <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-muted">
+        <input type="checkbox" checked={on} onChange={() => onSave("auto:" + id, on ? "" : "1")} />
+        {label}
+      </label>
+    );
+  };
+
+  const custom = Object.keys(connectors).filter((k) => k.startsWith("mcp:") || k.startsWith("api:"));
+
+  async function addCustom() {
+    const name = f.name.trim();
+    if (!name || !f.url.trim()) return say("custom", "Give it a name and a URL.");
+    const kind = `${ctype}:${safeId(name)}`;
+    const payload = ctype === "mcp"
+      ? JSON.stringify({ url: f.url.trim(), auth: f.auth.trim() || undefined })
+      : JSON.stringify({ baseUrl: f.url.trim(), header: f.value.trim() ? f.header.trim() : undefined, value: f.value.trim() || undefined, description: f.desc.trim() || name });
+    if (await connect(kind, payload, "custom")) setF({ name: "", url: "", auth: "", desc: "", header: "Authorization", value: "" });
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-xl2 border border-line bg-panel p-6" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-1 flex items-center justify-between">
+      <div className="max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-xl2 border border-line bg-panel p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-medium text-ink">Connectors · {chatName}</h2>
           <button onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
-        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Each chat has its own connectors.</p>
-
-        <div className="space-y-3">
-          {CATALOG.map((c) => {
-            const on = Boolean(connectors[c.id]);
-            return (
-              <div key={c.id} className={`rounded-lg border border-line p-3 ${c.ready ? "" : "opacity-50"}`}>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-ink">{c.label}</span>
-                  <div className="flex items-center gap-2">
-                    {on && <span className="text-[11px] text-avatar-teal">Connected</span>}
-                    {c.keysUrl && <a href={c.keysUrl} target="_blank" rel="noreferrer" title="Get a token" className="text-faint hover:text-muted"><ExternalLink size={13} /></a>}
-                  </div>
-                </div>
-                <p className="mt-1 text-[11px] leading-relaxed text-muted">{c.note}</p>
-                {c.ready && (
-                  <div className="mt-2 flex gap-2">
-                    {on ? (
-                      <button onClick={() => onSave(c.id, "")} className="rounded-md border border-line px-3 py-1.5 text-xs text-ink hover:bg-panel2">Disconnect</button>
-                    ) : (
-                      <>
-                        <input type="password" placeholder={c.placeholder} value={drafts[c.id] ?? ""} onChange={(e) => setDrafts((d) => ({ ...d, [c.id]: e.target.value }))} className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold" />
-                        <button onClick={() => connect(c.id)} disabled={busy === c.id} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === c.id ? "Checking…" : "Connect"}</button>
-                      </>
-                    )}
-                  </div>
-                )}
-                {msg[c.id] && <p className="mt-1.5 text-[11px] text-muted">{msg[c.id]}</p>}
-              </div>
-            );
-          })}
+        <div className="mb-4 flex rounded-full border border-line bg-panel2 p-1 text-xs">
+          {([["plugins", "Plugins"], ["custom", "Custom · MCP / API"]] as const).map(([k, l]) => (
+            <button key={k} onClick={() => setTab(k)} className={`flex-1 rounded-full px-3 py-1.5 ${tab === k ? "bg-white font-medium text-bg" : "text-muted"}`}>{l}</button>
+          ))}
         </div>
+        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Anything that sends or changes something outside asks for your approval first.</p>
+
+        {tab === "plugins" ? (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between"><span className="text-sm text-ink">{FREE_PACK.label}</span><span className="text-[11px] text-avatar-teal">Always on</span></div>
+              <p className="mt-1 text-[11px] text-muted">{FREE_PACK.note}</p>
+              <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-faint">{FREE_PACK.tools.join(" · ")}</p>
+            </div>
+
+            {PLUGINS.map((p) => {
+              const on = Boolean(connectors[p.id]);
+              const vals = drafts[p.id] ?? p.fields.map(() => "");
+              const hasWrite = p.tools.some((t) => t.risk === "write");
+              return (
+                <div key={p.id} className="rounded-lg border border-line p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-ink">{p.label}</span>
+                    <div className="flex items-center gap-2">
+                      {on && <span className="text-[11px] text-avatar-teal">Connected</span>}
+                      {p.keysUrl && <a href={p.keysUrl} target="_blank" rel="noreferrer" title="Get the key" className="text-faint hover:text-muted"><ExternalLink size={13} /></a>}
+                    </div>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted">{p.note}</p>
+                  {p.tools.length > 0 && <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-faint">{p.tools.map((t) => t.name + (t.risk === "write" ? " ✎" : "")).join(" · ")}</p>}
+                  {on ? (
+                    <>
+                      <div className="mt-2 flex items-center gap-3">
+                        <button onClick={() => onSave(p.id, "")} className="rounded-md border border-line px-3 py-1.5 text-xs text-ink hover:bg-panel2">Disconnect</button>
+                        {p.id === "telegram" && <span className="text-[11px] text-faint">chat {unpack(connectors[p.id])[1]}</span>}
+                      </div>
+                      {hasWrite && <Toggle id={p.id} label="Don't ask before write actions (✎) — only if you trust this chat" />}
+                    </>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {p.fields.map((fl, i) => (
+                        <input key={fl.key} type={fl.secret ? "password" : "text"} placeholder={fl.placeholder} value={vals[i]} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: vals.map((v, j) => (j === i ? e.target.value : v)) }))} className={box} />
+                      ))}
+                      <button disabled={busy === p.id || vals.some((v) => !v.trim())} onClick={async () => { if (await connect(p.id, vals.map((v) => v.trim()).join("::"))) setDrafts((d) => ({ ...d, [p.id]: p.fields.map(() => "") })); }} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === p.id ? "Checking…" : "Connect"}</button>
+                    </div>
+                  )}
+                  {msg[p.id] && <p className="mt-1.5 text-[11px] text-muted">{msg[p.id]}</p>}
+                </div>
+              );
+            })}
+
+            <div className="rounded-lg border border-dashed border-line p-3 text-[11px] leading-relaxed text-muted">
+              Need <b className="text-ink">Gmail, Calendar, Slack (full), Notion (full)</b> or anything else? Add that service&apos;s MCP server in the <b className="text-ink">Custom</b> tab — the agent gets all its tools.
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {custom.map((k) => {
+              const cfg = (() => { try { return JSON.parse(connectors[k]); } catch { return {}; } })() as { url?: string; baseUrl?: string };
+              return (
+                <div key={k} className="rounded-lg border border-line p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-ink">{k.startsWith("mcp:") ? "MCP" : "API"} · {k.slice(4)}</span>
+                    <button onClick={() => onSave(k, "")} className="text-xs text-faint hover:text-red-400">Disconnect</button>
+                  </div>
+                  <p className="mt-1 truncate text-[11px] text-muted">{cfg.url ?? cfg.baseUrl}</p>
+                  <Toggle id={k} label="Don't ask before write actions" />
+                </div>
+              );
+            })}
+
+            <div className="rounded-lg border border-line p-3">
+              <div className="mb-2 flex gap-1.5">
+                {(["mcp", "api"] as const).map((t) => (
+                  <button key={t} onClick={() => setCtype(t)} className={`rounded-full border px-3 py-1 text-xs ${ctype === t ? "border-white bg-white text-bg" : "border-line text-muted"}`}>{t === "mcp" ? "MCP server" : "REST API + key"}</button>
+                ))}
+              </div>
+              <p className="mb-2 text-[11px] leading-relaxed text-muted">
+                {ctype === "mcp"
+                  ? "Paste a remote MCP server URL (Streamable HTTP). Its tools show up for the agent automatically. Auth: a token, or a header like “X-Api-Key: abc”."
+                  : "Give a base URL and an API key. The agent gets one request tool limited to that host: GET is free, POST/PUT/PATCH/DELETE ask for approval."}
+              </p>
+              <div className="space-y-2">
+                <input className={box} placeholder="Name (e.g. gmail, crm, stripe)" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+                <input className={box} placeholder={ctype === "mcp" ? "https://your-mcp-server.com/mcp" : "https://api.example.com/v1"} value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} />
+                {ctype === "mcp" ? (
+                  <input className={box} type="password" placeholder="Auth (optional)" value={f.auth} onChange={(e) => setF({ ...f, auth: e.target.value })} />
+                ) : (
+                  <>
+                    <input className={box} placeholder="What is this API for? (the agent reads this)" value={f.desc} onChange={(e) => setF({ ...f, desc: e.target.value })} />
+                    <div className="flex gap-2">
+                      <input className={`${box} w-2/5`} placeholder="Header" value={f.header} onChange={(e) => setF({ ...f, header: e.target.value })} />
+                      <input className={box} type="password" placeholder="Key / “Bearer …”" value={f.value} onChange={(e) => setF({ ...f, value: e.target.value })} />
+                    </div>
+                  </>
+                )}
+                <button onClick={addCustom} disabled={busy === "custom"} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === "custom" ? "Checking…" : "Test & connect"}</button>
+                {msg.custom && <p className="text-[11px] text-muted">{msg.custom}</p>}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
