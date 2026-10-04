@@ -10,7 +10,12 @@ export type LabeledOp =
   | { op: "press"; key: string }
   | { op: "scroll"; dir?: "up" | "down" }
   | { op: "wait"; ms?: number };
-export type RecipeStep = { url?: string; ops: LabeledOp[] };
+
+export type BrowseStep = { kind?: "browse"; url?: string; ops: LabeledOp[] };
+export type ToolStep = { kind: "tool"; name: string; args: Record<string, unknown> };
+export type ShellStep = { kind: "shell"; command: string };
+export type RecipeStep = BrowseStep | ToolStep | ShellStep;
+
 export type Recipe = {
   id: string; name: string; task: string; site: string; steps: RecipeStep[];
   createdAt: number; runs: number; fails: number; lastOk?: number;
@@ -21,7 +26,6 @@ const col = (uid: string) => collection(db, "users", uid, "recipes");
 
 type El = { id: number; tag: string; label: string };
 
-/** Reads the numbered element list out of a browse snapshot. */
 export function parseElements(snapshot: string): El[] {
   const start = snapshot.indexOf("ELEMENTS");
   const end = snapshot.indexOf("PAGE TEXT:");
@@ -34,29 +38,17 @@ export function parseElements(snapshot: string): El[] {
   return out;
 }
 
-/** Turns the agent's numbered ops into label-based ops. Returns null if any op can't be made stable. */
-export function labelOps(ops: unknown[], prevSnapshot: string): LabeledOp[] | null {
-  const els = parseElements(prevSnapshot);
-  const out: LabeledOp[] = [];
-  for (const raw of ops) {
-    const o = raw as Record<string, unknown>;
-    if (o.op === "press") { out.push({ op: "press", key: String(o.key ?? "Enter") }); continue; }
-    if (o.op === "scroll") { out.push({ op: "scroll", dir: o.dir === "up" ? "up" : "down" }); continue; }
-    if (o.op === "wait") { out.push({ op: "wait", ms: Number(o.ms) || 1000 }); continue; }
-    if (o.op !== "click" && o.op !== "type" && o.op !== "secret") return null;
-    const el = els.find((e) => e.id === Number(o.id));
-    if (!el || !el.label) return null;
-    const nth = els.filter((e) => e.label === el.label && e.tag === el.tag).findIndex((e) => e.id === el.id);
-    const t = { label: el.label, tag: el.tag, nth: Math.max(0, nth) };
-    if (o.op === "click") out.push({ op: "click_label", ...t });
-    else if (o.op === "type") out.push({ op: "type_label", text: String(o.text ?? ""), ...t });
-    else out.push({ op: "secret_label", field: o.field === "password" ? "password" : "email", ...t });
-  }
-  return out;
+export function describeStep(s: RecipeStep): string {
+  if (s.kind === "tool") return `use tool ${s.name}`;
+  if (s.kind === "shell") return `run \`${s.command.slice(0, 60)}\``;
+  const bits = s.ops.map((o) =>
+    o.op === "click_label" ? `click "${o.label}"` : o.op === "type_label" ? `type into "${o.label}"` :
+    o.op === "secret_label" ? `fill ${o.field} in "${o.label}"` : o.op === "press" ? `press ${o.key}` : o.op);
+  return `${s.url ? `open ${s.url}, ` : ""}${bits.join(", ") || "look at the page"}`;
 }
 
 export async function saveRecipe(uid: string, r: { name: string; task: string; site: string; steps: RecipeStep[] }) {
-  const id = slug(r.name); // same name = overwrite = the recipe "re-learns" itself
+  const id = slug(r.name); // same name = overwrite = the recipe re-learns / heals itself
   const recipe: Recipe = { id, ...r, createdAt: Date.now(), runs: 0, fails: 0 };
   await setDoc(doc(col(uid), id), JSON.parse(JSON.stringify(recipe)));
   return recipe;
@@ -71,27 +63,47 @@ export async function markRecipe(uid: string, r: Recipe, ok: boolean) {
 export async function deleteRecipe(uid: string, id: string) { await deleteDoc(doc(col(uid), id)); }
 export const matchRecipes = (list: Recipe[], text: string) => bm25(list, (r) => `${r.name} ${r.task}`, text).map((x) => x.doc);
 
-/** Replays a recipe through /api/browser with NO AI model. Stops at the first failed op. */
+/** Replays a recipe with NO AI model: browser steps, tool calls and shell commands. Stops at the first failure. */
 export async function replayRecipe(a: {
-  token: () => Promise<string>; uid: string; recipe: Recipe;
-  creds?: { email?: string; password?: string }; onLine?: (l: string) => void;
-}): Promise<{ ok: boolean; snapshot: string; failedAt?: number }> {
+  token: () => Promise<string>; uid: string; chatId: string; connectors: Record<string, string>; recipe: Recipe;
+  creds?: { email?: string; password?: string };
+  shell?: (command: string) => Promise<{ ok: boolean; text: string }>;
+  approve?: (summary: string) => Promise<boolean>;
+  onLine?: (l: string) => void;
+}): Promise<{ ok: boolean; snapshot: string; failedAt?: number; session: unknown; url: string }> {
   let session: unknown = null;
   let snapshot = "";
   const n = a.recipe.steps.length;
+  const fail = (i: number, text: string) => ({ ok: false, snapshot: text || snapshot, failedAt: i, session, url: (session as { url?: string } | null)?.url ?? "" });
+
   for (let i = 0; i < n; i++) {
     const step = a.recipe.steps[i];
-    const res = await fetch("/api/browser", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await a.token()) },
-      body: JSON.stringify({ uid: a.uid, url: step.url, ops: step.ops, session, creds: a.creds }),
-    });
-    const d = await res.json().catch(() => ({ error: "Bad response" }));
-    if (!res.ok || d.error) return { ok: false, snapshot: String(d.error ?? ""), failedAt: i };
-    session = d.session;
-    snapshot = String(d.snapshot);
-    if (/^FAILED /m.test(snapshot)) return { ok: false, snapshot, failedAt: i };
+    const headers = { "Content-Type": "application/json", Authorization: "Bearer " + (await a.token()) };
+
+    if (step.kind === "tool") {
+      const call = async (approved: boolean) =>
+        (await fetch("/api/tools", { method: "POST", headers, body: JSON.stringify({ action: "call", uid: a.uid, chatId: a.chatId, connectors: a.connectors, name: step.name, args: step.args, approved }) })).json().catch(() => ({ ok: false, text: "Bad response" }));
+      let r = await call(false);
+      if (r.needsApproval) {
+        if (!a.approve || !(await a.approve(r.needsApproval.summary))) return fail(i, "You declined this action.");
+        r = await call(true);
+      }
+      if (!r.ok) return fail(i, String(r.text ?? ""));
+      snapshot = String(r.text ?? "");
+    } else if (step.kind === "shell") {
+      if (!a.shell) return fail(i, "This recipe needs the computer.");
+      const r = await a.shell(step.command);
+      if (!r.ok) return fail(i, r.text);
+      snapshot = r.text;
+    } else {
+      const res = await fetch("/api/browser", { method: "POST", headers, body: JSON.stringify({ uid: a.uid, url: step.url, ops: step.ops, session, creds: a.creds }) });
+      const d = await res.json().catch(() => ({ error: "Bad response" }));
+      if (!res.ok || d.error) return fail(i, String(d.error ?? ""));
+      session = d.session;
+      snapshot = String(d.snapshot);
+      if (/^FAILED /m.test(snapshot)) return fail(i, snapshot);
+    }
     a.onLine?.(`recipe step ${i + 1}/${n} ✓`);
   }
-  return { ok: true, snapshot };
+  return { ok: true, snapshot, session, url: (session as { url?: string } | null)?.url ?? "" };
 }
