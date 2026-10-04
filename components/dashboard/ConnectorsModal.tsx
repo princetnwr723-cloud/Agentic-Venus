@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { ExternalLink, X } from "lucide-react";
 
+type TestResult = { ok: boolean; label?: string; error?: string };
+
 const CATALOG = [
   { id: "vercel", label: "Vercel", note: "Agent deploys your site and gives you a live link.", keysUrl: "https://vercel.com/account/tokens", placeholder: "Vercel token", ready: true },
   { id: "github", label: "GitHub", note: "Token is saved and checked. Pushing code comes in the next update.", keysUrl: "https://github.com/settings/tokens", placeholder: "ghp_… or github_pat_…", ready: true },
@@ -17,7 +19,7 @@ export default function ConnectorsModal({
   onClose: () => void;
   chatName: string;
   connectors: Record<string, string>;
-  onTest: (kind: string, token: string) => Promise<{ ok: boolean; label?: string; error?: string }>;
+  onTest: (kind: string, token: string) => Promise<TestResult>;
   onSave: (kind: string, token: string) => Promise<void>;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -31,12 +33,19 @@ export default function ConnectorsModal({
     if (!token) return;
     setBusy(id);
     setMsg((m) => ({ ...m, [id]: "" }));
-    const r = await onTest(id, token).catch(() => ({ ok: false, error: "Could not check the token." }));
+    let r: TestResult;
+    try {
+      r = await onTest(id, token);
+    } catch {
+      r = { ok: false, error: "Could not check the token." };
+    }
     if (r.ok) {
       await onSave(id, token);
       setDrafts((d) => ({ ...d, [id]: "" }));
       setMsg((m) => ({ ...m, [id]: r.label ? `Connected as ${r.label}` : "Connected" }));
-    } else setMsg((m) => ({ ...m, [id]: r.error || "Token not accepted." }));
+    } else {
+      setMsg((m) => ({ ...m, [id]: r.error || "Token not accepted." }));
+    }
     setBusy(null);
   }
 
