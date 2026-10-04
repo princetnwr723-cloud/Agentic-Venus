@@ -3,6 +3,7 @@ import { connect } from "@/lib/e2b-server";
 import { verifyUser } from "@/lib/server-auth";
 import { createSignedDownload } from "@/lib/supabase-server";
 import { BusyError, runnerStatus, startRunnerJob, stopRunner } from "@/lib/runner-server";
+import { answerPcJob, startPcJob } from "@/lib/pc-runner-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -50,6 +51,29 @@ export async function POST(req: Request) {
           throw e;
         }
       }
+      case "pcstart": {
+        const provider = String(body.provider || "");
+        const model = String(body.model || "");
+        const apiKey = String(body.apiKey || "");
+        const task = String(body.task || "").trim();
+        if (!provider || !model || !apiKey || !task) return fail("Provider, model, key and task are required.", 400);
+        try {
+          const r = await startPcJob(sb, {
+            uid, chatId: String(body.chatId || ""), task, provider, model, apiKey, appUrl: String(body.appUrl || ""),
+            context: typeof body.context === "string" ? body.context : undefined,
+            maxSteps: Number(body.maxSteps) || undefined, proof: body.proof !== false,
+            session: body.session, healSnapshot: typeof body.healSnapshot === "string" ? body.healSnapshot : undefined,
+            startUrl: typeof body.startUrl === "string" ? body.startUrl : undefined,
+          });
+          return NextResponse.json(r);
+        } catch (e) {
+          if (e instanceof BusyError) return fail(e.message, 409);
+          throw e;
+        }
+      }
+      case "answer":
+        await answerPcJob(sb, String(body.jobId || ""), String(body.qid || ""), body.reply);
+        return NextResponse.json({ ok: true });
       case "status":
         return NextResponse.json(await runnerStatus(sb, String(body.jobId || ""), Number(body.offset) || 0));
       case "stop":
