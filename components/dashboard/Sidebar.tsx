@@ -24,6 +24,11 @@ export default function Sidebar({
   onSignOut: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const shown = needle
+    ? chats.filter((c) => c.agentName.toLowerCase().includes(needle) || c.messages.some((m) => m.content.toLowerCase().includes(needle)))
+    : chats;
   const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
 
   return (
@@ -44,6 +49,8 @@ export default function Sidebar({
         <div className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2">
           <Search size={15} className="text-faint" />
           <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
             placeholder="Search"
             className="w-full bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none"
           />
@@ -56,7 +63,10 @@ export default function Sidebar({
             No chats yet — hit + to bring on your first teammate.
           </p>
         )}
-        {chats.map((chat) => {
+        {chats.length > 0 && shown.length === 0 && (
+          <p className="px-4 py-6 text-center text-xs text-faint">No chats match your search.</p>
+        )}
+        {shown.map((chat) => {
           const active = chat.id === activeId;
           const last = chat.messages[chat.messages.length - 1];
           return (
