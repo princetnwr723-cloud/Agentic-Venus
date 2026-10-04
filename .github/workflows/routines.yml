@@ -1,15 +1,15 @@
 # SAVE AS: .github/workflows/routines.yml
 name: AgenticVenus routine runner
 
-# Runs on GitHub's own infrastructure, on a timer — not Vercel, and not
+# Runs on GitHub's own infrastructure, on a timer - not Vercel, and not
 # your own machine. Everything here is set up through the GitHub app or
 # website, no terminal needed.
 
 on:
   schedule:
-    - cron: "*/10 * * * *" # every 10 minutes. GitHub may delay this a
-      # few minutes under load — fine for a personal routine system.
-  workflow_dispatch: {} # adds a manual "Run workflow" button, for testing
+    - cron: "*/5 * * * *" # every 5 minutes (GitHub's minimum). GitHub may delay
+      # this a few minutes under load - fine for routines and background jobs.
+  workflow_dispatch: {} # manual "Run workflow" button, for testing
 
 jobs:
   ping-routines:
@@ -28,6 +28,22 @@ jobs:
           cat response.txt
           echo
           if [ "$STATUS" -ge 400 ]; then
-            echo "::error::Routine endpoint returned HTTP $STATUS — see the response body above."
+            echo "::error::Routine endpoint returned HTTP $STATUS - see the response body above."
+            exit 1
+          fi
+
+      - name: Keep background coding jobs alive and finish unattended ones
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
+        run: |
+          URL="${APP_URL%/}/api/runner/tick"
+          STATUS=$(curl -s -o tick.txt -w "%{http_code}" -X POST "$URL" \
+            -H "Authorization: Bearer $RUNNER_SECRET")
+          echo "HTTP status: $STATUS"
+          cat tick.txt
+          echo
+          if [ "$STATUS" -ge 400 ]; then
+            echo "::error::Runner tick returned HTTP $STATUS - see the response body above."
             exit 1
           fi
