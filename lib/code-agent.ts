@@ -1,5 +1,6 @@
 import { addMemory, bumpSkillUse, brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
 import { listChats } from "@/lib/chats";
+import { touch } from "@/lib/computers";
 import { codeSystemPrompt, parseTools, type ToolCall } from "@/lib/code-prompts";
 import { saveCodeProject, watchCodeProject, type CodeLog, type CodeProject } from "@/lib/code-store";
 import type { ProviderId } from "@/lib/providers";
@@ -35,15 +36,17 @@ export async function wsCall(env: CodeEnv, action: string, extra: Record<string,
   });
   const data = await readJson(res);
   if (!res.ok) throw new Error(data?.error || "Workspace request failed.");
+  if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
   return data;
 }
 
-/** Venus Code runs on the chat's own computer — there is no separate server. */
+/** Venus Code runs on its own computer (the dashboard passes it in as env.sandboxId). */
 export async function resolveSandbox(env: CodeEnv): Promise<string> {
   if (env.sandboxId) return env.sandboxId;
   const c = (await listChats(env.uid)).find((x) => x.id === env.chatId);
-  if (!c?.pcSandboxId) throw new Error("This chat has no computer yet. Turn it on with the monitor button in the chat first.");
-  return c.pcSandboxId;
+  const id = (c as unknown as { computers?: Record<string, string> } | undefined)?.computers?.code;
+  if (!id) throw new Error("This chat has no coding computer yet. Ask for code in the chat and it starts automatically.");
+  return id;
 }
 
 async function ensureCodeTools(env: CodeEnv, sid: string, hooks: CodeHooks) {
