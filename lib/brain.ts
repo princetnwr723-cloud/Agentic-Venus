@@ -1,5 +1,6 @@
 import { collection, deleteDoc, doc, getDoc, getDocs, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { bm25, jaccard } from "@/lib/bm25";
 import type { ProviderId } from "@/lib/providers";
 
 export type Memory = { id: string; text: string; at: number; auto?: boolean };
@@ -14,7 +15,6 @@ const memRef = (uid: string) => doc(db, "users", uid, "brain", "memories");
 const skillCol = (uid: string) => collection(db, "users", uid, "skills");
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "skill";
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-const words = (s: string) => norm(s).split(" ").filter((w) => w.length > 3);
 
 export async function loadBrain(uid: string): Promise<Brain> {
   const [m, s] = await Promise.all([getDoc(memRef(uid)).catch(() => null), getDocs(skillCol(uid)).catch(() => null)]);
@@ -35,8 +35,19 @@ export async function addMemory(uid: string, text: string, auto = false): Promis
   const items = await readMemories(uid);
   const n = norm(t);
   if (items.some((i) => norm(i.text) === n)) return null;
+  // Near-duplicate ("likes dark mode" vs "prefers dark mode"): refresh the old one instead of piling up.
+  const similar = items.find((i) => jaccard(i.text, t) > 0.7);
+  if (similar) {
+    await setDoc(memRef(uid), { items: items.map((i) => (i.id === similar.id ? { ...i, text: t, at: Date.now() } : i)) });
+    return null;
+  }
   const mem: Memory = { id: "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, at: Date.now(), ...(auto ? { auto: true } : {}) };
-  await setDoc(memRef(uid), { items: [...items, mem].slice(-200) });
+  let next = [...items, mem];
+  if (next.length > 200) { // when full, forget the oldest auto-learned fact first, never the ones the user typed
+    const drop = next.find((i) => i.auto && i.id !== mem.id) ?? next[0];
+    next = next.filter((i) => i.id !== drop.id);
+  }
+  await setDoc(memRef(uid), { items: next });
   return mem;
 }
 
@@ -98,29 +109,18 @@ export function parseSkillMarkdown(text: string): { name: string; description: s
 }
 
 export function rankSkills(skills: Skill[], text: string, n = 3): Skill[] {
-  const t = new Set(words(text));
-  return skills
-    .map((s) => {
-      const nameW = new Set(words(s.name));
-      const descW = new Set(words(s.description));
-      let score = 0;
-      t.forEach((w) => { if (nameW.has(w)) score += 3; if (descW.has(w)) score += 1; });
-      return { s, score };
-    })
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
+  return bm25(skills, (s) => `${s.name} ${s.name} ${s.description} ${s.instructions.slice(0, 600)}`, text)
     .slice(0, n)
-    .map((x) => x.s);
+    .map((x) => x.doc);
 }
 
 /** Text that is added to an agent's prompt: what it knows about the user + relevant skills. */
 export function brainPrompt(brain: Brain, text: string, opts: { noSkills?: boolean } = {}): string {
   const parts: string[] = [];
   let mems = brain.memories;
-  if (mems.length > 30) {
-    const t = new Set(words(text));
-    const hit = mems.filter((m) => words(m.text).some((w) => t.has(w)));
-    mems = [...hit, ...mems.slice(-10)].filter((m, i, a) => a.findIndex((x) => x.id === m.id) === i).slice(0, 30);
+  if (mems.length > 12) {
+    const top = bm25(mems, (m) => m.text, text).slice(0, 12).map((x) => x.doc);
+    mems = [...top, ...mems.slice(-5)].filter((m, i, a) => a.findIndex((x) => x.id === m.id) === i).slice(0, 20);
   }
   if (mems.length) parts.push("## What you remember about the user (persistent memory)\n" + mems.map((m) => `- ${m.text}`).join("\n"));
   if (!opts.noSkills && brain.skills.length) {
