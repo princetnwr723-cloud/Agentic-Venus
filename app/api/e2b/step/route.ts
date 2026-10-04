@@ -10,11 +10,11 @@ import type { ProviderId } from "@/lib/providers";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-type AgentAction = PcAction & { site?: string; field?: string; question?: string; options?: string[]; instruction?: string };
+type AgentAction = PcAction & { site?: string; field?: string; question?: string; options?: string[]; instruction?: string; ops?: unknown[] };
 
 const ALLOWED = new Set([
   "click", "double_click", "right_click", "type", "key", "scroll", "wait",
-  "open_url", "launch", "search", "shell", "shell_check", "web_search", "web_read", "code",
+  "open_url", "launch", "search", "shell", "shell_check", "web_search", "web_read", "browse", "code",
   "note", "done", "need_login", "type_secret", "ask_user",
 ]);
 
@@ -27,6 +27,7 @@ Reply with ONE JSON object only — no prose, no markdown fences:
 TOOLS
 {"type":"web_search","query":"..."}       search the web; returns titles, links, snippets as text
 {"type":"web_read","url":"https://..."}   read a web page as plain text
+{"type":"browse","url":"https://...","ops":[{"op":"click","id":5},{"op":"type","id":3,"text":"..."},{"op":"secret","id":3,"field":"email"},{"op":"press","key":"Enter"},{"op":"scroll","dir":"down"}]}   FAST DOM browser: returns a NUMBERED list of the page's buttons/links/inputs; you act by number. Omit "url" to stay on the current page.
 {"type":"search","query":"..."}           show a web search in the browser on screen
 {"type":"open_url","url":"https://..."}   show a page in the browser on screen
 {"type":"launch","app":"chrome"}          open an app on the screen (chrome, firefox, terminal, code, files)
@@ -50,6 +51,7 @@ RULES
    - Building or changing software, websites, apps → code (rule 3). Never hand-write project files through the terminal.
    - Other apps and GUIs → screen actions.
    Never open a terminal for something a web page answers, and never open the browser for something a one-line command does.
+1b. For ANY website interaction (forms, logins, clicking, reading a page that needs JavaScript) use "browse" first — numbers are far more accurate than pixel clicks. The page is reloaded on every browse call, so do a whole form in ONE call (type, type, click). If a click changes the page, you get the new page back. For logins: after need_login use op "secret" with field "email"/"password". Use the screen browser (open_url + clicks) only when the user wants to watch, or browse fails (captcha, blocked).
 2. You may be given ONE STEP of a larger plan. Work ONLY on the current step and call done as soon as it is complete, with a summary of the actual result.
 3. {"type":"code","instruction":"..."}: write a complete, self-contained instruction (what to build/change, constraints, where). It returns a summary of what was done. Use it for any coding task.
 4. Terminal specifics: commands run as a normal user with passwordless sudo; make them non-interactive (-y, DEBIAN_FRONTEND=noninteractive, curl -fsSL); verify installs. Claude Code: "curl -fsSL https://claude.ai/install.sh | bash" then "export PATH=$HOME/.local/bin:$PATH; claude --version" (fallback: Node 20 + "npm install -g @anthropic-ai/claude-code"); never sign in for the user. apt waits for locks automatically, so be patient. If a result says STILL RUNNING use shell_check — NEVER start the same command again.
@@ -193,6 +195,15 @@ export async function POST(req: Request) {
         const m = err instanceof Error ? err.message : "failed";
         return NextResponse.json({ done: false, thought, actionText: `FAILED ${action.type}: ${m}`, output: `ERROR: ${m} — try another source, or use search/open_url in the browser.` });
       }
+    }
+
+    if (action.type === "browse") {
+      const ops = Array.isArray(action.ops) ? action.ops.slice(0, 8) : [];
+      return NextResponse.json({
+        done: false, thought,
+        actionText: `browse ${(action.url ?? "(same page)").slice(0, 80)} · ${ops.length} op(s)`,
+        delegate: { kind: "browse", url: action.url ?? "", ops },
+      });
     }
 
     if (action.type === "need_login") return NextResponse.json({ done: false, thought, ask: { kind: "login", site: action.site ?? "" } });
