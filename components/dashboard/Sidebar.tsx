@@ -25,11 +25,12 @@ export default function Sidebar({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [q, setQ] = useState("");
+  const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
+
   const needle = q.trim().toLowerCase();
   const shown = needle
     ? chats.filter((c) => c.agentName.toLowerCase().includes(needle) || c.messages.some((m) => m.content.toLowerCase().includes(needle)))
     : chats;
-  const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
 
   return (
     <aside className="flex h-screen w-[320px] shrink-0 flex-col border-r border-line bg-panel">
@@ -51,7 +52,7 @@ export default function Sidebar({
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search"
+            placeholder="Search chats and messages"
             className="w-full bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none"
           />
         </div>
@@ -64,7 +65,7 @@ export default function Sidebar({
           </p>
         )}
         {chats.length > 0 && shown.length === 0 && (
-          <p className="px-4 py-6 text-center text-xs text-faint">No chats match your search.</p>
+          <p className="px-4 py-6 text-center text-xs text-faint">Nothing matches “{q}”.</p>
         )}
         {shown.map((chat) => {
           const active = chat.id === activeId;
@@ -79,12 +80,8 @@ export default function Sidebar({
             >
               <BotAvatar color={chat.agentColor} size={34} />
               <div className="min-w-0 flex-1">
-                <span className="truncate text-sm font-medium text-ink">
-                  {chat.agentName}
-                </span>
-                <p className="truncate text-xs text-muted">
-                  {last ? last.content : "New chat"}
-                </p>
+                <span className="truncate text-sm font-medium text-ink">{chat.agentName}</span>
+                <p className="truncate text-xs text-muted">{last ? last.content : "New chat"}</p>
               </div>
             </button>
           );
@@ -94,25 +91,16 @@ export default function Sidebar({
       <div className="relative border-t border-line px-4 py-3.5">
         {menuOpen && (
           <>
-            <div
-              className="fixed inset-0 z-10"
-              onClick={() => setMenuOpen(false)}
-            />
+            <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
             <div className="absolute bottom-[calc(100%+4px)] left-4 right-4 z-20 overflow-hidden rounded-lg border border-line bg-panel2 shadow-xl">
               <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  onOpenApiKeys();
-                }}
+                onClick={() => { setMenuOpen(false); onOpenApiKeys(); }}
                 className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
               >
                 <Key size={15} /> API keys
               </button>
               <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  onSignOut();
-                }}
+                onClick={() => { setMenuOpen(false); onSignOut(); }}
                 className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
               >
                 <LogOut size={15} /> Sign out
@@ -125,9 +113,7 @@ export default function Sidebar({
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-panel2 text-xs font-medium text-ink">
             {initial}
           </div>
-          <span className="min-w-0 flex-1 truncate text-sm text-ink">
-            {userLabel}
-          </span>
+          <span className="min-w-0 flex-1 truncate text-sm text-ink">{userLabel}</span>
           <button
             aria-label="Settings"
             title="Settings"
