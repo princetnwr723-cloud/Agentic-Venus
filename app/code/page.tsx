@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Download, File as FileIcon, RefreshCw, RotateCcw, Square } from "lucide-react";
+import { ArrowLeft, Download, File as FileIcon, Maximize2, RefreshCw, RotateCcw, Square, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Markdown from "@/components/Markdown";
 import { useAuth } from "@/lib/auth-context";
@@ -48,10 +48,12 @@ export default function CodePage() {
   const [device, setDevice] = useState<"desktop" | "tablet" | "mobile">("desktop");
   const [zipUrl, setZipUrl] = useState("");
   const [err, setErr] = useState("");
+  const [full, setFull] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   const chat = chats.find((c) => c.id === chatId) ?? null;
-  const sandboxId = chat?.pcSandboxId ?? null;
+  // Venus Code has its OWN coding computer (slot "code"), separate from the chat's computer.
+  const sandboxId = (chat as unknown as { computers?: Record<string, string> } | null)?.computers?.code ?? null;
 
   useEffect(() => { if (!loading && !user) router.replace("/"); }, [loading, user, router]);
   useEffect(() => {
@@ -59,7 +61,7 @@ export default function CodePage() {
     listChats(user.uid).then((l) => {
       setChats(l);
       const want = new URLSearchParams(window.location.search).get("chat");
-      setChatId(want && l.some((c) => c.id === want) ? want : l.find((c) => c.pcSandboxId)?.id ?? l[0]?.id ?? null);
+      setChatId(want && l.some((c) => c.id === want) ? want : l[0]?.id ?? null);
     });
   }, [user]);
   useEffect(() => {
@@ -123,20 +125,18 @@ export default function CodePage() {
 
   return (
     <div className="flex h-screen bg-bg">
-      <aside className="flex w-[220px] shrink-0 flex-col border-r border-line bg-panel">
+      <aside className="flex w-[200px] shrink-0 flex-col border-r border-line bg-panel">
         <div className="flex items-center justify-between px-4 py-4">
           <span className="text-sm font-medium text-ink">Venus Code</span>
           <button onClick={() => router.push("/dashboard")} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><ArrowLeft size={16} /></button>
         </div>
-        <p className="px-4 pb-2 text-[11px] leading-relaxed text-faint">Each chat has ONE codespace. You operate it from the chat (<code className="text-gold">/code …</code>) — this page just shows the work live.</p>
-        <nav className="min-h-0 flex-1 overflow-y-auto">
-          {chats.map((c) => (
-            <button key={c.id} onClick={() => setChatId(c.id)} className={`flex w-full items-center gap-2.5 px-4 py-2.5 text-left ${c.id === chatId ? "bg-panel2" : "hover:bg-panel2/60"}`}>
-              <BotAvatar color={c.agentColor} size={22} />
-              <span className="min-w-0"><span className="block truncate text-sm text-ink">{c.agentName}</span><span className="block text-[10px] text-faint">{c.pcSandboxId ? "computer ready" : "no computer"}</span></span>
-            </button>
-          ))}
-        </nav>
+        {chat && (
+          <div className="flex items-center gap-2.5 px-4 pb-3">
+            <BotAvatar color={chat.agentColor} size={26} />
+            <span className="min-w-0 truncate text-sm text-ink">{chat.agentName}</span>
+          </div>
+        )}
+        <p className="px-4 text-[11px] leading-relaxed text-faint">Only this chat&apos;s codespace. Ask for code in the chat — this page shows the work live. The coding computer starts when needed and switches off by itself right after.</p>
       </aside>
 
       <main className="flex min-h-0 min-w-0 flex-1">
@@ -163,7 +163,7 @@ export default function CodePage() {
                     </div>
                     <div className="space-y-2 text-xs md:border-l md:border-line md:pl-4">
                       <p className="font-semibold text-gold">How to use</p>
-                      <p className="text-muted">Type <b className="text-ink">/code build me a landing page</b> in this chat, or just ask the agent to build something.</p>
+                      <p className="text-muted">Just ask in the chat — for example <b className="text-ink">build me a landing page</b>. The agent decides itself when coding is needed.</p>
                       <p className="border-t border-line pt-2 font-semibold text-gold">Recent activity</p>
                       <p className="whitespace-pre-wrap text-muted">{proj?.ctx ? proj.ctx.trim().split("\n").slice(-3).join("\n") : "No recent activity"}</p>
                     </div>
@@ -195,7 +195,7 @@ export default function CodePage() {
                 <button onClick={() => { refreshSide(); refreshPreview(); }} className="ml-auto text-muted hover:text-ink"><RefreshCw size={13} /></button>
               </div>
               <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-panel">
-                {!sandboxId && <p className="p-4 text-xs text-muted">This chat has no computer yet. Turn it on with the monitor button in the chat — Venus Code works on that computer.</p>}
+                {!sandboxId && <p className="p-4 text-xs text-muted">The coding computer starts automatically the first time you ask for code in the chat.</p>}
                 {sandboxId && tab === "preview" && (
                   <div className="flex h-full flex-col">
                     <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs">
@@ -203,8 +203,9 @@ export default function CodePage() {
                       {page && page.files.length > 1 && <select value={entry || page.entry} onChange={(e) => { setEntry(e.target.value); refreshPreview(e.target.value); }} className="rounded border border-line bg-bg px-1.5 py-0.5 text-ink">{page.files.map((f) => <option key={f}>{f}</option>)}</select>}
                       <span className="ml-auto flex gap-1">{(["desktop", "tablet", "mobile"] as const).map((d) => <button key={d} onClick={() => setDevice(d)} className={`rounded px-1.5 py-0.5 ${device === d ? "bg-panel2 text-ink" : "text-muted"}`}>{d === "desktop" ? "🖥" : d === "tablet" ? "▭" : "📱"}</button>)}</span>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-auto bg-[#0b0c10] p-2">
-                      {page?.html ? <iframe key={page.html.length} sandbox="allow-scripts allow-forms allow-popups" srcDoc={page.html} title="Preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className="mx-auto h-full min-h-[420px] rounded-md border border-line bg-white" />
+                    <div className={full ? "fixed inset-0 z-50 overflow-auto bg-[#0b0c10] p-3" : "relative min-h-0 flex-1 overflow-auto bg-[#0b0c10] p-2"}>
+                      <button onClick={() => setFull((v) => !v)} title={full ? "Exit fullscreen" : "Fullscreen preview"} className="absolute right-3 top-3 z-10 rounded-md bg-black/60 p-1.5 text-white hover:bg-black/80">{full ? <X size={15} /> : <Maximize2 size={15} />}</button>
+                      {page?.html ? <iframe key={page.html.length} sandbox="allow-scripts allow-forms allow-popups" srcDoc={page.html} title="Preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className={`mx-auto rounded-md border border-line bg-white ${full ? "h-[calc(100vh-24px)]" : "h-full min-h-[420px]"}`} />
                         : <p className="mx-auto mt-10 max-w-xs text-center text-xs text-muted">{err || "No HTML page yet. Ask the agent in the chat to build a website — it shows up here instantly."}</p>}
                     </div>
                   </div>
