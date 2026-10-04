@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { callProvider, type ChatMsg } from "@/lib/ai-providers-server";
+import { callWithFallback, type ChatMsg, type Fallback } from "@/lib/ai-providers-server";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -15,9 +15,13 @@ export async function POST(req: Request) {
     if (!apiKey) return NextResponse.json({ error: "No API key on file for this provider yet." }, { status: 400 });
     if (!provider || !model) return NextResponse.json({ error: "Missing provider or model." }, { status: 400 });
 
+    const fallbacks: Fallback[] = (Array.isArray(body.fallbacks) ? body.fallbacks : [])
+      .filter((f: Fallback) => f && typeof f.provider === "string" && typeof f.apiKey === "string" && typeof f.model === "string")
+      .slice(0, 2);
+
     const full: ChatMsg[] = systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages;
-    const reply = await callProvider({ provider, apiKey, model, messages: full });
-    return NextResponse.json({ reply });
+    const { reply, used } = await callWithFallback({ provider, apiKey, model, messages: full }, fallbacks);
+    return NextResponse.json({ reply, used });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Something went wrong." }, { status: 500 });
   }
