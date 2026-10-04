@@ -1,5 +1,6 @@
 import { brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
 import { listChats } from "@/lib/chats";
+import { acquire, releaseNow, touch } from "@/lib/computers";
 import { saveProject, type Stage, type VenusProject } from "@/lib/venus";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
@@ -51,6 +52,7 @@ export async function studioCall(env: PipelineEnv, action: string, extra: Record
   });
   const data = await readJson(res);
   if (!res.ok) throw new Error(data?.error || "Studio request failed.");
+  if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
   return data;
 }
 
@@ -62,6 +64,7 @@ async function pcCall(env: PipelineEnv, action: string, extra: Record<string, un
   });
   const data = await readJson(res);
   if (!res.ok) throw new Error(data?.error || "Computer request failed.");
+  if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
   return data;
 }
 
@@ -111,16 +114,14 @@ function fallbackScene(s: Scene): Scene {
   };
 }
 
-// ---------- Venus Pro runs on the CHAT'S computer (no separate studio server) ----------
+// ---------- Venus Pro has its OWN studio computer (switched off again when the work ends) ----------
 
 async function resolvePc(run: Run): Promise<string> {
   if (run.env.sandboxId) return run.env.sandboxId;
-  const chats = await listChats(run.env.uid);
-  const mine = run.p.chatId ? chats.find((c) => c.id === run.p.chatId) : undefined;
-  const c = mine?.pcSandboxId ? mine : chats.find((x) => x.pcSandboxId);
-  if (!c?.pcSandboxId) throw new Error("Venus Pro works on your chat's computer. Open a chat, turn the computer on (monitor button), then try again.");
-  if (run.p.chatId !== c.id) await upd(run, { chatId: c.id });
-  return c.pcSandboxId;
+  const chatId = run.p.chatId ?? (await listChats(run.env.uid))[0]?.id;
+  if (!chatId) throw new Error("Create a chat first — Venus Pro gets its own studio computer under a chat.");
+  if (run.p.chatId !== chatId) await upd(run, { chatId });
+  return acquire({ uid: run.env.uid, e2bKey: run.env.e2bKey }, chatId, "studio");
 }
 
 export async function ensureStudio(run: Run) {
@@ -141,12 +142,12 @@ export async function ensureStudio(run: Run) {
   try {
     const s = await studioCall(env, "status", { sandboxId: sid });
     if (s.state !== "ready") {
-      hooks.log("Installing the video tools (Remotion, FFmpeg) on this chat's computer — 5-8 minutes, once.");
+      hooks.log("Installing the video tools (Remotion, FFmpeg) on the studio computer — 5-8 minutes, once.");
       if (s.state !== "installing") await studioCall(env, "setup", { sandboxId: sid });
       await waitReady();
     }
   } catch (e) {
-    if (String((e as Error).message).includes("SANDBOX_GONE")) throw new Error("This chat's computer has expired. Create a new one in the chat, then retry.");
+    if (String((e as Error).message).includes("SANDBOX_GONE")) throw new Error("The studio computer has expired. Run it again and a new one will be created.");
     throw e;
   }
   run.sid = sid;
@@ -304,7 +305,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
 
   try {
     await upd(run, { status: "running", stage: "studio", error: undefined });
-    say("🎬 Checking this chat's computer…");
+    say("🎬 Checking the studio computer…");
     hooks.progress({ label: "Computer", value: null });
     await ensureStudio(run);
     brain = await loadBrain(env.uid).catch(() => brain);
@@ -480,5 +481,6 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     await upd(run, { status: "error", error: msg });
     hooks.progress(null);
   }
+  if (run.sid) void releaseNow(env.e2bKey, run.sid); // work is over → switch the studio computer off
   return run.p;
 }
