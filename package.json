@@ -16,7 +16,9 @@
     "lucide-react": "^0.383.0",
     "firebase": "^10.13.1",
     "firebase-admin": "^12.3.1",
-    "@e2b/desktop": "latest"
+    "@e2b/desktop": "latest",
+    "@sparticuz/chromium": "^131.0.1",
+    "playwright-core": "^1.49.1"
   },
   "overrides": {
     "chalk": "4.1.2"
