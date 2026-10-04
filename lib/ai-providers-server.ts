@@ -1,12 +1,11 @@
-import type { ProviderId } from "@/lib/providers";
+// Server-only. Normalizes every provider to one callProvider() function,
+// plus fallback chains and streaming.
+import type { ProviderId } from "./providers";
 
-export type ChatMsg = {
-  role: "system" | "user" | "assistant";
-  content: string;
-  image?: { mediaType: string; data: string };
-};
+export type ChatImage = { mediaType: string; data: string };
+export type ChatMsg = { role: "system" | "user" | "assistant"; content: string; image?: ChatImage };
 
-export const OPENAI_COMPATIBLE_URLS: Partial<Record<ProviderId, string>> = {
+const OPENAI_COMPATIBLE_URLS: Partial<Record<ProviderId, string>> = {
   openai: "https://api.openai.com/v1/chat/completions",
   grok: "https://api.x.ai/v1/chat/completions",
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
@@ -17,9 +16,7 @@ export const OPENAI_COMPATIBLE_URLS: Partial<Record<ProviderId, string>> = {
   apinex: "https://apinex.bond/v1/chat/completions",
 };
 
-export function openAIStyleContent(
-  m: ChatMsg
-): string | Array<{ type: string; text?: string; image_url?: { url: string } }> {
+function openAIStyleContent(m: ChatMsg) {
   if (!m.image) return m.content;
   return [
     { type: "text", text: m.content },
@@ -27,109 +24,103 @@ export function openAIStyleContent(
   ];
 }
 
-// ---------------------------------------------------------------------------
-// One-shot call (no streaming) for every provider.
-// Error messages include the HTTP status so callWithFallback can detect 429 / 5xx.
-// ---------------------------------------------------------------------------
-async function postJson(provider: ProviderId, url: string, headers: Record<string, string>, body: unknown): Promise<any> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(55_000),
-  });
-  const data: any = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const raw = data?.error?.message ?? data?.error ?? data?.message ?? "request failed";
-    const msg = typeof raw === "string" ? raw : JSON.stringify(raw);
-    throw new Error(`${provider} ${res.status}: ${msg.slice(0, 300)}`);
-  }
-  return data;
-}
-
-export async function callProvider(a: {
-  provider: ProviderId;
-  apiKey: string;
-  model: string;
-  messages: ChatMsg[];
-  maxTokens?: number;
-}): Promise<string> {
-  const { provider, apiKey, model, messages } = a;
-
-  if (provider === "anthropic") {
-    const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n") || undefined;
-    const rest = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({
-        role: m.role,
-        content: m.image
-          ? [
-              { type: "image", source: { type: "base64", media_type: m.image.mediaType, data: m.image.data } },
-              { type: "text", text: m.content },
-            ]
-          : m.content,
-      }));
-    const d = await postJson(
-      provider,
-      "https://api.anthropic.com/v1/messages",
-      { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      { model, max_tokens: a.maxTokens ?? 8192, system, messages: rest }
-    );
-    return (d.content ?? []).map((b: { text?: string }) => b.text ?? "").join("");
-  }
-
-  if (provider === "gemini") {
-    const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-    const contents = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: m.image
-          ? [{ inline_data: { mime_type: m.image.mediaType, data: m.image.data } }, { text: m.content }]
-          : [{ text: m.content }],
-      }));
-    const d = await postJson(
-      provider,
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      { "x-goog-api-key": apiKey },
-      {
-        contents,
-        ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-        generationConfig: { maxOutputTokens: a.maxTokens ?? 8192 },
-      }
-    );
-    const parts: Array<{ text?: string }> = d?.candidates?.[0]?.content?.parts ?? [];
-    return parts.map((p) => p.text ?? "").join("");
-  }
-
-  const oaMessages = messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) }));
-
-  if (provider === "cohere") {
-    const d = await postJson(
-      provider,
-      "https://api.cohere.com/v2/chat",
-      { Authorization: `Bearer ${apiKey}` },
-      { model, messages: oaMessages, ...(a.maxTokens ? { max_tokens: a.maxTokens } : {}) }
-    );
-    const parts = d?.message?.content;
-    return Array.isArray(parts) ? parts.map((p: { text?: string }) => p.text ?? "").join("") : "";
-  }
-
+async function callOpenAICompatible(provider: ProviderId, apiKey: string, model: string, messages: ChatMsg[]) {
   const url = OPENAI_COMPATIBLE_URLS[provider];
   if (!url) throw new Error(`No endpoint configured for ${provider}`);
-  const tokenField = a.maxTokens
-    ? provider === "openai"
-      ? { max_completion_tokens: a.maxTokens }
-      : { max_tokens: a.maxTokens }
-    : {};
-  const d = await postJson(provider, url, { Authorization: `Bearer ${apiKey}` }, { model, messages: oaMessages, ...tokenField });
-  const content = d?.choices?.[0]?.message?.content;
-  return typeof content === "string" ? content : "";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages: messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) })) }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.message || data?.error || `${provider} request failed`);
+  return data?.choices?.[0]?.message?.content ?? "";
+}
+
+function anthropicMessages(messages: ChatMsg[]) {
+  return messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role,
+      content: m.image
+        ? [
+            { type: "image", source: { type: "base64", media_type: m.image.mediaType, data: m.image.data } },
+            { type: "text", text: m.content },
+          ]
+        : m.content,
+    }));
+}
+
+async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number) {
+  const system = messages.find((m) => m.role === "system")?.content;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: anthropicMessages(messages) }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.message || "Anthropic request failed");
+  return data?.content?.[0]?.text ?? "";
+}
+
+async function callGemini(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number) {
+  const contents = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: m.image
+        ? [{ inline_data: { mime_type: m.image.mediaType, data: m.image.data } }, { text: m.content }]
+        : [{ text: m.content }],
+    }));
+  const system = messages.find((m) => m.role === "system")?.content;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const call = async (inline: boolean) => {
+    const cs = inline && system ? contents.map((c, i) => (i === 0 ? { ...c, parts: [{ text: system + "\n\n" }, ...c.parts] } : c)) : contents;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: cs,
+        generationConfig: { maxOutputTokens: maxTokens },
+        ...(system && !inline ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+      }),
+    });
+    return { res, data: await res.json().catch(() => ({})) };
+  };
+  let r = await call(false);
+  if (!r.res.ok && /developer instruction|system instruction/i.test(r.data?.error?.message ?? "")) r = await call(true);
+  if (!r.res.ok) throw new Error(r.data?.error?.message || "Gemini request failed");
+  return (r.data?.candidates?.[0]?.content?.parts ?? []).map((p: { text?: string }) => p.text ?? "").join("");
+}
+
+async function callCohere(apiKey: string, model: string, messages: ChatMsg[]) {
+  const res = await fetch("https://api.cohere.com/v2/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages: messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) })) }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.message || "Cohere request failed");
+  const parts = data?.message?.content;
+  return Array.isArray(parts) ? parts.map((p: { text?: string }) => p.text ?? "").join("") : "";
+}
+
+export async function callProvider({
+  provider, apiKey, model, messages, maxTokens = 8192,
+}: {
+  provider: ProviderId; apiKey: string; model: string; messages: ChatMsg[]; maxTokens?: number;
+}): Promise<string> {
+  switch (provider) {
+    case "anthropic": return callAnthropic(apiKey, model, messages, maxTokens);
+    case "gemini": return callGemini(apiKey, model, messages, maxTokens);
+    case "cohere": return callCohere(apiKey, model, messages);
+    default: return callOpenAICompatible(provider, apiKey, model, messages);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Fallback chain: if a provider is rate-limited / overloaded / down, try the next one.
-// Bad keys and bad requests are NOT retried (they would hide a real problem).
+// Fallback chain: rate-limited / overloaded / down -> try the next provider.
+// Bad keys and bad requests are NOT retried (that would hide a real problem).
 // ---------------------------------------------------------------------------
 export type Fallback = { provider: ProviderId; apiKey: string; model: string };
 const RETRYABLE = /(\b429\b|rate.?limit|overloaded|timeout|timed out|fetch failed|ECONN|socket|\b5\d\d\b|unavailable|capacity)/i;
@@ -153,8 +144,8 @@ export async function callWithFallback(
 }
 
 // ---------------------------------------------------------------------------
-// Streaming (plain text deltas). Anthropic + every OpenAI-compatible provider stream
-// for real; Gemini/Cohere arrive as one chunk (still works, just not token-by-token).
+// Streaming (plain text deltas). Anthropic + every OpenAI-compatible provider
+// stream for real; Gemini/Cohere arrive as one chunk.
 // ---------------------------------------------------------------------------
 async function readSSE(res: Response, onData: (j: any) => void) {
   const reader = res.body!.getReader();
@@ -178,16 +169,10 @@ async function readSSE(res: Response, onData: (j: any) => void) {
 
 async function streamAnthropic(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number, push: (s: string) => void) {
   const system = messages.find((m) => m.role === "system")?.content;
-  const rest = messages.filter((m) => m.role !== "system").map((m) => ({
-    role: m.role,
-    content: m.image
-      ? [{ type: "image", source: { type: "base64", media_type: m.image.mediaType, data: m.image.data } }, { type: "text", text: m.content }]
-      : m.content,
-  }));
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: rest, stream: true }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: anthropicMessages(messages), stream: true }),
   });
   if (!res.ok || !res.body) {
     const d = await res.json().catch(() => ({}));
