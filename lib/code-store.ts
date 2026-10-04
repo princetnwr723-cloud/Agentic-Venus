@@ -2,10 +2,12 @@ import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
 export type CodeLog = { kind: string; text: string; depth?: number; path?: string; lines?: Array<{ t: string; n?: number; text: string }> };
+/** A background job that runs inside the computer. `hb` = last time a browser tab was watching it. */
+export type RunnerJob = { id: string; sandboxId: string; offset: number; hb: number };
 export type CodeProject = {
   id: string; // = chat id: every chat has exactly ONE codespace
   name: string; createdAt: number; updatedAt: number; ctx: string; backupPath?: string;
-  log: CodeLog[]; running?: boolean; todo?: string; stop?: boolean;
+  log: CodeLog[]; running?: boolean; todo?: string; stop?: boolean; runnerJob?: RunnerJob;
 };
 
 export const newCodeProject = (chatId: string, name: string): CodeProject => ({
