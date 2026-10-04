@@ -51,7 +51,7 @@ export async function pickRoster(llm: LlmFn, brief: string, ctx: string): Promis
     personaOf(byId("chief")!),
     `Pick the team (5-9 members) that this person or company needs, from the roster. Cover leadership, the skills that fit their business, and the computer / coding / video specialists when relevant. Reply with JSON only: {"members":["id", ...]}\n\nROSTER (id|name|title):\n${roster}\n\nWHAT THEY TOLD YOU:\n${brief}${ctx ? `\n\nKnown about the user:${ctx.slice(0, 1000)}` : ""}`
   );
-  const raw = parseJson(reply);
+  const raw: any = parseJson(reply);
   let ids: string[] = Array.from(new Set((Array.isArray(raw?.members) ? raw.members : []).map(String))).filter((id) => Boolean(byId(id))) as string[];
   if (!ids.includes("chief")) ids.unshift("chief");
   if (ids.length < 3) ids = ["chief", "compass", "sprint", "sage", "forge", "quill"];
