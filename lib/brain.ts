@@ -43,7 +43,8 @@ export async function addMemory(uid: string, text: string, auto = false): Promis
   }
   const mem: Memory = { id: "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, at: Date.now(), ...(auto ? { auto: true } : {}) };
   let next = [...items, mem];
-  if (next.length > 200) { // when full, forget the oldest auto-learned fact first, never the ones the user typed
+  if (next.length > 200) {
+    // when full, forget the oldest auto-learned fact first, never one the user typed
     const drop = next.find((i) => i.auto && i.id !== mem.id) ?? next[0];
     next = next.filter((i) => i.id !== drop.id);
   }
