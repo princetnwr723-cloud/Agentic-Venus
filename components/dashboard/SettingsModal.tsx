@@ -1,31 +1,25 @@
-// SAVE AS: components/dashboard/SettingsModal.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { X, ExternalLink } from "lucide-react";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { useKeys } from "@/lib/keys-context";
 
 function mask(key?: string | null) {
   if (!key) return null;
+  if (key.startsWith("vault:")) {
+    const hint = key.split("#")[1];
+    return hint ? `••••${hint}` : "••••";
+  }
   return key.length <= 6 ? "••••" : `••••${key.slice(-4)}`;
 }
 
-export default function SettingsModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
+export default function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { apiKeys, e2bKey, saveProviderKey, saveE2bKey } = useKeys();
   const [drafts, setDrafts] = useState<Partial<Record<ProviderId, string>>>({});
   const [e2bDraft, setE2bDraft] = useState("");
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
-
-  useEffect(() => {
-    setE2bDraft(e2bKey ?? "");
-  }, [e2bKey]);
+  const [error, setError] = useState<string | null>(null);
 
   if (!open) return null;
 
@@ -37,39 +31,35 @@ export default function SettingsModal({
   async function handleSaveProvider(id: ProviderId) {
     const value = (drafts[id] ?? "").trim();
     if (!value) return;
-    await saveProviderKey(id, value);
-    setDrafts((d) => ({ ...d, [id]: "" }));
-    flash(id);
+    setError(null);
+    try {
+      await saveProviderKey(id, value);
+      setDrafts((d) => ({ ...d, [id]: "" }));
+      flash(id);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not save the key."); }
   }
 
   async function handleSaveE2b() {
     if (!e2bDraft.trim()) return;
-    await saveE2bKey(e2bDraft.trim());
-    flash("e2b");
+    setError(null);
+    try {
+      await saveE2bKey(e2bDraft.trim());
+      setE2bDraft("");
+      flash("e2b");
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not save the key."); }
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4"
-      onClick={onClose}
-    >
-      <div
-        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl2 border border-line bg-panel p-6"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl2 border border-line bg-panel p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-1 flex items-center justify-between">
           <h2 className="text-sm font-medium text-ink">API keys</h2>
-          <button
-            onClick={onClose}
-            className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"
-          >
-            <X size={18} />
-          </button>
+          <button onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
         <p className="mb-5 text-xs leading-relaxed text-muted">
-          Add at least one AI provider to start chatting. Keys are stored on
-          your account, scoped so only you can read them back.
+          Add at least one AI provider to start chatting. Keys are encrypted on the server — your browser only keeps a masked reference, so a key can&apos;t be read back, only replaced.
         </p>
+        {error && <p className="mb-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{error}</p>}
 
         <div className="space-y-3">
           {PROVIDERS.map((p) => (
@@ -77,36 +67,17 @@ export default function SettingsModal({
               <div className="mb-1.5 flex items-center justify-between">
                 <span className="text-sm text-ink">{p.label}</span>
                 <div className="flex items-center gap-2">
-                  {apiKeys[p.id] && (
-                    <span className="text-[11px] text-avatar-teal">
-                      Connected · {mask(apiKeys[p.id])}
-                    </span>
-                  )}
-                  <a
-                    href={p.keysUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-faint hover:text-muted"
-                    title="Get a key"
-                  >
-                    <ExternalLink size={13} />
-                  </a>
+                  {apiKeys[p.id] && <span className="text-[11px] text-avatar-teal">Connected · {mask(apiKeys[p.id])}</span>}
+                  <a href={p.keysUrl} target="_blank" rel="noreferrer" className="text-faint hover:text-muted" title="Get a key"><ExternalLink size={13} /></a>
                 </div>
               </div>
               <div className="flex gap-2">
                 <input
-                  type="password"
-                  placeholder={p.placeholder}
-                  value={drafts[p.id] ?? ""}
-                  onChange={(e) =>
-                    setDrafts((d) => ({ ...d, [p.id]: e.target.value }))
-                  }
+                  type="password" placeholder={apiKeys[p.id] ? "Paste a new key to replace it" : p.placeholder}
+                  value={drafts[p.id] ?? ""} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
                   className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
                 />
-                <button
-                  onClick={() => handleSaveProvider(p.id)}
-                  className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90"
-                >
+                <button onClick={() => handleSaveProvider(p.id)} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90">
                   {savedFlash === p.id ? "Saved" : "Save"}
                 </button>
               </div>
@@ -118,38 +89,20 @@ export default function SettingsModal({
 
         <h3 className="mb-1.5 text-sm text-ink">Computer (E2B)</h3>
         <p className="mb-3 text-xs leading-relaxed text-muted">
-          One shared computer for the whole account — every chat can use it.
-          Add your key once — get one at{" "}
-          <a
-            href="https://e2b.dev/dashboard"
-            target="_blank"
-            rel="noreferrer"
-            className="underline"
-          >
-            e2b.dev
-          </a>{" "}
-          (no credit card needed).
+          One shared computer for the whole account — every chat can use it. Add your key once — get one at{" "}
+          <a href="https://e2b.dev/dashboard" target="_blank" rel="noreferrer" className="underline">e2b.dev</a> (no credit card needed).
         </p>
         <div className="flex gap-2">
           <input
-            type="password"
-            placeholder="e2b_..."
-            value={e2bDraft}
-            onChange={(e) => setE2bDraft(e.target.value)}
+            type="password" placeholder={e2bKey ? "Paste a new key to replace it" : "e2b_..."}
+            value={e2bDraft} onChange={(e) => setE2bDraft(e.target.value)}
             className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
           />
-          <button
-            onClick={handleSaveE2b}
-            className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90"
-          >
+          <button onClick={handleSaveE2b} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90">
             {savedFlash === "e2b" ? "Saved" : "Save"}
           </button>
         </div>
-        {e2bKey && (
-          <p className="mt-1.5 text-[11px] text-avatar-teal">
-            Connected · {mask(e2bKey)}
-          </p>
-        )}
+        {e2bKey && <p className="mt-1.5 text-[11px] text-avatar-teal">Connected · {mask(e2bKey)}</p>}
       </div>
     </div>
   );
