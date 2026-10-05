@@ -7,6 +7,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { connect, GONE_PREFIX, pauseSandbox } from "@/lib/e2b-server";
 import { runnerStatus, stopRunner, type RunnerEvent, type RunnerState } from "@/lib/runner-server";
 import { createSignedDownload } from "@/lib/supabase-server";
+import { resolveValue } from "@/lib/vault";
 import { http } from "@/lib/tools/net";
 import { unpack } from "@/lib/tools/catalog";
 
@@ -31,7 +32,8 @@ async function postChat(userRef: Ref, chatId: string, content: string) {
 
 async function telegram(userRef: Ref, chatId: string, text: string) {
   try {
-    const c = ((await userRef.collection("chats").doc(chatId).get()).data() as { connectors?: Record<string, string> } | undefined)?.connectors?.telegram;
+    const raw = ((await userRef.collection("chats").doc(chatId).get()).data() as { connectors?: Record<string, string> } | undefined)?.connectors?.telegram;
+    const c = raw ? await resolveValue(userRef.id, raw) : undefined;
     if (!c) return;
     const [token, chat] = unpack(c);
     if (token && chat) await http(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chat, text: text.slice(0, 3500) }) });
@@ -49,7 +51,10 @@ export async function POST(req: Request) {
     const out: Array<Record<string, unknown>> = [];
     const keyCache = new Map<string, string | undefined>();
     const e2bFor = async (userRef: Ref) => {
-      if (!keyCache.has(userRef.path)) keyCache.set(userRef.path, ((await userRef.get()).data() as { e2bKey?: string } | undefined)?.e2bKey);
+      if (!keyCache.has(userRef.path)) {
+        const raw = ((await userRef.get()).data() as { e2bKey?: string } | undefined)?.e2bKey;
+        keyCache.set(userRef.path, raw ? await resolveValue(userRef.id, raw) : undefined);
+      }
       return keyCache.get(userRef.path);
     };
 
