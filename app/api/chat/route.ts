@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { callWithFallback, type ChatMsg, type Fallback } from "@/lib/ai-providers-server";
+import { readBody } from "@/lib/request";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -7,7 +8,7 @@ export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const body = await readBody(req);
     const { provider, apiKey, model, messages, systemPrompt }: {
       provider: ProviderId; apiKey: string; model: string; messages: ChatMsg[]; systemPrompt?: string;
     } = body;
