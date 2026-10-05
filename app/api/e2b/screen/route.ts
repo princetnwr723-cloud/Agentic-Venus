@@ -1,18 +1,15 @@
-// SAVE AS: app/api/e2b/screen/route.ts
 import { NextResponse } from "next/server";
 import { getScreenUrl } from "@/lib/e2b-server";
+import { readBody } from "@/lib/request";
 
 export const maxDuration = 60;
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   try {
-    const { apiKey, sandboxId } = await req.json();
+    const { apiKey, sandboxId } = await readBody(req);
     if (!apiKey || !sandboxId) {
-      return NextResponse.json(
-        { error: "Missing E2B API key or sandbox id." },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing E2B API key or sandbox id." }, { status: 400 });
     }
     const url = await getScreenUrl(apiKey, sandboxId);
     return NextResponse.json({ url });
