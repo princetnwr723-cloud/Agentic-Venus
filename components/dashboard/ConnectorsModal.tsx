@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { ExternalLink, X } from "lucide-react";
-import { FREE_PACK, PLUGINS, safeId, unpack } from "@/lib/tools/catalog";
+import { FREE_PACK, PLUGINS, safeId } from "@/lib/tools/catalog";
 
 type TestResult = { ok: boolean; label?: string; error?: string };
 
@@ -75,7 +75,7 @@ export default function ConnectorsModal({
             <button key={k} onClick={() => setTab(k)} className={`flex-1 rounded-full px-3 py-1.5 ${tab === k ? "bg-white font-medium text-bg" : "text-muted"}`}>{l}</button>
           ))}
         </div>
-        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Anything that sends or changes something outside asks for your approval first.</p>
+        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Tokens are stored encrypted. Anything that sends or changes something outside asks for your approval first.</p>
 
         {tab === "plugins" ? (
           <div className="space-y-3">
@@ -104,7 +104,6 @@ export default function ConnectorsModal({
                     <>
                       <div className="mt-2 flex items-center gap-3">
                         <button onClick={() => onSave(p.id, "")} className="rounded-md border border-line px-3 py-1.5 text-xs text-ink hover:bg-panel2">Disconnect</button>
-                        {p.id === "telegram" && <span className="text-[11px] text-faint">chat {unpack(connectors[p.id])[1]}</span>}
                       </div>
                       {hasWrite && <Toggle id={p.id} label="Don't ask before write actions (✎) — only if you trust this chat" />}
                     </>
@@ -113,7 +112,11 @@ export default function ConnectorsModal({
                       {p.fields.map((fl, i) => (
                         <input key={fl.key} type={fl.secret ? "password" : "text"} placeholder={fl.placeholder} value={vals[i]} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: vals.map((v, j) => (j === i ? e.target.value : v)) }))} className={box} />
                       ))}
-                      <button disabled={busy === p.id || vals.some((v) => !v.trim())} onClick={async () => { if (await connect(p.id, vals.map((v) => v.trim()).join("::"))) setDrafts((d) => ({ ...d, [p.id]: p.fields.map(() => "") })); }} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === p.id ? "Checking…" : "Connect"}</button>
+                      <button
+                        disabled={busy === p.id || vals.some((v) => !v.trim())}
+                        onClick={async () => { if (await connect(p.id, vals.map((v) => v.trim()).join("::") || "on")) setDrafts((d) => ({ ...d, [p.id]: p.fields.map(() => "") })); }}
+                        className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50"
+                      >{busy === p.id ? "Checking…" : p.fields.length === 0 ? "Turn on" : "Connect"}</button>
                     </div>
                   )}
                   {msg[p.id] && <p className="mt-1.5 text-[11px] text-muted">{msg[p.id]}</p>}
@@ -127,19 +130,16 @@ export default function ConnectorsModal({
           </div>
         ) : (
           <div className="space-y-3">
-            {custom.map((k) => {
-              const cfg = (() => { try { return JSON.parse(connectors[k]); } catch { return {}; } })() as { url?: string; baseUrl?: string };
-              return (
-                <div key={k} className="rounded-lg border border-line p-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-ink">{k.startsWith("mcp:") ? "MCP" : "API"} · {k.slice(4)}</span>
-                    <button onClick={() => onSave(k, "")} className="text-xs text-faint hover:text-red-400">Disconnect</button>
-                  </div>
-                  <p className="mt-1 truncate text-[11px] text-muted">{cfg.url ?? cfg.baseUrl}</p>
-                  <Toggle id={k} label="Don't ask before write actions" />
+            {custom.map((k) => (
+              <div key={k} className="rounded-lg border border-line p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-ink">{k.startsWith("mcp:") ? "MCP" : "API"} · {k.slice(4)}</span>
+                  <button onClick={() => onSave(k, "")} className="text-xs text-faint hover:text-red-400">Disconnect</button>
                 </div>
-              );
-            })}
+                <p className="mt-1 text-[11px] text-muted">Stored encrypted. Disconnect and add it again to change it.</p>
+                <Toggle id={k} label="Don't ask before write actions" />
+              </div>
+            ))}
 
             <div className="rounded-lg border border-line p-3">
               <div className="mb-2 flex gap-1.5">
