@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect, exec } from "@/lib/e2b-server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { q, wsRoot } from "@/lib/code-server";
 
 export const runtime = "nodejs";
@@ -13,8 +13,7 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").repla
 export async function POST(req: Request) {
   const t0 = Date.now();
   try {
-    const b = await req.json();
-    await verifyUser(req, b.uid);
+    const b = await readBody(req);
     const e2bKey = String(b.e2bKey || "");
     const sandboxId = String(b.sandboxId || "");
     const token = String(b.vercelToken || "").trim();
