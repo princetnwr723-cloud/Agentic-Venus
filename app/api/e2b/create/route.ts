@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createSandbox, loadSdk } from "@/lib/e2b-server";
+import { readBody } from "@/lib/request";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,7 +19,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { apiKey } = await req.json();
+    const { apiKey } = await readBody(req);
     if (!apiKey) {
       return NextResponse.json({ error: "No E2B API key on file." }, { status: 400 });
     }
