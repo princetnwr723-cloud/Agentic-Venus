@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { runWebAgent } from "@/lib/agent-server";
+import { resolveValue } from "@/lib/vault";
 import type { Fallback } from "@/lib/ai-providers-server";
 import type { ProviderId } from "@/lib/providers";
 
@@ -11,6 +12,7 @@ const FALLBACK_MODEL: Partial<Record<ProviderId, string>> = {
   grok: "grok-4-fast", deepseek: "deepseek-chat", mistral: "mistral-small-latest", groq: "llama-3.3-70b-versatile",
 };
 
+// No per-user session here: your own scheduler (GitHub Actions) calls it with a shared secret.
 export async function POST(req: Request) {
   const t0 = Date.now();
   if (!process.env.ROUTINE_RUNNER_SECRET) {
@@ -44,14 +46,15 @@ export async function POST(req: Request) {
         const userData = userSnap.data() as { apiKeys?: Partial<Record<ProviderId, string>> } | undefined;
         const chat = chatSnap.data() as { provider: ProviderId; model: string; messages?: unknown[] } | undefined;
         if (!chat) throw new Error("Chat this routine belongs to was deleted.");
-        const keys = userData?.apiKeys ?? {};
-        const apiKey = keys[chat.provider];
-        if (!apiKey) throw new Error(`No saved key for ${chat.provider}.`);
 
-        const fallbacks: Fallback[] = (Object.keys(keys) as ProviderId[])
-          .filter((p) => p !== chat.provider && keys[p] && FALLBACK_MODEL[p])
-          .slice(0, 2)
-          .map((p) => ({ provider: p, apiKey: keys[p] as string, model: FALLBACK_MODEL[p] as string }));
+        // Keys are stored encrypted ("vault:..."): decrypt on the server only.
+        const keys = userData?.apiKeys ?? {};
+        if (!keys[chat.provider]) throw new Error(`No saved key for ${chat.provider}.`);
+        const apiKey = await resolveValue(userRef.id, keys[chat.provider] as string);
+        const fbIds = (Object.keys(keys) as ProviderId[]).filter((p) => p !== chat.provider && keys[p] && FALLBACK_MODEL[p]).slice(0, 2);
+        const fallbacks: Fallback[] = await Promise.all(
+          fbIds.map(async (p) => ({ provider: p, apiKey: await resolveValue(userRef.id, keys[p] as string), model: FALLBACK_MODEL[p] as string }))
+        );
 
         const mems = ((memSnap.data() as { items?: Array<{ text: string }> } | undefined)?.items ?? []).slice(-15).map((m) => `- ${m.text}`).join("\n");
 
@@ -84,6 +87,8 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ checked: due.size, results });
   } catch (err) {
+    // Most common causes: missing Firebase Admin env vars, or Firestore needing a composite index
+    // (the message then contains a "create index" link — open it, wait a minute, and it works).
     return NextResponse.json({ error: err instanceof Error ? err.message : "Routine runner failed." }, { status: 500 });
   }
 }
