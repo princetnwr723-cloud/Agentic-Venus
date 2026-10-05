@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
-import { authFromRequest } from "@/lib/job-token";
 import { getAdminDb } from "@/lib/firebase-admin";
+import { readBody } from "@/lib/request";
+import { audit } from "@/lib/audit";
+import { resolveDeep, vaultPut } from "@/lib/vault";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
+import type { ToolCtx } from "@/lib/tools/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
-
-const hasAdmin = () => Boolean(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
 
 function clean(v: unknown): Record<string, string> {
   const out: Record<string, string> = {};
@@ -16,23 +17,32 @@ function clean(v: unknown): Record<string, string> {
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const auth = await authFromRequest(req, body.uid);
-    const chatId = auth.chatId ?? String(body.chatId || "");
+    const body = await readBody(req, { allowJob: true });
+    const uid = String(body.uid);
+    const chatId = String(body.chatId || "");
+    if (!chatId) return NextResponse.json({ ok: false, text: "chatId is missing." }, { status: 400 });
 
-    let connectors: Record<string, string>;
-    if (hasAdmin() && chatId) {
-      const snap = await getAdminDb().collection("users").doc(auth.uid).collection("chats").doc(chatId).get();
-      connectors = clean((snap.data() as { connectors?: unknown } | undefined)?.connectors);
-    } else if (auth.job) {
-      return NextResponse.json({ error: "Background jobs need the Firebase Admin env vars (same ones Routines use)." }, { status: 500 });
-    } else {
-      connectors = clean(body.connectors);
-    }
+    // Connectors are ALWAYS read from the server's copy (the client cannot inject its own), then decrypted here.
+    const chatRef = getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
+    const snap = await chatRef.get();
+    const stored = clean((snap.data() as { connectors?: unknown } | undefined)?.connectors);
+    const connectors = (await resolveDeep(uid, { connectors: stored })).connectors;
 
     if (body.action === "list") return NextResponse.json(await buildCatalog(connectors));
+
     if (body.action === "call") {
-      const r = await callTool(connectors, String(body.name || ""), body.args, body.approved === true);
+      const ctx: ToolCtx = {
+        uid, chatId,
+        save: async (key, value) => {
+          const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.${key.toLowerCase().replace(/[^a-z0-9:]+/g, "_")}`, value);
+          await chatRef.update({ [`connectors.${key}`]: ph });
+        },
+      };
+      const name = String(body.name || "");
+      const r = await callTool(connectors, name, body.args, body.approved === true, { force: body.force === true, ctx });
+      if (r.ok && r.risk === "write") {
+        await audit(uid, { kind: "tool_write", chatId, text: `${name} ${JSON.stringify(body.args ?? {}).slice(0, 220)} approved=${body.approved === true} tainted=${body.force === true}` });
+      }
       return NextResponse.json(r);
     }
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
