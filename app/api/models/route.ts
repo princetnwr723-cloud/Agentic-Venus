@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { fetchModels, NO_LISTING } from "@/lib/model-catalog-server";
+import { readBody } from "@/lib/request";
 import type { ProviderId } from "@/lib/providers";
 
 export async function POST(req: Request) {
   try {
-    const { provider, apiKey }: { provider: ProviderId; apiKey: string } = await req.json();
+    const { provider, apiKey }: { provider: ProviderId; apiKey: string } = await readBody(req);
     if (!apiKey) {
       return NextResponse.json({ error: "Missing API key." }, { status: 400 });
     }
