@@ -1,4 +1,4 @@
-import { assertPublicUrl } from "./net";
+import { assertPublicUrl, safeFetch } from "./net";
 
 export type McpTool = {
   name: string; description?: string;
@@ -14,13 +14,13 @@ function authHeaders(auth?: string): Record<string, string> {
   return { Authorization: /^bearer\s/i.test(a) ? a : `Bearer ${a}` };
 }
 
+// Every hop goes through safeFetch: the host is resolved and checked, redirects can't lead into a private network.
 async function post(url: string, headers: Record<string, string>, body: unknown, session?: string) {
-  const res = await fetch(url, {
+  const res = await safeFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers, ...(session ? { "Mcp-Session-Id": session } : {}) },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(25_000),
-  });
+  }, 25_000);
   const text = await res.text();
   if (!res.ok && res.status !== 202) throw new Error(`MCP server answered ${res.status}: ${text.slice(0, 200)}`);
   return { sid: res.headers.get("mcp-session-id") ?? session ?? undefined, ct: res.headers.get("content-type") ?? "", text };
