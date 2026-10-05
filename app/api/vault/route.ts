@@ -71,21 +71,36 @@ export async function POST(req: Request) {
           apiKeys?: Record<string, string>; e2bKey?: string; pcCredentials?: Record<string, { email: string; password: string }>;
         };
         const set: Record<string, unknown> = {};
+
+        // provider API keys
+        let keys: Record<string, string> | null = null;
         for (const [p, v] of Object.entries(data.apiKeys ?? {})) {
-          if (typeof v === "string" && v.trim() && !isPlaceholder(v) && PROVIDER.test(p)) {
-            set.apiKeys = { ...(set.apiKeys as object), [p]: await vaultPut(uid, `provider.${p}`, v.trim(), true) }; n++;
-          }
+          const val = typeof v === "string" ? v.trim() : "";
+          if (!val || isPlaceholder(val) || !PROVIDER.test(p)) continue;
+          keys = { ...(keys ?? {}), [p]: await vaultPut(uid, `provider.${p}`, val, true) };
+          n++;
         }
-        if (typeof data.e2bKey === "string" && data.e2bKey.trim() && !isPlaceholder(data.e2bKey)) { set.e2bKey = await vaultPut(uid, "e2b", data.e2bKey.trim(), true); n++; }
+        if (keys) set.apiKeys = keys;
+
+        // E2B key
+        const e2b = typeof data.e2bKey === "string" ? data.e2bKey.trim() : "";
+        if (e2b && !isPlaceholder(e2b)) { set.e2bKey = await vaultPut(uid, "e2b", e2b, true); n++; }
+
+        // saved site logins
+        let creds: Record<string, { email: string; password: string }> | null = null;
         for (const [site, c] of Object.entries(data.pcCredentials ?? {})) {
-          if (c && typeof c.email === "string" && typeof c.password === "string" && !(isPlaceholder(c.email) && isPlaceholder(c.password)) && SITE.test(site)) {
-            const e = isPlaceholder(c.email) ? c.email : await vaultPut(uid, `cred.${site}.e`, c.email);
-            const p = isPlaceholder(c.password) ? c.password : await vaultPut(uid, `cred.${site}.p`, c.password);
-            set.pcCredentials = { ...(set.pcCredentials as object), [site]: { email: e, password: p } }; n++;
-          }
+          const em = typeof c?.email === "string" ? c.email : "";
+          const pw = typeof c?.password === "string" ? c.password : "";
+          if (!em || !pw || !SITE.test(site) || (isPlaceholder(em) && isPlaceholder(pw))) continue;
+          const e = isPlaceholder(em) ? em : await vaultPut(uid, `cred.${site}.e`, em);
+          const p = isPlaceholder(pw) ? pw : await vaultPut(uid, `cred.${site}.p`, pw);
+          creds = { ...(creds ?? {}), [site]: { email: e, password: p } };
+          n++;
         }
+        if (creds) set.pcCredentials = creds;
         if (Object.keys(set).length) await userRef.set(set, { merge: true });
 
+        // connector tokens inside each chat
         const chats = await userRef.collection("chats").get();
         for (const ch of chats.docs) {
           const conn = ((ch.data() as { connectors?: Record<string, string> }).connectors ?? {});
@@ -94,7 +109,8 @@ export async function POST(req: Request) {
           for (const [k, v] of Object.entries(conn)) {
             if (k.startsWith("auto:") || typeof v !== "string" || !v || isPlaceholder(v)) continue;
             next[k] = await vaultPut(uid, `conn.${ch.id.toLowerCase()}.${safeKind(k)}`, v, false);
-            changed = true; n++;
+            changed = true;
+            n++;
           }
           if (changed) await ch.ref.update({ connectors: next });
         }
