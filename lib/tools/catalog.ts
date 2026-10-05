@@ -43,6 +43,15 @@ export const PLUGINS: PluginMeta[] = [
     tools: [{ name: "webhook.send", risk: "write" }],
   },
   {
+    id: "identity", label: "Agent email (identity)",
+    note: "Gives the agent its OWN free temporary inbox to sign up for services and read verification codes and links. It is not your email.",
+    fields: [],
+    tools: [
+      { name: "identity.inbox", risk: "read" }, { name: "identity.list_mail", risk: "read" },
+      { name: "identity.read_mail", risk: "read" }, { name: "identity.wait_for_mail", risk: "read" },
+    ],
+  },
+  {
     id: "vercel", label: "Vercel (deploy)",
     note: "Lets /deploy publish your site. Not an agent tool.",
     keysUrl: "https://vercel.com/account/tokens",
