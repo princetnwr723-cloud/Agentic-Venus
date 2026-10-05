@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
+import { readBody } from "@/lib/request";
 import { directorPrompt, editPrompt, reviewPrompt, sceneCodePrompt } from "@/lib/venus-prompts";
 import { checkCode, sanitizeScene, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
@@ -21,7 +22,7 @@ const PATCH_KEYS = new Set(["fontScale", "transition", "headline", "subhead", "t
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const body = await readBody(req);
     const provider = body.provider as ProviderId;
     const apiKey = String(body.apiKey || "");
     const model = String(body.model || "");
