@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect, createSandbox, exec } from "@/lib/e2b-server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { createSignedUpload } from "@/lib/supabase-server";
 import { DIR, jobStatus, prepareProject, safeId, setupStudio, startJob, studioState, writeBinary } from "@/lib/venus-server";
 import { sanitizeStoryboard } from "@/lib/venus-schema";
@@ -12,7 +12,7 @@ const fail = (message: string, status = 500) => NextResponse.json({ error: messa
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const body = await readBody(req);
     const action = String(body.action || "");
     const e2bKey = String(body.e2bKey || "");
     if (!e2bKey) return fail("E2B key missing.", 400);
@@ -42,7 +42,6 @@ export async function POST(req: Request) {
 
       // One scene at a time: a stock photo (image scenes) or a stock video clip (footage scenes).
       case "assets": {
-        await verifyUser(req, body.uid);
         const pid = safeId(body.projectId);
         const key = process.env.PEXELS_API_KEY;
         if (!key) return NextResponse.json({ skipped: true });
@@ -167,7 +166,7 @@ base64 -w0 sheet.jpg`;
       }
 
       case "upload": {
-        const { uid } = await verifyUser(req, body.uid);
+        const uid = String(body.uid);
         const pid = safeId(body.projectId);
         const kind = ["final", "scene"].includes(String(body.kind)) ? String(body.kind) : "preview";
         const objectPath = `${uid}/${pid}/${kind}.mp4`;
