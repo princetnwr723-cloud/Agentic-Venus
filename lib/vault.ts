@@ -17,7 +17,9 @@ const docId = (uid: string, name: string) => createHash("sha256").update(`${uid}
 const aad = (uid: string, name: string) => Buffer.from(`${uid}:${name}`);
 const col = (uid: string) => getAdminDb().collection("users").doc(uid).collection("vault");
 
-export const isPlaceholder = (v: unknown): v is string => typeof v === "string" && PLACEHOLDER_RE.test(v);
+// NOTE: a plain boolean on purpose. As a type guard ("v is string") TypeScript narrows the
+// negated branch to `never`, which broke `v.trim()` after `!isPlaceholder(v)`.
+export const isPlaceholder = (v: unknown): boolean => typeof v === "string" && PLACEHOLDER_RE.test(v);
 
 export async function vaultPut(uid: string, name: string, value: string, withHint = false): Promise<string> {
   if (!NAME_RE.test(name)) throw new Error("Bad secret name.");
@@ -61,7 +63,9 @@ export async function resolveValue(uid: string, v: string): Promise<string> {
 const SECRET_KEYS = new Set(["apiKey", "e2bKey", "vercelToken", "openaiKey", "password", "email", "token", "auth", "value"]);
 
 async function walk(uid: string, v: unknown, key: string, parent: string, depth: number): Promise<unknown> {
-  if (typeof v === "string") return (SECRET_KEYS.has(key) || parent === "connectors") && isPlaceholder(v) ? resolveValue(uid, v) : v;
+  if (typeof v === "string") {
+    return (SECRET_KEYS.has(key) || parent === "connectors") && isPlaceholder(v) ? resolveValue(uid, v) : v;
+  }
   if (depth > 6 || v === null || typeof v !== "object") return v;
   if (Array.isArray(v)) return Promise.all(v.map((x) => walk(uid, x, key, parent, depth + 1)));
   const out: Record<string, unknown> = {};
