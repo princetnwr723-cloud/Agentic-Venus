@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect } from "@/lib/e2b-server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { bundleHtml, serveStatus, startServe, stopServe } from "@/lib/preview-server";
 
 export const runtime = "nodejs";
@@ -10,8 +10,7 @@ const fail = (m: string, s = 500) => NextResponse.json({ error: m }, { status: s
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    await verifyUser(req, body.uid);
+    const body = await readBody(req);
     const action = String(body.action || "");
     const e2bKey = String(body.e2bKey || "");
     const sandboxId = String(body.sandboxId || "");
