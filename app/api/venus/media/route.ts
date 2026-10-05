@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { createSignedDownload, removeObjects, supabaseConfigured } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -16,8 +16,8 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { uid } = await verifyUser(req, body.uid);
+    const body = await readBody(req);
+    const uid = String(body.uid);
 
     if (body.action === "url") {
       const path = String(body.path || "");
