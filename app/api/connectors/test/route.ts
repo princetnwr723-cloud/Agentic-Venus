@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { assertPublicUrl, http } from "@/lib/tools/net";
 import { mcpList } from "@/lib/tools/mcp-client";
 import { unpack } from "@/lib/tools/catalog";
@@ -12,8 +12,7 @@ const ok = (label?: string) => NextResponse.json({ ok: true, label });
 
 export async function POST(req: Request) {
   try {
-    const { uid, kind, token } = await req.json();
-    await verifyUser(req, uid);
+    const { kind, token } = await readBody(req);
     const t = String(token || "").trim();
     const k = String(kind || "");
     if (!t) return bad("Token is empty.");
@@ -41,6 +40,7 @@ export async function POST(req: Request) {
       const good = u.hostname === "hooks.slack.com" || u.hostname.endsWith("discord.com") || u.hostname.endsWith("discordapp.com");
       return good ? ok("webhook URL looks right (nothing was sent)") : bad("Use a Slack or Discord webhook URL.");
     }
+    if (k === "identity") return ok("temporary inbox is created on first use");
     if (k.startsWith("mcp:")) {
       let cfg: { url?: string; auth?: string } = {};
       try { cfg = JSON.parse(t); } catch { return bad("Bad MCP settings."); }
