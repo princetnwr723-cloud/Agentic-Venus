@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect } from "@/lib/e2b-server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { createSignedDownload } from "@/lib/supabase-server";
 import { BusyError, runnerStatus, startRunnerJob, stopRunner } from "@/lib/runner-server";
 import { answerPcJob, startPcJob } from "@/lib/pc-runner-server";
@@ -12,8 +12,8 @@ const fail = (m: string, s = 500) => NextResponse.json({ error: m }, { status: s
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { uid } = await verifyUser(req, body.uid);
+    const body = await readBody(req);
+    const uid = String(body.uid);
     const action = String(body.action || "");
     const e2bKey = String(body.e2bKey || "");
     const sandboxId = String(body.sandboxId || "");
