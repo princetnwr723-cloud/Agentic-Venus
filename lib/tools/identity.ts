@@ -20,8 +20,8 @@ const line = (m: any) => `id=${m.id} · from ${m.from?.address ?? "?"} · "${m.s
 
 function extract(text: string) {
   const codes = new Set<string>();
-  for (const l of text.split(/\n|(?<=[.!?])\s/)) {
-    if (/code|otp|verif|pin|confirm|passcode/i.test(l)) for (const m of l.matchAll(/\b\d{4,8}\b/g)) codes.add(m[0]);
+  for (const l of text.split(/\n|[.!?]\s/)) {
+    if (/code|otp|verif|pin|confirm|passcode/i.test(l)) for (const m of Array.from(l.matchAll(/\b\d{4,8}\b/g))) codes.add(m[0]);
   }
   const links = Array.from(new Set(text.match(/https?:\/\/[^\s<>")']+/g) ?? [])).slice(0, 8);
   return { codes: Array.from(codes).slice(0, 5), links };
