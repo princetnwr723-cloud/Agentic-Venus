@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect, exec } from "@/lib/e2b-server";
-import { verifyUser } from "@/lib/server-auth";
+import { readBody } from "@/lib/request";
 import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
 import { webRead, webSearch } from "@/lib/web-tools-server";
 import { DIR, safeId, writeBinary } from "@/lib/venus-server";
@@ -17,7 +17,8 @@ const fail = (m: string, s = 500) => NextResponse.json({ error: m }, { status: s
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const body = await readBody(req);
+    const uid = String(body.uid);
     const action = String(body.action || "");
 
     if (action === "web") {
@@ -41,9 +42,8 @@ export async function POST(req: Request) {
 
       case "ensure": {
         let restoreUrl: string | undefined;
-        if (body.backupPath) {
-          const { uid } = await verifyUser(req, body.uid);
-          if (String(body.backupPath).startsWith(uid + "/")) restoreUrl = await createSignedDownload(String(body.backupPath), 600).catch(() => undefined);
+        if (body.backupPath && String(body.backupPath).startsWith(uid + "/")) {
+          restoreUrl = await createSignedDownload(String(body.backupPath), 600).catch(() => undefined);
         }
         return NextResponse.json(await ensureWorkspace(sb, ws, restoreUrl));
       }
@@ -101,7 +101,6 @@ export async function POST(req: Request) {
       }
 
       case "backup": {
-        const { uid } = await verifyUser(req, body.uid);
         const id = wsRoot(ws).split("/").pop() as string;
         const objectPath = `${uid}/code/${id}.zip`;
         const up = await createSignedUpload(objectPath);
