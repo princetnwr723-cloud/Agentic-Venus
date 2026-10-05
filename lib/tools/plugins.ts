@@ -1,8 +1,8 @@
 import { webRead, webSearch } from "@/lib/web-tools-server";
 import { assertPublicUrl, http } from "./net";
-import type { Risk } from "./types";
+import type { Risk, ToolCtx } from "./types";
 
-type Run = (args: Record<string, unknown>, cred: string[]) => Promise<string>;
+type Run = (args: Record<string, unknown>, cred: string[], ctx?: ToolCtx) => Promise<string>;
 export type Def = { name: string; description: string; params: string; risk: Risk; run: Run };
 
 const s = (v: unknown) => String(v ?? "").trim();
