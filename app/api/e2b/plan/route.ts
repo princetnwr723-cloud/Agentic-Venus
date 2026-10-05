@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
+import { readBody } from "@/lib/request";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -7,7 +8,7 @@ export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
-    const { provider, apiKey, model, task, context } = (await req.json()) as {
+    const { provider, apiKey, model, task, context } = (await readBody(req)) as {
       provider: ProviderId; apiKey: string; model: string; task: string; context?: string;
     };
     if (!provider || !apiKey || !model || !task) return NextResponse.json({ error: "Missing fields." }, { status: 400 });
