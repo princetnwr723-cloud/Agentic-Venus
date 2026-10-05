@@ -1,6 +1,5 @@
-// Server-only. Confirms who is calling when the Firebase Admin env vars exist
-// (the same ones the Routines feature uses). Without them it falls back to the
-// uid sent by the browser — fine for a personal beta, not for a public launch.
+// Server-only. Confirms who is calling. No more "trust the uid the browser sent".
+// Local development without Firebase Admin env vars: set ALLOW_INSECURE_DEV=1 (never in production).
 
 export async function verifyUser(req: Request, fallbackUid?: unknown): Promise<{ uid: string; verified: boolean }> {
   const projectId = process.env.FIREBASE_PROJECT_ID;
@@ -17,7 +16,10 @@ export async function verifyUser(req: Request, fallbackUid?: unknown): Promise<{
     return { uid: decoded.uid, verified: true };
   }
 
-  const uid = String(fallbackUid ?? "").replace(/[^A-Za-z0-9_-]/g, "");
-  if (!uid) throw new Error("User id missing.");
-  return { uid, verified: false };
+  if (process.env.ALLOW_INSECURE_DEV === "1") {
+    const uid = String(fallbackUid ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+    if (!uid) throw new Error("User id missing.");
+    return { uid, verified: false };
+  }
+  throw new Error("Server auth is not configured: set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in Vercel.");
 }
