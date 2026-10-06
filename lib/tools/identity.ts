@@ -2,40 +2,53 @@ import { randomBytes } from "crypto";
 import { cut, http } from "./net";
 import type { Def } from "./plugins";
 
-// Free temporary mailbox API (mail.tm). If the provider ever changes its API, only this file changes.
-const BASE = "https://api.mail.tm";
+// Free temporary mailboxes. mail.tm and mail.gw share one API: if one is down or blocks the server, the other is tried.
+const PROVIDERS = ["https://api.mail.tm", "https://api.mail.gw"];
+const HDR = { Accept: "application/ld+json, application/json", "User-Agent": "Mozilla/5.0 agenticvenus" };
 const members = (j: any): any[] => j?.["hydra:member"] ?? j?.member ?? (Array.isArray(j) ? j : []);
 const strip = (s: string) => s.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 
+// credential = address::password::provider-base  (older 2-part credentials mean mail.tm)
 export const inboxPair = (cred: string[]): [string, string] | null => (cred[0] && cred[0] !== "on" && cred[1] ? [cred[0], cred[1]] : null);
+const baseOf = (cred: string[]) => (PROVIDERS.includes(cred[2]) ? cred[2] : PROVIDERS[0]); // never trust an arbitrary base
 export type MailRow = { id: string; from: string; domain: string; subject: string; at: string; intro: string };
 export type MailFull = MailRow & { body: string; codes: string[]; links: string[] };
 
 export const domainOf = (addr: string) => (addr.split("@")[1] ?? "").toLowerCase().split(".").slice(-2).join(".") || "unknown";
 const row = (m: any): MailRow => ({ id: m.id, from: m.from?.address ?? "?", domain: domainOf(m.from?.address ?? ""), subject: m.subject ?? "", at: m.createdAt ?? "", intro: String(m.intro ?? "").slice(0, 160) });
 
-export async function openInbox(cred: string[]): Promise<{ address: string; headers: Record<string, string> }> {
+export async function openInbox(cred: string[]): Promise<{ address: string; base: string; headers: Record<string, string> }> {
   const p = inboxPair(cred);
   if (!p) throw new Error("The agent has no inbox yet — call identity.inbox first.");
-  const r = await http(`${BASE}/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: p[0], password: p[1] }) });
-  if (r.status >= 400 || !r.json?.token) throw new Error("Could not open the inbox (it may have expired). Create a new one from the agent's identity panel.");
-  return { address: p[0], headers: { Authorization: `Bearer ${r.json.token}` } };
+  const base = baseOf(cred);
+  const r = await http(`${base}/token`, { method: "POST", headers: { ...HDR, "Content-Type": "application/json" }, body: JSON.stringify({ address: p[0], password: p[1] }) });
+  if (r.status >= 400 || !r.json?.token) throw new Error(`Could not open the inbox (HTTP ${r.status}). It may have expired: create a new one from the agent's identity panel.`);
+  return { address: p[0], base, headers: { ...HDR, Authorization: `Bearer ${r.json.token}` } };
 }
 
-export async function createInbox(): Promise<{ address: string; password: string }> {
-  const d = await http(`${BASE}/domains`);
-  const domain = members(d.json)[0]?.domain;
-  if (!domain) throw new Error("The mailbox service has no domain available right now.");
-  const address = `agent.${randomBytes(5).toString("hex")}@${domain}`;
-  const password = randomBytes(18).toString("base64url");
-  const c = await http(`${BASE}/accounts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address, password }) });
-  if (c.status >= 400) throw new Error(`Could not create the inbox (HTTP ${c.status}).`);
-  return { address, password };
+export async function createInbox(): Promise<{ address: string; password: string; base: string }> {
+  const errors: string[] = [];
+  for (const base of PROVIDERS) {
+    const host = new URL(base).hostname;
+    try {
+      const d = await http(`${base}/domains?page=1`, { headers: HDR });
+      const domain = members(d.json).find((x: any) => x?.domain && x?.isActive !== false)?.domain;
+      if (!domain) { errors.push(`${host}: no domain (HTTP ${d.status})`); continue; }
+      const address = `agent.${randomBytes(5).toString("hex")}@${domain}`;
+      const password = randomBytes(18).toString("base64url");
+      const c = await http(`${base}/accounts`, { method: "POST", headers: { ...HDR, "Content-Type": "application/json" }, body: JSON.stringify({ address, password }) });
+      if (c.status >= 400) { errors.push(`${host}: account HTTP ${c.status}`); continue; }
+      return { address, password, base };
+    } catch (e) {
+      errors.push(`${host}: ${e instanceof Error ? e.message : "failed"}`);
+    }
+  }
+  throw new Error("Could not create an inbox. " + errors.join(" | "));
 }
 
 export async function listMail(cred: string[], limit = 15): Promise<MailRow[]> {
-  const { headers } = await openInbox(cred);
-  const r = await http(`${BASE}/messages?page=1`, { headers });
+  const { base, headers } = await openInbox(cred);
+  const r = await http(`${base}/messages?page=1`, { headers });
   return members(r.json).slice(0, limit).map(row);
 }
 
@@ -50,8 +63,8 @@ function extract(text: string) {
 
 export async function readMail(cred: string[], id: string): Promise<MailFull> {
   if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error("Bad message id.");
-  const { headers } = await openInbox(cred);
-  const r = await http(`${BASE}/messages/${id}`, { headers });
+  const { base, headers } = await openInbox(cred);
+  const r = await http(`${base}/messages/${id}`, { headers });
   if (r.status >= 400) throw new Error("Message not found.");
   const j = r.json;
   const body = String(j?.text || strip(Array.isArray(j?.html) ? j.html.join(" ") : String(j?.html ?? "")));
@@ -70,7 +83,7 @@ export const IDENTITY_TOOLS: Def[] = [
       if (p) return `Agent inbox: ${p[0]}`;
       if (!ctx) throw new Error("An inbox can't be created here.");
       const c = await createInbox();
-      await ctx.save("identity", `${c.address}::${c.password}`);
+      await ctx.save("identity", `${c.address}::${c.password}::${c.base}`);
       return `Created the agent's own inbox: ${c.address}. Free temporary mailbox: use it to sign up, then read mail with identity.wait_for_mail.`;
     },
   },
