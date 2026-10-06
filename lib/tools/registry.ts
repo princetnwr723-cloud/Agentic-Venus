@@ -1,5 +1,6 @@
 import { FREE_TOOLS, PLUGIN_TOOLS, type Def } from "./plugins";
 import { IDENTITY_TOOLS } from "./identity";
+import { VERIFY_TOOLS } from "./verify";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { assertPublicUrl, cut, http } from "./net";
 import { safeId, unpack } from "./catalog";
@@ -8,6 +9,7 @@ import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 
 type Conn = Record<string, string>;
 const ALL: Record<string, Def[]> = { ...PLUGIN_TOOLS, identity: IDENTITY_TOOLS };
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
@@ -35,7 +37,7 @@ const safeDesc = (d?: string) => {
 const toSpec = (d: Def, source: string): ToolSpec => ({ name: d.name, description: d.description, params: d.params, risk: d.risk, source });
 
 export async function buildCatalog(c: Conn): Promise<{ specs: ToolSpec[]; errors: string[] }> {
-  const specs: ToolSpec[] = FREE_TOOLS.map((d) => toSpec(d, "free"));
+  const specs: ToolSpec[] = ALL_FREE.map((d) => toSpec(d, "free"));
   const errors: string[] = [];
   for (const [id, defs] of Object.entries(ALL)) if (c[id]) specs.push(...defs.map((d) => toSpec(d, id)));
 
@@ -58,8 +60,12 @@ export async function buildCatalog(c: Conn): Promise<{ specs: ToolSpec[]; errors
   return { specs, errors };
 }
 
-/** Everything that came from outside goes through the shield. */
+/**
+ * Everything that came from outside goes through the shield.
+ * Exception: verify.* results are computed by OUR code (they contain no page text), so they stay plain and parseable.
+ */
 function good(text: string, source: string, risk: Risk, ok = true): ToolResult {
+  if (source.startsWith("verify.")) return { ok, text: cut(text, 20000), flagged: [], risk };
   const w = wrapUntrusted(cut(text), source);
   return { ok, text: w.text, flagged: w.flagged, risk };
 }
@@ -84,7 +90,7 @@ export async function callTool(
   const src = name.slice(0, dot), tool = name.slice(dot + 1);
   const mustAsk = (risk: Risk, auto: boolean) => risk === "write" && !approved && (opts.force === true || !auto);
 
-  const free = FREE_TOOLS.find((t) => t.name === name);
+  const free = ALL_FREE.find((t) => t.name === name);
   if (free) {
     try { return good(await free.run(args, []), name, "read"); }
     catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Tool failed." }; }
