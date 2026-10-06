@@ -1,4 +1,5 @@
 // Server-only. Lets the computer agent search the web and read pages as plain text.
+import { safeFetch } from "@/lib/tools/net";
 
 const UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -67,11 +68,12 @@ export async function webRead(url: string, maxChars = 4500): Promise<string> {
   }
 
   try {
-    const res = await fetch(u.toString(), {
-      headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,text/plain" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(15_000),
-    });
+    // safeFetch resolves the host and re-checks it on every redirect, so a page can't lead into a private network.
+    const res = await safeFetch(
+      u.toString(),
+      { headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,text/plain" } },
+      15_000
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const type = res.headers.get("content-type") ?? "";
     const raw = (await res.text()).slice(0, 600_000);
