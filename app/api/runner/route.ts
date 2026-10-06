@@ -64,6 +64,7 @@ export async function POST(req: Request) {
             maxSteps: Number(body.maxSteps) || undefined, proof: body.proof !== false,
             session: body.session, healSnapshot: typeof body.healSnapshot === "string" ? body.healSnapshot : undefined,
             startUrl: typeof body.startUrl === "string" ? body.startUrl : undefined,
+            contract: body.contract,
           });
           return NextResponse.json(r);
         } catch (e) {
