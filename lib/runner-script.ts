@@ -1,8 +1,10 @@
 // The background worker that runs INSIDE the E2B computer as a detached Node process.
 // It is a self-contained agent loop (LLM calls + tools), so it keeps working when the browser tab is closed.
+// v3: read-before-edit, plan gate, diagnostics after every edit, parallel read-only sub-agents,
+//     finish gates (tests/build, visual check, project memory, independent diff review), final commit.
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "2";
+export const RUNNER_VERSION = "3";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -19,6 +21,10 @@ const SH = BASE + "/sh";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 const stopped = () => fs.existsSync(BASE + "/stop");
+const COMPLEX = String(job.instruction || "").length > 180;
+const readSet = new Set();
+let BASE_SHA = "";
+let MEM0 = 0;
 
 let state = {status: "running", step: 0, summary: "", startedAt: Date.now()};
 function save(o) {
@@ -34,6 +40,7 @@ function end(status, summary, memories) {
   if (status === "error") emit("error", summary);
   save({status: status, summary: String(summary).slice(0, 6000), memories: memories || []});
 }
+function sh(cmd, ms) { return spawnSync("bash", ["-lc", cmd], {encoding: "utf8", timeout: ms || 30000, maxBuffer: 20000000}); }
 
 // ---------------- LLM ----------------
 const OPENAI_URLS = {
@@ -168,11 +175,11 @@ function startShell(cmd) {
   return jid;
 }
 function readShell(jid) {
-  const base = SH + "/" + jid;
+  const b = SH + "/" + jid;
   let log = "";
   let ex = null;
-  try { log = fs.readFileSync(base + ".log", "utf8"); } catch (e) {}
-  try { ex = fs.readFileSync(base + ".exit", "utf8").trim(); } catch (e) {}
+  try { log = fs.readFileSync(b + ".log", "utf8"); } catch (e) {}
+  try { ex = fs.readFileSync(b + ".exit", "utf8").trim(); } catch (e) {}
   return {done: ex !== null && ex !== "", exitCode: ex === null || ex === "" ? undefined : Number(ex), log: log.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").trim()};
 }
 
@@ -206,7 +213,7 @@ async function webSearch(query) {
 }
 
 function checkpoint(msg) {
-  const r = spawnSync("bash", ["-lc", "cd " + q(ROOT) + " && git add -A >/dev/null 2>&1; if git diff --cached --quiet; then echo NOCHANGE; else git -c user.name=Venus -c user.email=venus@local commit -qm " + q(msg.slice(0, 100)) + " >/dev/null 2>&1; git rev-parse --short HEAD; fi"], {encoding: "utf8", timeout: 25000});
+  const r = sh("cd " + q(ROOT) + " && git add -A >/dev/null 2>&1; if git diff --cached --quiet; then echo NOCHANGE; else git -c user.name=Venus -c user.email=venus@local commit -qm " + q(msg.slice(0, 100)) + " >/dev/null 2>&1; git rev-parse --short HEAD; fi", 25000);
   const out = String(r.stdout || "").trim();
   return out && out !== "NOCHANGE" ? out : null;
 }
@@ -223,8 +230,47 @@ function label(c) {
   if (c.name === "bash") return "$ " + c.body.trim().slice(0, 140) + (a.background === "true" ? "  (background)" : "");
   if (c.name === "grep") return "grep " + (a.pattern || "") + " " + (a.path || "");
   if (c.name === "glob") return "glob " + (a.pattern || "");
+  if (c.name === "task") return "sub-agent: " + c.body.trim().slice(0, 100);
   if (c.name === "web_search" || c.name === "web_fetch" || c.name === "remember") return c.name + " " + c.body.trim().slice(0, 100);
   return (c.name + " " + (a.path || a.url || a.name || "")).trim();
+}
+
+// ---------------- safety + discipline gates ----------------
+const DENY = [/\brm\s+-[a-z]*r[a-z]*f?[a-z]*\s+(\/|~|\$HOME)(\s|$)/, /:\(\)\s*\{/, /\bmkfs\b/, /\bdd\s+if=/, />\s*\/dev\/(sd|nvme)/, /\bchmod\s+-R\s+7?77\s+\//];
+const MUTATING = /(^|[\s;&|])(npm|npx|pnpm|yarn|pip3?|apt(-get)?|git\s+(commit|add|reset|checkout|merge|rebase)|rm|mv|cp|mkdir|touch|tee|chmod)\b|sed\s+-i|>\s*[\w./~-]/;
+function planGate(ctx) {
+  if (COMPLEX && !ctx.planned) return "PLAN FIRST: this is a bigger task. Write a <todo> plan (3-8 checkbox steps) BEFORE you change anything, then continue.";
+  return null;
+}
+function markUi(abs, ctx) { if (/\.(html?|css|scss|jsx|tsx|vue|svelte)$/i.test(abs)) ctx.uiDirty = true; }
+
+// ---------------- diagnostics after every edit ----------------
+function isEsmProject() { try { return JSON.parse(fs.readFileSync(ROOT + "/package.json", "utf8")).type === "module"; } catch (e) { return false; } }
+function diagFile(abs) {
+  const ext = path.extname(abs).toLowerCase();
+  let cmd = null;
+  if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
+    let src = "";
+    try { src = fs.readFileSync(abs, "utf8"); } catch (e) { return null; }
+    const esm = ext === ".mjs" || /^\s*(import|export)\s/m.test(src);
+    if (esm && ext !== ".mjs" && !isEsmProject()) return null;
+    cmd = "node --check " + q(abs);
+  } else if (ext === ".json") {
+    try { JSON.parse(fs.readFileSync(abs, "utf8")); return null; } catch (e) { return "invalid JSON: " + String(e && e.message ? e.message : e).slice(0, 160); }
+  } else if (ext === ".py") cmd = "python3 -m py_compile " + q(abs);
+  else if (ext === ".sh") cmd = "bash -n " + q(abs);
+  if (!cmd) return null;
+  const r = sh(cmd + " 2>&1 | head -c 800", 20000);
+  const out = String(r.stdout || "").trim();
+  return out ? out.slice(0, 500) : null;
+}
+function diagTs(ctx) {
+  if (!fs.existsSync(ROOT + "/tsconfig.json") || !fs.existsSync(ROOT + "/node_modules/.bin/tsc")) return null;
+  if (Date.now() - ctx.lastTsc < 20000) return null;
+  ctx.lastTsc = Date.now();
+  const r = sh("cd " + q(ROOT) + " && timeout 90 node_modules/.bin/tsc --noEmit -p . 2>&1 | head -c 2500", 100000);
+  const out = String(r.stdout || "").trim();
+  return out || null;
 }
 
 // ---------------- tools ----------------
@@ -240,6 +286,7 @@ async function runTool(c, ctx) {
       const lim = Math.min(2000, Math.max(1, parseInt(a.limit || "400", 10) || 400));
       const lines = fs.readFileSync(abs, "utf8").split("\n").slice(off - 1, off - 1 + lim);
       const body = lines.map((l, i) => String(off + i).padStart(6, " ") + "\t" + l).join("\n");
+      if (!ctx.sub) readSet.add(abs);
       return {text: a.path + " (" + size + " bytes, lines " + off + "-" + (off + lim - 1) + ")\n" + body.slice(0, 24000) + (body.length > 24000 ? "\n... (truncated; use offset/limit)" : "")};
     }
     case "ls": {
@@ -250,7 +297,7 @@ async function runTool(c, ctx) {
     }
     case "glob": {
       const re = globToRegex(a.pattern || "**/*");
-      const r = spawnSync("bash", ["-lc", "cd " + q(ROOT) + " && find . -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './.next/*' -not -path './dist/*' | sed 's|^\\./||' | head -6000"], {encoding: "utf8", maxBuffer: 20000000, timeout: 20000});
+      const r = sh("cd " + q(ROOT) + " && find . -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './.next/*' -not -path './dist/*' | sed 's|^\\./||' | head -6000", 20000);
       const hits = String(r.stdout || "").split("\n").filter((f) => f && re.test(f)).sort().slice(0, 200);
       return {text: hits.length ? hits.join("\n") : "(no matches)"};
     }
@@ -263,6 +310,9 @@ async function runTool(c, ctx) {
     }
     case "write": {
       const abs = resolveP(a.path);
+      if (fs.existsSync(abs) && !readSet.has(abs)) return {text: "ERROR: " + a.path + " already exists and you have not read it in this job. Read it first (<read path=\"" + a.path + "\"/>) so you do not destroy its content, or pick a new file name."};
+      const gate = planGate(ctx);
+      if (gate) return {text: gate};
       let t = c.body;
       if (t.startsWith("\n")) t = t.slice(1);
       if (t.endsWith("\n")) t = t.slice(0, -1);
@@ -270,6 +320,7 @@ async function runTool(c, ctx) {
       if (t.length > 800000) return {text: "ERROR: file too large."};
       fs.mkdirSync(path.dirname(abs), {recursive: true});
       fs.writeFileSync(abs, t);
+      readSet.add(abs); ctx.touched.add(abs); markUi(abs, ctx);
       return {text: "Wrote " + a.path + " (" + (t.split("\n").length - 1) + " lines, " + t.length + " bytes).", mutated: true};
     }
     case "edit": {
@@ -278,6 +329,9 @@ async function runTool(c, ctx) {
       const newS = c.new || "";
       if (!oldS) return {text: "ERROR: <old> is empty."};
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return {text: "ERROR: file not found: " + a.path};
+      if (!readSet.has(abs)) return {text: "ERROR: you have not read " + a.path + " in this job. Read it first (<read path=\"" + a.path + "\"/>), then edit it."};
+      const gate = planGate(ctx);
+      if (gate) return {text: gate};
       const cur = fs.readFileSync(abs, "utf8");
       const count = cur.split(oldS).length - 1;
       if (count === 0) {
@@ -291,6 +345,7 @@ async function runTool(c, ctx) {
         }
         if (at >= 0) {
           fs.writeFileSync(abs, lines.slice(0, at).concat(newS.split("\n"), lines.slice(at + want.length)).join("\n"));
+          ctx.touched.add(abs); markUi(abs, ctx);
           return {text: "Edited " + a.path + " (matched ignoring indentation).", mutated: true};
         }
         return {text: "ERROR: the <old> text was not found in " + a.path + ". Read the file again and copy the exact text."};
@@ -299,11 +354,14 @@ async function runTool(c, ctx) {
       if (count > 1 && !all) return {text: "ERROR: the <old> text appears " + count + " times in " + a.path + ". Add more surrounding lines to make it unique, or set replace_all=\"true\"."};
       const next = all ? cur.split(oldS).join(newS) : cur.replace(oldS, () => newS);
       fs.writeFileSync(abs, next);
+      ctx.touched.add(abs); markUi(abs, ctx);
       return {text: "Edited " + a.path + " (" + count + " replacement" + (count > 1 ? "s" : "") + ").", mutated: true};
     }
     case "bash": {
       const cmd = c.body.trim();
       if (!cmd) return {text: "ERROR: empty command."};
+      for (const d of DENY) if (d.test(cmd)) return {text: "BLOCKED: this command is destructive and not allowed. Choose a safer way."};
+      if (MUTATING.test(cmd)) { const gate = planGate(ctx); if (gate) return {text: gate}; }
       const bg = a.background === "true";
       const wait = bg ? 4000 : Math.min(Math.max(5, parseInt(a.timeout || "120", 10) || 120), 900) * 1000;
       const jid = startShell(cmd);
@@ -323,6 +381,7 @@ async function runTool(c, ctx) {
       return {text: (s.done ? "exit code: " + s.exitCode : "STILL RUNNING") + "\n" + s.log.slice(-8000)};
     }
     case "look": {
+      ctx.uiDirty = false;
       let target;
       if (a.url) {
         if (!/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(a.url)) return {text: "ERROR: look only opens localhost URLs or workspace files."};
@@ -333,13 +392,14 @@ async function runTool(c, ctx) {
         target = "file://" + abs;
       }
       const out = "/tmp/look-" + Date.now() + ".png";
-      spawnSync("bash", ["-lc", "(google-chrome --headless=new --no-sandbox --disable-gpu --hide-scrollbars --window-size=1280,900 --virtual-time-budget=5000 --screenshot=" + q(out) + " " + q(target) + ") >/dev/null 2>&1"], {timeout: 45000});
+      sh("(google-chrome --headless=new --no-sandbox --disable-gpu --hide-scrollbars --window-size=1280,900 --virtual-time-budget=5000 --screenshot=" + q(out) + " " + q(target) + ") >/dev/null 2>&1", 45000);
       if (!fs.existsSync(out)) return {text: "Could not take a screenshot (Chrome is not ready yet). Verify with bash/curl instead."};
       const data = fs.readFileSync(out).toString("base64");
       try { fs.unlinkSync(out); } catch (e) {}
-      return {text: "Screenshot of " + target + " attached (look at it).", image: {mediaType: "image/png", data: data}};
+      return {text: "Screenshot of " + target + " attached (look at it carefully: layout, text, spacing, broken images).", image: {mediaType: "image/png", data: data}};
     }
     case "todo":
+      ctx.planned = true;
       emit("todo", parseTodo(c.body));
       return {text: "Todo list updated."};
     case "web_search":
@@ -356,14 +416,38 @@ async function runTool(c, ctx) {
       return {text: "Saved to memory (stored when the job ends)."};
     case "ask":
       return {text: "The user is away (background mode). Proceed with your best judgment and mention the assumption in <finish>."};
-    case "task":
-      return {text: "ERROR: sub-agents are not available in background mode. Do the work yourself."};
     default:
       return {text: "ERROR: unknown tool " + c.name};
   }
 }
 
-// ---------------- verification gate: finish is only accepted when the project checks pass ----------------
+// ---------------- parallel read-only sub-agents ----------------
+const SUB_OK = ["read", "ls", "glob", "grep", "web_search", "web_fetch"];
+function treeText() { const r = sh("cd " + q(ROOT) + " && git ls-files -co --exclude-standard | head -150", 15000); return String(r.stdout || "").trim() || "(empty)"; }
+async function subAgent(prompt) {
+  const sys = "You are a READ-ONLY research sub-agent of Venus Code. You cannot change anything. Investigate the task and report precisely (file paths, line numbers, findings, what you would change). Tools (same format as the main agent): <read path=\"x\" offset=\"1\" limit=\"300\"/> <ls path=\".\"/> <glob pattern=\"**/*.js\"/> <grep pattern=\"x\" path=\"src\" glob=\"*.js\"/> <web_search>query</web_search> <web_fetch>url</web_fetch>. Reply with a brief thought and tool calls. Finish with <finish>your report</finish>. At most 20 steps.";
+  let msgs = [{role: "user", content: sys + "\n\nWorkspace files:\n" + treeText() + "\n\nTASK:\n" + prompt}];
+  const sctx = {skills: [], memories: [], sub: true, touched: new Set(), planned: true};
+  for (let i = 0; i < 20; i++) {
+    if (stopped()) return "Stopped.";
+    const reply = await llm(msgs);
+    const p = parseTools(reply);
+    msgs.push({role: "assistant", content: reply});
+    const fin = p.calls.find((c) => c.name === "finish");
+    if (fin) return fin.body.trim() || "Done.";
+    if (!p.calls.length) return p.thought || reply.slice(0, 1500);
+    const use = p.calls.slice(0, 6);
+    const outs = [];
+    for (const c of use) {
+      if (SUB_OK.indexOf(c.name) < 0) { outs.push("ERROR: sub-agents are read-only (no " + c.name + ")."); continue; }
+      try { outs.push((await runTool(c, sctx)).text); } catch (e) { outs.push("ERROR: " + (e && e.message ? e.message : "failed")); }
+    }
+    msgs.push({role: "user", content: "<results>\n" + use.map((c, j) => "<result tool=\"" + c.name + "\">\n" + String(outs[j] || "").slice(0, 9000) + "\n</result>").join("\n") + "\n</results>\nContinue, or finish with <finish>report</finish>."});
+  }
+  return "Sub-agent ran out of steps. Partial findings may be in its last messages.";
+}
+
+// ---------------- finish gates ----------------
 function verifyProject() {
   let cmd = "";
   const pj = ROOT + "/package.json";
@@ -377,14 +461,85 @@ function verifyProject() {
     if (cmd && !fs.existsSync(ROOT + "/node_modules")) return null;
   } else if (fs.existsSync(ROOT + "/pytest.ini") || fs.existsSync(ROOT + "/tests")) cmd = "python3 -m pytest -q";
   if (!cmd) return null;
-  const r = spawnSync("bash", ["-lc", "set -o pipefail; cd " + q(ROOT) + " && export CI=1 && timeout 170 " + cmd + " 2>&1 | tail -c 4000"], {encoding: "utf8", timeout: 180000});
+  const r = sh("set -o pipefail; cd " + q(ROOT) + " && export CI=1 && timeout 170 " + cmd + " 2>&1 | tail -c 4000", 180000);
   return {ok: r.status === 0, cmd: cmd, out: String(r.stdout || "")};
+}
+function initBase() {
+  BASE_SHA = String(sh("cd " + q(ROOT) + " && git rev-parse HEAD 2>/dev/null", 10000).stdout || "").trim();
+  try { MEM0 = fs.existsSync(ROOT + "/VENUS.md") ? fs.statSync(ROOT + "/VENUS.md").mtimeMs : 0; } catch (e) { MEM0 = 0; }
+}
+function changedFiles() {
+  if (!BASE_SHA) return [];
+  return String(sh("cd " + q(ROOT) + " && git diff --name-only " + BASE_SHA + " HEAD 2>/dev/null | head -200", 15000).stdout || "").split("\n").filter(Boolean);
+}
+function memUnchanged() {
+  try { return (fs.existsSync(ROOT + "/VENUS.md") ? fs.statSync(ROOT + "/VENUS.md").mtimeMs : 0) === MEM0; } catch (e) { return true; }
+}
+async function review(summary) {
+  if (!BASE_SHA) return null;
+  const diff = String(sh("cd " + q(ROOT) + " && git diff " + BASE_SHA + " HEAD -- . ':!package-lock.json' ':!yarn.lock' ':!pnpm-lock.yaml' 2>/dev/null | head -c 26000", 25000).stdout || "");
+  if (!diff.trim()) return null;
+  const scan = String(sh("cd " + q(ROOT) + " && git diff " + BASE_SHA + " HEAD 2>/dev/null | grep '^+' | grep -v '^+++' | grep -niE 'TODO|FIXME|rest of (the )?file|lorem ipsum|your code here|implement me' | head -8", 20000).stdout || "").trim();
+  let issues = [];
+  try {
+    const raw = await llm([{role: "user", content: "You are a strict senior code reviewer. Review the diff of a coding agent's work.\n\nTASK GIVEN TO THE AGENT:\n" + String(job.instruction || "").slice(0, 1200) + "\n\nAGENT'S SUMMARY:\n" + String(summary).slice(0, 600) + "\n\nDIFF:\n" + diff + "\n\nReply with ONE JSON object only: {\"verdict\":\"ok\"|\"fix\",\"issues\":[\"specific problem: file + what to change\"]}\nReport ONLY real problems: bugs, requirements of the task that are missing, broken imports or paths, files referenced but never created, security problems (secrets in code, injection), placeholders left in. No style nitpicks. At most 6 issues."}]);
+    const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+    const j = a >= 0 && b > a ? JSON.parse(raw.slice(a, b + 1)) : null;
+    if (j && j.verdict === "fix" && Array.isArray(j.issues)) issues = j.issues.map((x) => String(x).slice(0, 300)).slice(0, 6);
+  } catch (e) { /* reviewer unavailable: do not block */ }
+  if (scan) issues.push("Placeholders/TODO were left in the code:\n" + scan.slice(0, 400));
+  return issues;
+}
+async function gates(fin, ctx) {
+  if (ctx.gates.tests < 3) {
+    const v = verifyProject();
+    if (v && !v.ok) {
+      ctx.gates.tests++;
+      emit("info", "Verification failed - fixing it (" + ctx.gates.tests + "/3): " + v.cmd);
+      return "You called finish, but the project check FAILED.\nCommand: " + v.cmd + "\nOutput:\n" + v.out.slice(-3500) + "\nFix the cause, then finish again.";
+    }
+    if (v && v.ok) { emit("info", "Verified: " + v.cmd + " passed."); if (ctx.checks.indexOf(v.cmd + " passed") < 0) ctx.checks.push(v.cmd + " passed"); }
+  }
+  if (ctx.uiDirty && ctx.gates.ui < 1) {
+    ctx.gates.ui++;
+    emit("info", "Gate: UI changed but not looked at - sent back to check it visually.");
+    return "You changed UI files but have not LOOKED at the result. Open it with <look path=\"index.html\"/> (or <look url=\"http://localhost:3000\"/> for a dev server), check layout, text and images, fix what is wrong, then finish again.";
+  }
+  const changed = changedFiles();
+  if (changed.length >= 2 && ctx.gates.mem < 1 && memUnchanged()) {
+    ctx.gates.mem++;
+    emit("info", "Gate: project memory (VENUS.md) not updated.");
+    return "Before finishing, update VENUS.md (overview, how to run, structure, decisions) so the next session knows this project. Then finish again.";
+  }
+  if (changed.length && ctx.gates.review < 2) {
+    const attempt = ++ctx.gates.review;
+    emit("info", "Independent code review of " + changed.length + " changed file(s)...");
+    const issues = await review(fin);
+    if (issues && issues.length) {
+      if (attempt < 2) {
+        emit("info", "Review found " + issues.length + " issue(s) - sent back to fix.");
+        return "INDEPENDENT CODE REVIEW of your changes found problems. Fix the real ones, then finish again:\n- " + issues.join("\n- ");
+      }
+      ctx.checks.push("review still lists " + issues.length + " open issue(s)");
+    } else if (issues) ctx.checks.push("independent code review passed");
+  }
+  if (changed.length) ctx.checks.push(changed.length + " file(s) changed");
+  return null;
+}
+function finalCommit(fin) {
+  if (!BASE_SHA) return;
+  const first = String(fin).split("\n").map((l) => l.trim()).filter(Boolean)[0] || "update";
+  const msg = "Venus: " + first.replace(/[^\x20-\x7e]/g, "").replace(/["'$\\]/g, "").slice(0, 90);
+  const r = sh("cd " + q(ROOT) + " && git add -A >/dev/null 2>&1; git -c user.name=Venus -c user.email=venus@local commit -q --allow-empty -m " + q(msg) + " >/dev/null 2>&1; git rev-parse --short HEAD", 25000);
+  const sha = String(r.stdout || "").trim();
+  if (sha) emit("checkpoint", sha);
 }
 
 // ---------------- main loop ----------------
 async function main() {
-  emit("info", "Background runner started - it keeps working even if you close the browser.");
-  const ctx = {skills: job.skills || [], memories: [], gates: 0};
+  emit("info", "Background runner v3 started - it keeps working even if you close the browser.");
+  initBase();
+  const ctx = {skills: job.skills || [], memories: [], planned: false, touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], gates: {tests: 0, ui: 0, mem: 0, review: 0}};
   let messages = [{role: "user", content: job.system + "\n\n# TASK\n" + job.instruction}];
   const maxSteps = job.maxSteps || 120;
   const deadline = Date.now() + (job.maxMinutes || 120) * 60000;
@@ -395,12 +550,14 @@ async function main() {
     if (stopped()) return end("stopped", "Stopped by the user.", ctx.memories);
     if (Date.now() > deadline) return end("error", "Time limit reached before the task was finished.", ctx.memories);
     save({step: step + 1});
+    ctx.touched = new Set();
 
     const size = messages.reduce((n, m) => n + m.content.length, 0);
     if (size > 90000 && messages.length > 4) {
       let summary = "";
       try { summary = await llm(messages.concat([{role: "user", content: "Summarize the progress so far in under 400 words: goal, what is done, files changed, current state, open problems, next steps. No tool calls."}])); } catch (e) {}
       messages = [messages[0], {role: "assistant", content: "Progress summary so far:\n" + (summary || "(summary unavailable)")}, {role: "user", content: "Continue from the summary. Re-read files before editing them."}];
+      readSet.clear();
       emit("info", "Context compacted.");
     }
 
@@ -423,14 +580,29 @@ async function main() {
       continue;
     }
 
+    // up to 4 sub-agents of one reply run IN PARALLEL
+    const taskIdx = parsed.calls.map((c, i) => (c.name === "task" ? i : -1)).filter((i) => i >= 0).slice(0, 4);
+    const taskOut = {};
+    if (taskIdx.length) {
+      emit("info", "Running " + taskIdx.length + " sub-agent(s) in parallel...");
+      const res = await Promise.all(taskIdx.map((i) => subAgent(parsed.calls[i].body.trim()).catch((e) => "Sub-agent failed: " + (e && e.message ? e.message : "error"))));
+      taskIdx.forEach((i, k) => { taskOut[i] = res[k]; });
+    }
+
     const out = [];
     let image = null;
     let fin = null;
     let mutated = false;
-    for (const c of parsed.calls) {
+    for (let ci = 0; ci < parsed.calls.length; ci++) {
+      const c = parsed.calls[ci];
       if (fin !== null) break;
       emit("tool", label(c));
       if (c.name === "finish") { fin = c.body.trim() || "Done."; out.push(""); continue; }
+      if (c.name === "task") {
+        out.push(taskOut[ci] === undefined ? "ERROR: at most 4 sub-agents per reply." : String(taskOut[ci]));
+        emit("result", String(out[out.length - 1]).slice(0, 300));
+        continue;
+      }
       if (c.name === "write" || c.name === "edit") emit("diff", c.name, {path: c.attrs.path, lines: diffOf(c)});
       let res;
       try { res = await runTool(c, ctx); } catch (e) { res = {text: "ERROR: " + (e && e.message ? e.message : "tool failed")}; }
@@ -439,27 +611,32 @@ async function main() {
       if (res.mutated) mutated = true;
       emit(c.name === "bash" ? "term" : "result", c.name === "bash" ? "$ " + c.body.trim() + "\n" + res.text : res.text.slice(0, 300));
     }
+
+    // diagnostics: syntax / type errors in what was just written
+    let diag = "";
+    if (ctx.touched.size) {
+      const lines = [];
+      ctx.touched.forEach((f) => { const d = diagFile(f); if (d) lines.push(path.relative(ROOT, f) + ": " + d); });
+      let ts = null;
+      ctx.touched.forEach((f) => { if (!ts && /\.(tsx?|jsx)$/.test(f)) ts = diagTs(ctx); });
+      if (ts) lines.push("tsc: " + ts);
+      if (lines.length) { diag = "\nDIAGNOSTICS (errors in the files you just changed - fix them now):\n" + lines.join("\n").slice(0, 3500); emit("info", "Diagnostics: " + lines.length + " problem(s) found."); }
+    }
+
     if (mutated) {
       const sha = checkpoint("Step: " + parsed.calls.map((c) => c.name + (c.attrs.path ? " " + c.attrs.path : "")).join(", "));
       if (sha) emit("checkpoint", sha);
     }
     if (fin !== null) {
-      // finish is only accepted when the project's own tests/build pass (up to 3 repair rounds)
-      if (ctx.gates < 3) {
-        const v = verifyProject();
-        if (v && !v.ok) {
-          ctx.gates++;
-          emit("info", "Verification failed - fixing it (" + ctx.gates + "/3): " + v.cmd);
-          messages.push({role: "user", content: "You called finish, but the project check FAILED.\nCommand: " + v.cmd + "\nOutput:\n" + v.out.slice(-3500) + "\nFix the cause, then finish again."});
-          continue;
-        }
-        if (v && v.ok) emit("info", "Verified: " + v.cmd + " passed.");
-      }
-      return end("done", fin, ctx.memories);
+      const again = await gates(fin, ctx);
+      if (again) { messages.push({role: "user", content: again}); continue; }
+      finalCommit(fin);
+      const checks = ctx.checks.length ? "\n\n---\nChecks: " + ctx.checks.join(" · ") : "";
+      return end("done", fin + checks, ctx.memories);
     }
 
     const results = parsed.calls.map((c, i) => "<result tool=\"" + c.name + "\"" + (c.attrs.path ? " path=\"" + c.attrs.path + "\"" : "") + ">\n" + String(out[i] || "").slice(0, 14000) + "\n</result>").join("\n");
-    const next = {role: "user", content: "<results>\n" + results.slice(0, 40000) + "\n</results>\nContinue. Call <finish> when the task is complete and verified."};
+    const next = {role: "user", content: "<results>\n" + results.slice(0, 40000) + "\n</results>" + diag + "\nContinue. Call <finish> when the task is complete and verified."};
     if (image) next.image = image;
     messages.push(next);
   }
