@@ -5,21 +5,22 @@ export type Pick = { provider: ProviderId; model: string; apiKey: string };
 export type FallbackEntry = { provider: ProviderId; apiKey: string; model: string };
 type Keys = Partial<Record<ProviderId, string>>;
 
-// strong = best reasoning, fast = cheap + quick. Update when new models ship.
+// Only models that surely exist are listed. A provider that is NOT listed (Gemini, ...) always uses the model
+// the user picked: a hard-coded name your key cannot use silently breaks every helper step.
 const TIERS: Partial<Record<ProviderId, { strong: string; fast: string }>> = {
   anthropic: { strong: "claude-sonnet-5", fast: "claude-haiku-4-5-20251001" },
   openai: { strong: "gpt-4o", fast: "gpt-4o-mini" },
-  gemini: { strong: "gemini-1.5-pro", fast: "gemini-2.0-flash" },
   grok: { strong: "grok-4", fast: "grok-4-fast" },
   deepseek: { strong: "deepseek-reasoner", fast: "deepseek-chat" },
   mistral: { strong: "mistral-large-latest", fast: "mistral-small-latest" },
 };
 
 /**
- * act    -> the model the user chose (they asked for it)
- * plan   -> strong tier of the same provider
- * report -> fast tier of the same provider (cheap)
+ * act    -> the model the user chose
+ * plan   -> strong tier of the same provider (if known)
+ * report -> fast tier of the same provider (if known)
  * verify -> a DIFFERENT provider's strong model when available (independent second opinion)
+ * The caller retries with the user's own model if a helper model fails.
  */
 export function pickModel(role: Role, keys: Keys, preferred: { provider: ProviderId; model: string }): Pick {
   const own = (provider: ProviderId, model: string): Pick => ({ provider, model, apiKey: keys[provider] ?? "" });
