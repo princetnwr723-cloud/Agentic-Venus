@@ -17,6 +17,7 @@ import type { ProviderId } from "@/lib/providers";
 import { addMemory, brainPrompt, forgetMemory, loadBrain, parseSkillMarkdown, rankSkills, reflect, saveSkill, setRole, skillFromText, type Brain, type Verdict } from "@/lib/brain";
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
+import { acquire, releaseNow } from "@/lib/computers";
 import type { VenusProject } from "@/lib/venus";
 import { runPipeline, signedUrl, type PipelineEnv } from "@/lib/venus-pipeline";
 import { personaOf, type Member } from "@/lib/team-catalog";
@@ -38,6 +39,7 @@ import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
 import ChatComposer from "@/components/dashboard/ChatComposer";
 import RunBars from "@/components/dashboard/RunBars";
+import WorkingBar from "@/components/dashboard/WorkingBar";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
 import ModelPicker from "@/components/dashboard/ModelPicker";
 import NewChatModal from "@/components/dashboard/NewChatModal";
@@ -59,6 +61,13 @@ const MEMORY_PROMPT = `
 
 To save a durable fact about the user for THIS chat, end your reply with [[MEMORY:add|<fact>]]. To forget something: [[MEMORY:forget|<keyword>]]. To install a skill the user shared: [[SKILL:install|<link or text>]]. Use these only when really needed and never explain the syntax.
 If a connected tool can answer or do the request, call the tool instead of guessing.`;
+
+const INTENT_LABEL: Record<string, string> = {
+  chat: "jawab dena", set_role: "role save karna", assemble: "team banana", pc: "computer ka kaam", code: "coding project",
+  video: "video banana", team: "team ka kaam", remember: "yaad rakhna", forget: "bhoolna", clarify: "ek sawaal puchna",
+};
+
+type Work = { label: string; startedAt: number; steps: string[]; owner: string };
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
@@ -88,6 +97,7 @@ export default function DashboardPage() {
   const [teamOpen, setTeamOpen] = useState(false);
   const [pcFullscreen, setPcFullscreen] = useState(false);
   const [sessions, setSessions] = useState<Record<string, PcSession>>({});
+  const [work, setWork] = useState<Record<string, Work>>({});
   const [, setBrainTick] = useState(0);
 
   const sessionsRef = useRef<Record<string, PcSession>>({});
@@ -111,6 +121,24 @@ export default function DashboardPage() {
   const [routinesOpen, setRoutinesOpen] = useState(false);
   const [routinePrefill, setRoutinePrefill] = useState<string | null>(null);
   const [runningRoutineId, setRunningRoutineId] = useState<string | null>(null);
+
+  // ---- "Working…" bar: what the agent is doing right now + timer (one owner per chat; only the owner can end it) ----
+  const workStart = (chatId: string, label: string, owner: string) =>
+    setWork((w) => ({ ...w, [chatId]: { label, startedAt: Date.now(), steps: [label], owner } }));
+  const workSet = (chatId: string, label: string, owner: string) =>
+    setWork((w) => {
+      const c = w[chatId];
+      if (!c || c.owner !== owner) return w;
+      const last = c.steps[c.steps.length - 1];
+      return { ...w, [chatId]: { ...c, label, steps: last === label ? c.steps : [...c.steps.slice(-60), label] } };
+    });
+  const workEnd = (chatId: string, owner: string) =>
+    setWork((w) => {
+      if (!w[chatId] || w[chatId].owner !== owner) return w;
+      const n = { ...w };
+      delete n[chatId];
+      return n;
+    });
 
   useEffect(() => { chatsRef.current = chats; for (const c of chats) if (!(c.id in sandboxRef.current)) sandboxRef.current[c.id] = c.pcSandboxId ?? null; }, [chats]);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -178,9 +206,9 @@ export default function DashboardPage() {
   const pushStep = (chatId: string, line: string) => {
     traceOf(chatId)?.add("step", line);
     patchSession(chatId, (s) => ({ steps: [...s.steps, line] }));
+    workSet(chatId, line.replace(/^\d+\.\s*/, "").slice(0, 120), "pc");
   };
 
-  // Heartbeat: tells the server this computer is in use, so the idle reaper leaves it alone.
   const beat = (chatId: string) => {
     if (!user || Date.now() - (beatRef.current[chatId] ?? 0) < 50_000) return;
     beatRef.current[chatId] = Date.now();
@@ -218,7 +246,7 @@ export default function DashboardPage() {
     await updateChatModel(user.uid, activeChat.id, provider, model);
   }
 
-  // ---- This chat's computer ----
+  // ---- This chat's computer (for computer tasks). Venus Code and Venus Pro get their OWN computers. ----
 
   async function loadScreen(chatId: string, sandboxId: string): Promise<"ok" | "gone" | "error"> {
     if (!e2bKey) { setSettingsOpen(true); return "error"; }
@@ -301,7 +329,7 @@ export default function DashboardPage() {
   /** The agent switches the computer off as soon as its work is finished (saves your E2B credits). */
   async function autoOff(chatId: string) {
     if (!user || !e2bKey || !sandboxRef.current[chatId]) return;
-    const busy = () => runningRef.current[chatId] || codeBusyRef.current || venusBusyRef.current || teamBusyRef.current;
+    const busy = () => runningRef.current[chatId] || teamBusyRef.current;
     if (busy() || sessionsRef.current[chatId]?.status === "paused") return;
     await new Promise((r) => setTimeout(r, 4000)); // let you see the final screen
     if (busy()) return;
@@ -312,7 +340,7 @@ export default function DashboardPage() {
   async function deletePc(chatId: string) {
     const id = sandboxRef.current[chatId] ?? null;
     if (!user || !e2bKey || !id) return;
-    if (!window.confirm("Delete this chat's computer for good? Everything saved on it (code, videos' working files) will be lost.")) return;
+    if (!window.confirm("Delete this chat's computer for good? Everything saved on it will be lost.")) return;
     patchSession(chatId, { status: "loading", error: null });
     try {
       const res = await fetch("/api/e2b/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: e2bKey, sandboxId: id }) });
@@ -347,7 +375,7 @@ export default function DashboardPage() {
     const iv = setInterval(() => {
       busyChats.current.forEach((id) => beat(id));
       for (const [chatId, s] of Object.entries(sessionsRef.current)) {
-        if (s.status !== "ready" || s.running || runningRef.current[chatId] || codeBusyRef.current || venusBusyRef.current) continue;
+        if (s.status !== "ready" || s.running || runningRef.current[chatId]) continue;
         const last = lastTouchRef.current[chatId] ?? 0;
         const started = runStartRef.current[chatId] ?? 0;
         if ((last > 0 && Date.now() - last > IDLE_PAUSE_MS) || (started > 0 && Date.now() - started > RUN_CYCLE_MS)) {
@@ -379,20 +407,29 @@ export default function DashboardPage() {
   // ---- Models: router + fallback + streaming ----
 
   async function callLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }> = [], role: Role = "act"): Promise<string> {
+    const run = async (pick: ReturnType<typeof pickModel>) => {
+      if (!pick.apiKey) throw new Error("No API key saved for this chat's model.");
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: pick.provider, apiKey: pick.apiKey, model: pick.model, fallbacks: fallbackChain(apiKeys, pick.provider),
+          systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }],
+        }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data?.error || "Request failed.");
+      const reply = String(data.reply ?? "").trim();
+      addUsage(chat.id, pick.model, system.length + prompt.length + history.reduce((n, m) => n + m.content.length, 0), reply.length);
+      return reply;
+    };
     const pick = pickModel(role, apiKeys, chat);
-    if (!pick.apiKey) throw new Error("No API key saved for this chat's model.");
-    const res = await fetch("/api/chat", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: pick.provider, apiKey: pick.apiKey, model: pick.model, fallbacks: fallbackChain(apiKeys, pick.provider),
-        systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }],
-      }),
-    });
-    const data = await readJson(res);
-    if (!res.ok) throw new Error(data?.error || "Request failed.");
-    const reply = String(data.reply ?? "").trim();
-    addUsage(chat.id, pick.model, system.length + prompt.length + history.reduce((n, m) => n + m.content.length, 0), reply.length);
-    return reply;
+    try {
+      return await run(pick);
+    } catch (e) {
+      const own = pickModel("act", apiKeys, chat);
+      if (pick.provider === own.provider && pick.model === own.model) throw e;
+      return run(own); // a helper model your key cannot use must never break the agent
+    }
   }
 
   async function streamLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }>, onText: (t: string) => void): Promise<string> {
@@ -424,16 +461,15 @@ export default function DashboardPage() {
     try {
       return await callLLM(chat, "", [
         "You are writing the FINAL message to the user after a computer agent finished their task.",
-        "Rules: write in clear English. Use markdown. Start with ONE line for the outcome (✅ done / ⚠️ partly done / ❌ failed). Then short bullets of what was done. Then the concrete results: facts, names, numbers, versions, file paths, and links with their source names. If anything failed or is unfinished, say exactly what and the next step. Never invent anything that is not in the material below. Be concise — no filler.",
+        "Rules: write in clear English. Use markdown. Start with ONE line for the outcome (✅ done / ⚠️ partly done / ❌ failed). Then short bullets of what was done. Then the concrete results: facts, names, numbers, versions, file paths, and links with their source names. If anything failed or is unfinished, say exactly what and the next step. Never invent anything that is not in the material below. Be concise — no filler. If the agent's result starts with a VERIFIED line, keep that line, the table and the download link exactly as they are.",
         "", `USER'S TASK:\n${m.task}`, "", `AGENT'S RESULT:\n${m.summary}`, "", `LAST STEPS:\n${m.steps.slice(-25).join("\n")}`,
       ].join("\n"), [], "report");
     } catch { return null; }
   }
 
-  /** Self-improvement for THIS chat: scores the skills that were used, keeps facts, writes lessons, rewrites failing skills. */
   function learnFrom(chat: Chat, input: { task: string; outcome: string; steps: string; verdict: Verdict; skillsUsed: string[] }) {
     if (!user) return;
-    const rp = pickModel("report", apiKeys, chat);
+    const rp = pickModel("act", apiKeys, chat);
     reflect({ uid: user.uid, chatId: chat.id }, { apiKeys, provider: rp.provider, model: rp.model }, brainOf(chat.id), input)
       .then(async (l) => { if (l.length) { say(chat.id, "🧠 Learned: " + l.join("; ")); await loadChatBrain(chat.id); } })
       .catch(() => {});
@@ -467,7 +503,7 @@ export default function DashboardPage() {
     return { text: r.ok ? String(r.text) : `ERROR: ${r.text || r.error || "tool failed"}`, flagged: Array.isArray(r.flagged) && r.flagged.length > 0 };
   }
 
-  // ---- Venus Code: ONLY for software projects ----
+  // ---- Venus Code: ONLY for software projects, on its OWN computer ----
 
   async function runCodeFor(chat: Chat, instruction: string, opts: { silent?: boolean; persona?: string; onLine?: (l: string) => void } = {}): Promise<string> {
     if (!user) return "";
@@ -477,17 +513,20 @@ export default function DashboardPage() {
     if (codeBusyRef.current) return out("Venus Code is already working on something. Wait for it to finish, then ask again.");
     codeBusyRef.current = true;
     busyChats.current.add(chat.id);
+    const showWork = !opts.silent;
+    if (showWork) workStart(chat.id, "Venus Code ke liye apna computer chalu kar raha hoon…", "code");
+    let sid: string | null = null;
     try {
-      const sid = await startOrResumePc(chat.id);
-      if (!sid) return out("This chat's computer could not be started — turn it on with the monitor button first.");
+      sid = await acquire({ uid: user.uid, e2bKey }, chat.id, "code"); // its own computer: it never waits for the chat's computer
       let project = await getCodeProject(user.uid, chat.id);
       if (!project) { project = newCodeProject(chat.id, `${chat.agentName} codespace`); await saveCodeProject(user.uid, project); }
       setCodeRun({ title: project.name, label: "Starting…" });
-      if (!opts.silent) say(chat.id, `💻 Venus Code is working on it. Watch it live on the [Code page](/code?chat=${chat.id}).`);
+      if (!opts.silent) say(chat.id, `💻 Venus Code is working on it (on its own computer). Watch it live on the [Code page](/code?chat=${chat.id}).`);
       const hooks: CodeHooks = {
         event: (e) => {
           if (e.kind === "tool" || e.kind === "info" || e.kind === "thought") {
             setCodeRun((prev) => (prev ? { ...prev, label: e.text.slice(0, 100) } : prev));
+            workSet(chat.id, e.text.replace(/\s+/g, " ").slice(0, 110), "code");
             if (e.kind === "tool" && (e.depth ?? 0) === 0) opts.onLine?.("💻 " + e.text.slice(0, 120));
           }
         },
@@ -504,7 +543,8 @@ export default function DashboardPage() {
       return out(`⚠️ Venus Code failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
       codeBusyRef.current = false; busyChats.current.delete(chat.id); setCodeRun(null);
-      if (!opts.silent) void autoOff(chat.id);
+      if (showWork) workEnd(chat.id, "code");
+      if (sid) void releaseNow(e2bKey, sid); // work is over: its computer is switched off
     }
   }
 
@@ -565,13 +605,15 @@ export default function DashboardPage() {
     stopRef.current[chatId] = false;
     busyChats.current.add(chatId);
     patchSession(chatId, { running: true, steps: [`▶ ${task}`], request: null });
-    // The work happens on the visible screen: open the panel so you can watch it.
+    const showWork = !opts?.quiet;
+    if (showWork) workStart(chatId, opts?.resume ? "Chalte hue task se jud raha hoon…" : "Computer chalu kar raha hoon…", "pc");
     if (activeIdRef.current === chatId && !opts?.quiet) { setPcOpen(true); setTeamOpen(false); }
     const trace = beginTrace(user.uid, chatId, task.slice(0, 80), "computer");
     const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
     let finalText = "";
 
     try {
+      pushStep(chatId, "🖥️ Computer chalu kar raha hoon…");
       const sid = opts?.resume?.sandboxId ?? (await startOrResumePc(chatId));
       if (!sid) throw new Error(sessionsRef.current[chatId]?.error || "The computer could not be started — see the panel for the reason.");
       let jobId = opts?.resume?.jobId;
@@ -609,6 +651,7 @@ export default function DashboardPage() {
       resolverRef.current[chatId] = null;
       busyChats.current.delete(chatId);
       patchSession(chatId, { running: false, request: null });
+      if (showWork) workEnd(chatId, "pc");
     }
 
     if (!opts?.quiet) {
@@ -634,10 +677,12 @@ export default function DashboardPage() {
     const hit = matchRecipes(list, arg)[0];
     if (!hit) return say(chat.id, "No recipe matches that. Send `/recipe` to see the list.");
     say(chat.id, `▶️ Running recipe **${hit.name}** (${hit.steps.length} steps) — no AI model used.`);
+    workStart(chat.id, `Recipe chala raha hoon: ${hit.name}`, "recipe");
     try {
       const r = await replayRecipe({
         token: () => user.getIdToken(), uid: user.uid, chatId: chat.id, connectors: {},
         recipe: hit, creds: undefined,
+        onLine: (l) => workSet(chat.id, l, "recipe"),
         shell: async (command) => {
           if (!e2bKey) return { ok: false, text: "Add an E2B key first." };
           const id = await startOrResumePc(chat.id);
@@ -657,13 +702,14 @@ export default function DashboardPage() {
         `A saved recipe "${hit.name}" (original goal: ${hit.task}) broke at step ${k + 1} of ${hit.steps.length} because the site changed.\n` +
         `The browser is open${r.url ? ` on ${r.url}` : ""}. Do what the broken step intended, then finish the rest of the goal. Steps still to do, for reference:\n` +
         hit.steps.slice(k).map((s, i) => `${k + i + 1}. ${describeStep(s)}`).join("\n");
+      workEnd(chat.id, "recipe");
       await runPcTask(chat, healTask, true, { heal: { recipe: hit, keep: hit.steps.slice(0, k), session: r.session, snapshot: r.snapshot, url: r.url } });
     } catch (e) {
       say(chat.id, `⚠️ Recipe failed: ${e instanceof Error ? e.message : "unknown error"}`);
-    }
+    } finally { workEnd(chat.id, "recipe"); }
   }
 
-  // ---- Venus Pro ----
+  // ---- Venus Pro: its OWN computer (unless it needs assets the computer agent downloaded) ----
 
   async function startVenus(chat: Chat, brief: string, opts: { silent?: boolean } = {}): Promise<string> {
     if (!user) return "";
@@ -675,17 +721,23 @@ export default function DashboardPage() {
 
     venusBusyRef.current = true;
     busyChats.current.add(chat.id);
+    const showWork = !opts.silent;
     const opt = guessVenusOptions(brief);
-    setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting the computer…", value: null });
+    if (showWork) workStart(chat.id, "Venus Pro shuru ho raha hai…", "venus");
+    setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
     try {
-      const sid = await startOrResumePc(chat.id);
-      if (!sid) return out("This chat's computer could not be started — turn it on with the monitor button first.");
-      if (!opts.silent) say(chat.id, `🎬 Venus Pro is making your video (${opt.seconds}s, ${opt.aspect}) on this chat's computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
-
-      if (/\b(assets?|footage|stock|photos?|images?|logos?|clips?|b-?roll|download)\b/i.test(brief)) {
+      // Assets are downloaded by the computer agent onto the chat's computer, so then the video is made there too.
+      // Otherwise Venus Pro gets its own studio computer and never waits for the chat's computer.
+      const needsAssets = /\b(assets?|footage|stock|photos?|images?|logos?|clips?|b-?roll|download)\b/i.test(brief);
+      let sid: string | undefined;
+      if (needsAssets) {
+        workSet(chat.id, "Computer assets download kar raha hai…", "venus");
         setVenusRun((p) => (p ? { ...p, label: "The computer is downloading assets…" } : p));
         await runPcTask(chat, `Find and download 5-10 royalty-free images or short video clips (and logos if the brief names a brand) for a video about: ${brief.slice(0, 400)}. Save them into the folder ~/venus-assets (create it if needed) with short file names using only letters, numbers and dashes (e.g. skyline-night.jpg). Use free sources (Pexels, Pixabay, Unsplash, Wikimedia). Finish by listing the file names you saved.`, false, { quiet: true });
+        sid = sandboxRef.current[chat.id] ?? undefined;
+        if (!sid) return out("The computer for downloading assets could not be started — turn it on with the monitor button first.");
       }
+      if (!opts.silent) say(chat.id, `🎬 Venus Pro is making your video (${opt.seconds}s, ${opt.aspect}) on its own computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
 
       const project: VenusProject = {
         id: "v" + Date.now().toString(36), title: brief.replace(/\s+/g, " ").slice(0, 48), brief,
@@ -695,8 +747,11 @@ export default function DashboardPage() {
       };
       const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels), sandboxId: sid };
       const final = await runPipeline(env, {
-        log: (m) => setVenusRun((prev) => (prev ? { ...prev, label: m.slice(0, 100) } : prev)),
-        progress: (p) => setVenusRun((prev) => (prev ? { ...prev, label: p?.label ?? prev.label, value: p ? p.value : null } : prev)),
+        log: (m) => { setVenusRun((prev) => (prev ? { ...prev, label: m.slice(0, 100) } : prev)); workSet(chat.id, m.slice(0, 110), "venus"); },
+        progress: (p) => {
+          setVenusRun((prev) => (prev ? { ...prev, label: p?.label ?? prev.label, value: p ? p.value : null } : prev));
+          if (p) workSet(chat.id, `${p.label}${p.value != null ? " " + Math.round(p.value * 100) + "%" : ""}`, "venus");
+        },
         update: () => {}, cancelled: () => false,
       }, project, "studio");
       if (final.status === "done" && final.finalPath) {
@@ -708,7 +763,7 @@ export default function DashboardPage() {
       return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
       venusBusyRef.current = false; busyChats.current.delete(chat.id); setVenusRun(null);
-      if (!opts.silent) void autoOff(chat.id);
+      if (showWork) workEnd(chat.id, "venus");
     }
   }
 
@@ -753,17 +808,19 @@ export default function DashboardPage() {
     const out = (m: string) => { say(chat.id, m); return m; };
     if (!token) return out("Vercel is not connected for this chat. Open the **Connectors** button (plug icon), add your Vercel token, then ask again.");
     if (!e2bKey) return out("Deploy needs the computer (E2B key). Add it under API keys first.");
-    const sid = await startOrResumePc(chat.id);
-    if (!sid) return out("This chat's computer could not be started — turn it on with the monitor button first.");
-    say(chat.id, "🚀 Deploying to Vercel… this takes up to a minute.");
+    workStart(chat.id, "Deploy ke liye project wala computer chalu kar raha hoon…", "deploy");
+    let sid: string | null = null;
     try {
+      sid = await acquire({ uid: user.uid, e2bKey }, chat.id, "code"); // the project lives on Venus Code's computer
+      say(chat.id, "🚀 Deploying to Vercel… this takes up to a minute.");
+      workSet(chat.id, "Vercel par deploy ho raha hai…", "deploy");
       const res = await fetch("/api/deploy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ e2bKey, sandboxId: sid, ws: chat.id, vercelToken: token, name: name?.trim() || undefined }) });
       const data = await readJson(res);
       if (!res.ok) return out(`⚠️ Deploy failed: ${data?.error ?? "unknown error"}`);
       return out(`✅ Live: [${data.url}](${data.url})${data.state && data.state !== "READY" ? `\n\nVercel is still finishing the build (${data.state}) — the link works in a minute.` : ""}`);
     } catch (err) {
       return out(`⚠️ Deploy failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { void autoOff(chat.id); }
+    } finally { workEnd(chat.id, "deploy"); if (sid) void releaseNow(e2bKey, sid); }
   }
 
   // ---- Team ----
@@ -782,6 +839,7 @@ export default function DashboardPage() {
     if (teamBusyRef.current) return say(chat.id, "The team is already working on a goal. Wait for the report, then ask again.");
     teamBusyRef.current = true;
     setTeamRun(goal.slice(0, 60));
+    workStart(chat.id, "Team ko goal samjha raha hoon, kaam baant raha hoon…", "team");
     if (activeIdRef.current === chat.id) { setTeamOpen(true); setPcOpen(false); }
     say(chat.id, "👥 Chief is assembling a team for this. Open the **Team** panel (people icon) to watch who does what — I'll post one final report here.");
     try {
@@ -789,7 +847,7 @@ export default function DashboardPage() {
       say(chat.id, report);
     } catch (err) {
       say(chat.id, `⚠️ The team could not finish: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { teamBusyRef.current = false; setTeamRun(null); void autoOff(chat.id); }
+    } finally { teamBusyRef.current = false; setTeamRun(null); workEnd(chat.id, "team"); void autoOff(chat.id); }
   }
 
   /** "Assemble a team" only prepares the roster. Nothing is started. */
@@ -972,16 +1030,19 @@ export default function DashboardPage() {
 
     setSending(true);
     let cmds: Cmd[] = [];
+    workStart(chat.id, "Tools aur memory dekh raha hoon…", "chat");
     try {
       if (!brains.current[chat.id]) await loadChatBrain(chat.id);
       const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
       const specs = await loadTools(chat);
 
-      // 1) UNDERSTAND FIRST: what does the user really want right now?
-      const u = await understand((s, p) => callLLM(chat, s, p, [], "report"), {
+      // 1) UNDERSTAND FIRST (with the chat's own model, so it cannot fail because of a helper model)
+      workSet(chat.id, "Samajh raha hoon aap kya chahte ho…", "chat");
+      const u = await understand((s, p) => callLLM(chat, s, p, [], "act"), {
         text, recent: history.slice(0, -1), role: roleOf(chat.id), tools: specs.map((s) => s.name), hasComputer: Boolean(e2bKey),
       });
       traceOf(chat.id)?.add("intent", `${u.intent}: ${u.why}`);
+      workSet(chat.id, `Samajh gaya: ${INTENT_LABEL[u.intent] ?? u.intent}${u.why.startsWith("keyword") ? " (keyword se)" : ""}`, "chat");
       if (u.intent !== "chat") { await routeIntent(chat, u, text); return; }
 
       // 2) A normal answer: streaming, with the connected tools available
@@ -992,6 +1053,7 @@ export default function DashboardPage() {
       const at = Date.now();
       const userPrompt = history.pop()?.content ?? text;
 
+      workSet(chat.id, "Jawab likh raha hoon…", "chat");
       setStreaming(true);
       let reply = await streamLLM(chat, system, userPrompt, history, (t) => {
         patchChat(chat.id, { messages: [...base, { role: "assistant", content: t.replace(/\[\[[\s\S]*$/, "").trim() || "…", at }] });
@@ -1005,10 +1067,12 @@ export default function DashboardPage() {
         const results: string[] = [];
         for (const c of tc.calls.slice(0, 4)) {
           patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
+          workSet(chat.id, `🔧 ${c.name} chala raha hoon…`, "chat");
           const t = await execTool(chat, c.name, c.args, tainted);
           if (t.flagged) tainted = true;
           results.push(`### ${c.name}\n${t.text}`);
         }
+        workSet(chat.id, "Tool ke result se jawab bana raha hoon…", "chat");
         const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nAnswer the user now using these results. Call another tool only if it is really needed.`;
         const prev = reply;
         reply = await callLLM(chat, system, resultsMsg, [...convo, { role: "assistant", content: prev }]);
@@ -1020,7 +1084,7 @@ export default function DashboardPage() {
       say(chat.id, parsed.clean || (cmds.length ? "Done." : "…"));
     } catch (err) {
       say(chat.id, `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`);
-    } finally { setSending(false); setStreaming(false); }
+    } finally { setSending(false); setStreaming(false); workEnd(chat.id, "chat"); }
     if (cmds.length > 0) void runCommands(cmds, chat);
   }
 
@@ -1061,6 +1125,7 @@ export default function DashboardPage() {
   const activeSandboxId = activeChat?.pcSandboxId ?? null;
   const connectedNames = Object.keys(activeChat?.connectors ?? {}).filter((k) => !k.startsWith("auto:")).map((k) => (k.includes(":") ? k.replace(":", " · ") : k));
   const pcStatus = !activeSandboxId ? "no computer yet" : session.status === "paused" ? "off (saved)" : session.running ? "working" : session.status === "ready" ? "on" : session.status;
+  const activeWork = activeChat ? work[activeChat.id] : undefined;
 
   return (
     <div className="flex h-screen bg-bg">
@@ -1094,8 +1159,9 @@ export default function DashboardPage() {
           ) : (
             <>
               <div className="flex-1 overflow-y-auto px-6 py-6">
-                <div className="mx-auto max-w-2xl"><ChatThread messages={activeChat.messages} pending={sending && !streaming} onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }} /></div>
+                <div className="mx-auto max-w-2xl"><ChatThread messages={activeChat.messages} pending={sending && !streaming && !activeWork} onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }} /></div>
               </div>
+              {activeWork && <WorkingBar key={`${activeChat.id}:${activeWork.startedAt}`} label={activeWork.label} startedAt={activeWork.startedAt} steps={activeWork.steps} />}
               <RunBars venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
               <ChatComposer
