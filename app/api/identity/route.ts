@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     if (action === "enable") {
       if (pair) return NextResponse.json({ address: pair[0], placeholder: raw });
       const c = await createInbox();
-      const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.identity`, `${c.address}::${c.password}`);
+      const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.identity`, `${c.address}::${c.password}::${c.base}`);
       await chatRef.update({ "connectors.identity": ph });
       await identityLog(uid, { chatId, kind: "created", site: domainOf(c.address), text: `Inbox created: ${c.address}` });
       return NextResponse.json({ address: c.address, placeholder: ph });
