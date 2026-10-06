@@ -45,7 +45,9 @@ async function telegram(userRef: Ref, chatId: string, text: string) {
 async function switchOff(userRef: Ref, chatId: string, e2bKey: string, sandboxId: string) {
   try {
     await pauseSandbox(e2bKey, sandboxId);
-    await userRef.collection("chats").doc(chatId).update({ pcPaused: true });
+    const ref = userRef.collection("chats").doc(chatId);
+    const ch = (await ref.get()).data() as { pcSandboxId?: string | null } | undefined;
+    if (ch?.pcSandboxId === sandboxId) await ref.update({ pcPaused: true });
   } catch { /* already off or gone */ }
 }
 
