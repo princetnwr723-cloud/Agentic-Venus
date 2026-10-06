@@ -3,7 +3,7 @@ import BotAvatar from "@/components/BotAvatar";
 import type { AvatarColor } from "@/lib/bots";
 
 type Props = {
-  name: string; color: AvatarColor; focusMode: boolean; onToggleFocus: () => void;
+  name: string; color: AvatarColor; focusMode: boolean; onToggleFocus: () => void; onIdentity: () => void;
   onCode: () => void; onVenus: () => void; onSkills: () => void; onRuns: () => void;
   onConnectors: () => void; hasConnectors: boolean;
   onRoutines: () => void; hasRoutines: boolean;
@@ -20,13 +20,15 @@ export default function ChatHeader(p: Props) {
     <header className="flex items-center justify-between border-b border-line px-6 py-3.5">
       <div className="flex items-center gap-2.5">
         <button onClick={p.onToggleFocus} title={p.focusMode ? "Show chat list" : "Focus mode — hide the chat list"} className="rounded-lg p-1.5 text-muted hover:bg-panel2 hover:text-ink">{p.focusMode ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
-        <BotAvatar color={p.color} size={26} />
-        <span className="text-sm font-medium text-ink">{p.name}</span>
+        <button onClick={p.onIdentity} title="Open this agent's identity (profile, email, activity)" className="flex items-center gap-2.5 rounded-lg px-1.5 py-1 hover:bg-panel2">
+          <BotAvatar color={p.color} size={26} />
+          <span className="text-sm font-medium text-ink">{p.name}</span>
+        </button>
       </div>
       <div className="flex items-center gap-1">
-        <button onClick={p.onCode} title="Venus Code — this chat's codespace" className={link}>Code</button>
+        <button onClick={p.onCode} title="Venus Code — only for coding projects" className={link}>Code</button>
         <button onClick={p.onVenus} title="Venus Pro — motion graphics" className={link}>Venus Pro</button>
-        <button onClick={p.onSkills} title="Memory & skills" className={link}>Skills</button>
+        <button onClick={p.onSkills} title="This chat's memory & skills" className={link}>Skills</button>
         <button onClick={p.onRuns} title="Runs — every agent run, step by step" className={link}><Activity size={13} className="mr-1 inline" />Runs</button>
         <button onClick={p.onConnectors} title="Connectors — plugins, MCP, APIs" className={icon(false)}><Plug size={17} />{p.hasConnectors && dot("bg-avatar-teal")}</button>
         <button onClick={p.onRoutines} title="Routines" className={icon(false)}><Clock size={17} />{p.hasRoutines && dot("bg-avatar-teal")}</button>
