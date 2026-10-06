@@ -32,7 +32,9 @@ export async function extractContract(llm: (system: string, prompt: string) => P
     const j = a >= 0 && b > a ? (JSON.parse(raw.slice(a, b + 1)) as Partial<Contract>) : {};
     const isList = j.kind === "list" || Boolean(h);
     if (!isList) return NO_CONTRACT;
-    const quota = Math.min(300, Math.max(1, h?.quota ?? Number(j.quota) || 0));
+
+    const quota = Math.min(300, Math.max(1, (h?.quota ?? Number(j.quota)) || 0));
+
     if (!quota) return h ?? NO_CONTRACT;
     const verify = (h?.verify ?? (["leads", "urls"].includes(String(j.verify)) ? j.verify : "urls")) as Contract["verify"];
     const fields = Array.isArray(j.fields) && j.fields.length ? j.fields.map(String).slice(0, 10) : verify === "leads" ? LEAD_FIELDS : ["title", "url", "source_url"];
