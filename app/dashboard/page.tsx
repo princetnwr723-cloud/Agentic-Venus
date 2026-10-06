@@ -4,32 +4,33 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
 import { signOut } from "firebase/auth";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { FieldPath, deleteField, doc, getDoc, updateDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { useKeys, type SavedLogin } from "@/lib/keys-context";
-import { listChats, createChat, updateChatMessages, updateChatModel, updateChatPc, updateChatConnectors, type Chat, type ChatMessage } from "@/lib/chats";
+import { listChats, createChat, updateChatMessages, updateChatModel, updateChatPc, type Chat, type ChatMessage } from "@/lib/chats";
 import { listCustomAgents, createCustomAgent, type CustomAgent } from "@/lib/agents";
 import { listRoutinesForChat, createRoutine, setRoutineEnabled, deleteRoutine, recordManualRun, type Routine } from "@/lib/routines";
 import { setModelPref } from "@/lib/model-pref";
+import { PRESET_AGENTS, type AvatarColor } from "@/lib/bots";
 import type { ProviderId } from "@/lib/providers";
-import { addMemory, brainPrompt, forgetMemory, loadBrain, parseSkillMarkdown, reflect, saveSkill, skillFromText, type Brain } from "@/lib/brain";
+import { addMemory, brainPrompt, forgetMemory, loadBrain, parseSkillMarkdown, rankSkills, reflect, saveSkill, setRole, skillFromText, type Brain, type Verdict } from "@/lib/brain";
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
 import type { VenusProject } from "@/lib/venus";
 import { runPipeline, signedUrl, type PipelineEnv } from "@/lib/venus-pipeline";
 import { personaOf, type Member } from "@/lib/team-catalog";
-import { runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
-import type { AvatarColor } from "@/lib/bots";
+import { assembleTeam, runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
 import { pickModel, fallbackChain, type Role } from "@/lib/router";
 import { beginTrace, addUsage, traceOf } from "@/lib/trace";
 import { verifyResult } from "@/lib/critic";
+import { understand, type Understanding } from "@/lib/intent";
 import { describeStep, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
 import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOutcome, type PcPending } from "@/lib/pc-agent";
 import type { ToolSpec } from "@/lib/tools/types";
 import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
 import {
-  DEPLOY_PROMPT, EMPTY_SESSION, IDLE_PAUSE_MS, PC_PROMPT, RUN_CYCLE_MS, analyzePcMessage, defaultProviderAndModel, domainCount,
+  DEPLOY_PROMPT, EMPTY_SESSION, IDLE_PAUSE_MS, RUN_CYCLE_MS, analyzePcMessage, defaultProviderAndModel,
   extractCommands, guessVenusOptions, normSite, readJson, type Cmd, type PcSession,
 } from "@/lib/dashboard/helpers";
 import Sidebar from "@/components/dashboard/Sidebar";
@@ -37,6 +38,7 @@ import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
 import ChatComposer from "@/components/dashboard/ChatComposer";
 import RunBars from "@/components/dashboard/RunBars";
+import IdentityPanel from "@/components/dashboard/IdentityPanel";
 import ModelPicker from "@/components/dashboard/ModelPicker";
 import NewChatModal from "@/components/dashboard/NewChatModal";
 import SettingsModal from "@/components/dashboard/SettingsModal";
@@ -51,6 +53,12 @@ const toRequest = (p: PcPending): AgentRequest =>
   : p.kind === "choice" ? { kind: "choice", question: p.question ?? "", options: p.options ?? [] }
   : p.kind === "handoff" ? { kind: "handoff", message: p.message ?? "" }
   : { kind: "text", question: p.question ?? "" };
+
+// Chat mode can only do light things. Heavy work (computer, code, video, team) goes through "understand first".
+const MEMORY_PROMPT = `
+
+To save a durable fact about the user for THIS chat, end your reply with [[MEMORY:add|<fact>]]. To forget something: [[MEMORY:forget|<keyword>]]. To install a skill the user shared: [[SKILL:install|<link or text>]]. Use these only when really needed and never explain the syntax.
+If a connected tool can answer or do the request, call the tool instead of guessing.`;
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
@@ -68,6 +76,7 @@ export default function DashboardPage() {
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectorsOpen, setConnectorsOpen] = useState(false);
+  const [identityOpen, setIdentityOpen] = useState(false);
   const [pcMessage, setPcMessage] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [computerMode, setComputerMode] = useState(false);
@@ -79,6 +88,7 @@ export default function DashboardPage() {
   const [teamOpen, setTeamOpen] = useState(false);
   const [pcFullscreen, setPcFullscreen] = useState(false);
   const [sessions, setSessions] = useState<Record<string, PcSession>>({});
+  const [, setBrainTick] = useState(0);
 
   const sessionsRef = useRef<Record<string, PcSession>>({});
   const sandboxRef = useRef<Record<string, string | null>>({});
@@ -94,7 +104,7 @@ export default function DashboardPage() {
   const venusBusyRef = useRef(false);
   const codeBusyRef = useRef(false);
   const teamBusyRef = useRef(false);
-  const brainRef = useRef<Brain>({ memories: [], skills: [] });
+  const brains = useRef<Record<string, Brain>>({});
   const toolCache = useRef<Record<string, { sig: string; specs: ToolSpec[] }>>({});
 
   const [routines, setRoutines] = useState<Routine[]>([]);
@@ -107,11 +117,18 @@ export default function DashboardPage() {
   useEffect(() => { if (!authLoading && !user) router.replace("/"); }, [authLoading, user, router]);
   useEffect(() => { fetch("/api/venus/media").then((r) => r.json()).then(setCfg).catch(() => {}); }, []);
 
-  async function refreshBrain() { if (user) brainRef.current = await loadBrain(user.uid).catch(() => brainRef.current); }
+  // ---- every chat has its OWN memory + skills (nothing is shared between chats) ----
+  const brainOf = (id: string): Brain => brains.current[id] ?? { memories: [], skills: [] };
+  async function loadChatBrain(chatId: string) {
+    if (!user) return;
+    brains.current[chatId] = await loadBrain({ uid: user.uid, chatId }).catch(() => brainOf(chatId));
+    setBrainTick((n) => n + 1);
+  }
+  const roleOf = (id: string) => brainOf(id).memories.find((m) => m.kind === "role")?.text ?? "";
+  useEffect(() => { if (activeId && user) void loadChatBrain(activeId); /* eslint-disable-next-line */ }, [activeId, user]);
 
   useEffect(() => {
     if (!user) return;
-    refreshBrain();
     Promise.all([listChats(user.uid), listCustomAgents(user.uid)]).then(([loadedChats, loadedAgents]) => {
       setChats(loadedChats); setCustomAgents(loadedAgents); setChatsLoaded(true);
       if (loadedChats.length > 0) setActiveId(loadedChats[0].id);
@@ -201,7 +218,7 @@ export default function DashboardPage() {
     await updateChatModel(user.uid, activeChat.id, provider, model);
   }
 
-  // ---- This chat's computer (the ONLY E2B machine: Venus Code, Venus Pro and the background agent use it) ----
+  // ---- This chat's computer ----
 
   async function loadScreen(chatId: string, sandboxId: string): Promise<"ok" | "gone" | "error"> {
     if (!e2bKey) { setSettingsOpen(true); return "error"; }
@@ -240,7 +257,6 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
       setSandboxId(chatId, data.sandboxId);
       runStartRef.current[chatId] = Date.now();
-      if (data.persistence === "none") setPcMessage("ℹ️ This E2B version has no auto-pause. The server pauses idle computers for you (data stays safe).");
       const r = await loadScreen(chatId, data.sandboxId);
       return r === "ok" ? (data.sandboxId as string) : null;
     } catch (err) {
@@ -282,6 +298,17 @@ export default function DashboardPage() {
     }
   }
 
+  /** The agent switches the computer off as soon as its work is finished (saves your E2B credits). */
+  async function autoOff(chatId: string) {
+    if (!user || !e2bKey || !sandboxRef.current[chatId]) return;
+    const busy = () => runningRef.current[chatId] || codeBusyRef.current || venusBusyRef.current || teamBusyRef.current;
+    if (busy() || sessionsRef.current[chatId]?.status === "paused") return;
+    await new Promise((r) => setTimeout(r, 4000)); // let you see the final screen
+    if (busy()) return;
+    const r = await pausePc(chatId);
+    if (r.ok) say(chatId, "🔌 Task finished — I turned the computer off to save credits. Everything is saved; it switches on by itself for the next task.");
+  }
+
   async function deletePc(chatId: string) {
     const id = sandboxRef.current[chatId] ?? null;
     if (!user || !e2bKey || !id) return;
@@ -315,7 +342,6 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pcOpen, activeChat?.id]);
 
-  // Client-side idle pause + heartbeat for work that only this tab drives (Venus Pro, Venus Code).
   useEffect(() => {
     if (!user || !e2bKey) return;
     const iv = setInterval(() => {
@@ -404,42 +430,44 @@ export default function DashboardPage() {
     } catch { return null; }
   }
 
-  // ---- Tools (free pack + plugins + MCP + API) used from chat ----
+  /** Self-improvement for THIS chat: scores the skills that were used, keeps facts, writes lessons, rewrites failing skills. */
+  function learnFrom(chat: Chat, input: { task: string; outcome: string; steps: string; verdict: Verdict; skillsUsed: string[] }) {
+    if (!user) return;
+    const rp = pickModel("report", apiKeys, chat);
+    reflect({ uid: user.uid, chatId: chat.id }, { apiKeys, provider: rp.provider, model: rp.model }, brainOf(chat.id), input)
+      .then(async (l) => { if (l.length) { say(chat.id, "🧠 Learned: " + l.join("; ")); await loadChatBrain(chat.id); } })
+      .catch(() => {});
+  }
+
+  // ---- Tools (free pack + plugins + MCP + API) ----
 
   async function loadTools(chat: Chat): Promise<ToolSpec[]> {
     if (!user) return [];
-    const conn = (chatsRef.current.find((c) => c.id === chat.id) ?? chat).connectors ?? {};
-    const sig = JSON.stringify(conn);
+    const sig = JSON.stringify(Object.keys((chatsRef.current.find((c) => c.id === chat.id) ?? chat).connectors ?? {}).sort());
     const hit = toolCache.current[chat.id];
     if (hit && hit.sig === sig) return hit.specs;
     try {
-      const r = await readJson(await fetch("/api/tools", {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-        body: JSON.stringify({ action: "list", uid: user.uid, chatId: chat.id, connectors: conn }),
-      }));
+      const r = await readJson(await fetch("/api/tools", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "list", chatId: chat.id }) }));
       const specs = Array.isArray(r.specs) ? (r.specs as ToolSpec[]) : [];
       toolCache.current[chat.id] = { sig, specs };
       return specs;
     } catch { return []; }
   }
 
-  async function execTool(chat: Chat, name: string, args: Record<string, unknown>): Promise<string> {
-    if (!user) return "ERROR: not signed in.";
-    const conn = (chatsRef.current.find((c) => c.id === chat.id) ?? chat).connectors ?? {};
+  async function execTool(chat: Chat, name: string, args: Record<string, unknown>, force: boolean): Promise<{ text: string; flagged: boolean }> {
+    if (!user) return { text: "ERROR: not signed in.", flagged: false };
     const post = async (approved: boolean) =>
-      readJson(await fetch("/api/tools", {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-        body: JSON.stringify({ action: "call", uid: user.uid, chatId: chat.id, connectors: conn, name, args, approved }),
-      }));
+      readJson(await fetch("/api/tools", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "call", chatId: chat.id, name, args, approved, force }) }));
     let r = await post(false);
     if (r.needsApproval) {
-      if (!window.confirm(`Approve this action?\n\n${r.needsApproval.summary}`)) return "The user declined this action. Do not retry it.";
+      const why = force ? "\n\n⚠️ Something the agent just read tried to give it instructions, so even auto-approved actions need your OK." : "";
+      if (!window.confirm(`Approve this action?\n\n${r.needsApproval.summary}${why}`)) return { text: "The user declined this action. Do not retry it.", flagged: false };
       r = await post(true);
     }
-    return r.ok ? String(r.text) : `ERROR: ${r.text || r.error || "tool failed"}`;
+    return { text: r.ok ? String(r.text) : `ERROR: ${r.text || r.error || "tool failed"}`, flagged: Array.isArray(r.flagged) && r.flagged.length > 0 };
   }
 
-  // ---- Venus Code ----
+  // ---- Venus Code: ONLY for software projects ----
 
   async function runCodeFor(chat: Chat, instruction: string, opts: { silent?: boolean; persona?: string; onLine?: (l: string) => void } = {}): Promise<string> {
     if (!user) return "";
@@ -468,16 +496,19 @@ export default function DashboardPage() {
       };
       const res = await runCodeAgent(
         { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, provider: chat.provider, model: chat.model, chatId: chat.id, sandboxId: sid },
-        hooks, project, instruction, { brain: brainRef.current, persona: opts.persona }
+        hooks, project, instruction, { brain: brainOf(chat.id), persona: opts.persona }
       );
       if (!opts.silent) say(chat.id, res.ok ? `✅ Venus Code finished.\n\n${res.summary}\n\n[Open the Code page](/code?chat=${chat.id})` : `⚠️ Venus Code stopped: ${res.summary}\n\n[Open the Code page](/code?chat=${chat.id})`);
       return res.summary;
     } catch (err) {
       return out(`⚠️ Venus Code failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { codeBusyRef.current = false; busyChats.current.delete(chat.id); setCodeRun(null); }
+    } finally {
+      codeBusyRef.current = false; busyChats.current.delete(chat.id); setCodeRun(null);
+      if (!opts.silent) void autoOff(chat.id);
+    }
   }
 
-  // ---- The background computer agent ----
+  // ---- The computer agent (visible on the screen) ----
 
   async function finishPcRun(chat: Chat, task: string, out: PcOutcome, opts?: { quiet?: boolean; heal?: HealCtx }): Promise<string> {
     if (!user || !e2bKey) return out.summary;
@@ -485,8 +516,12 @@ export default function DashboardPage() {
     const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
     const steps = sessionsRef.current[chatId]?.steps ?? [];
     const summary = out.summary || "Finished.";
+    const skillsUsed = rankSkills(brainOf(chatId).skills, task, 3).map((s) => s.name);
     if (out.status === "stopped") { pushStep(chatId, "■ Stopped."); return "Stopped before finishing."; }
-    if (out.status !== "done") return `⚠️ ${summary}`;
+    if (out.status !== "done") {
+      if (!opts?.quiet && steps.length >= 3) learnFrom(chat, { task, outcome: summary, steps: steps.join("\n"), verdict: "fail", skillsUsed });
+      return `⚠️ ${summary}`;
+    }
 
     let replay = "";
     if (out.proof) { const url = await proofUrl(env, out.proof).catch(() => ""); if (url) replay = `\n\n🎥 [Watch the replay](${url}) (link works for 6 hours)`; }
@@ -502,7 +537,6 @@ export default function DashboardPage() {
     if (v.verdict !== "pass") text = `⚠️ **Verifier (${v.verdict}):** ${v.reason}\n\n${text}`;
     text += replay;
 
-    // Workflow compiler: a verified run becomes a recipe (browser + tool + shell steps) that replays with no AI.
     if (v.verdict === "pass" && out.recipe && out.recipe.length) {
       const all: RecipeStep[] = opts?.heal ? [...opts.heal.keep, ...out.recipe] : out.recipe;
       const first = all.find((s) => (s.kind ?? "browse") === "browse" && "url" in s && s.url) as { url?: string } | undefined;
@@ -513,16 +547,13 @@ export default function DashboardPage() {
         .then(() => say(chatId, opts?.heal ? `🩹 Recipe **${name}** repaired — only the broken part was re-learned.` : `💾 Saved as a recipe. Next time run it free (no AI): \`/recipe ${task.slice(0, 30)}\``))
         .catch(() => {});
     }
-    if (steps.length >= 4) {
-      reflect(user.uid, { apiKeys, provider: chat.provider, model: chat.model }, brainRef.current, { task, outcome: summary, steps: steps.join("\n") })
-        .then((l) => { if (l.length) { say(chatId, "🧠 Learned: " + l.join("; ")); refreshBrain(); } }).catch(() => {});
-    }
+    if (steps.length >= 3) learnFrom(chat, { task, outcome: summary, steps: steps.join("\n"), verdict: v.verdict, skillsUsed });
     return text;
   }
 
   async function runPcTask(
     chat: Chat, task: string, logTask: boolean,
-    opts?: { stopAfter?: boolean; quiet?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string } }
+    opts?: { quiet?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string } }
   ): Promise<string> {
     const chatId = chat.id;
     if (!user || !e2bKey) return "";
@@ -534,6 +565,7 @@ export default function DashboardPage() {
     stopRef.current[chatId] = false;
     busyChats.current.add(chatId);
     patchSession(chatId, { running: true, steps: [`▶ ${task}`], request: null });
+    // The work happens on the visible screen: open the panel so you can watch it.
     if (activeIdRef.current === chatId && !opts?.quiet) { setPcOpen(true); setTeamOpen(false); }
     const trace = beginTrace(user.uid, chatId, task.slice(0, 80), "computer");
     const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
@@ -546,8 +578,8 @@ export default function DashboardPage() {
       if (!jobId) {
         pushStep(chatId, "⚙️ Preparing the computer…");
         await ensureNode(env, sid, (l) => pushStep(chatId, l));
-        jobId = await startPcJob(env, { sandboxId: sid, chatId, task, provider: chat.provider, model: chat.model, apiKey: key, context: brainPrompt(brainRef.current, task), heal: opts?.heal });
-        pushStep(chatId, "🚀 Working in the background — you can close this tab; I will report here.");
+        jobId = await startPcJob(env, { sandboxId: sid, chatId, task, provider: chat.provider, model: chat.model, apiKey: key, context: brainPrompt(brainOf(chatId), task), heal: opts?.heal });
+        pushStep(chatId, "🚀 Working on the computer screen — you can watch it live.");
       } else pushStep(chatId, "🔗 Re-attached to the running task.");
 
       const out = await followPcJob({
@@ -559,8 +591,7 @@ export default function DashboardPage() {
           const reply = await askUser(chatId, toRequest(p));
           if (stopRef.current[chatId]) return { type: "answer", text: "" };
           if (reply.type === "login") {
-            // The password goes to YOUR account document; the server injects it into the browser. The model never sees it.
-            await savePcCredential(normSite(p.site ?? ""), { email: reply.email, password: reply.password });
+            await savePcCredential(normSite(p.site ?? ""), { email: reply.email, password: reply.password }); // encrypted on the server
             return { type: "login_saved", site: p.site ?? "" };
           }
           if (reply.type === "self") return { type: "self" };
@@ -585,10 +616,7 @@ export default function DashboardPage() {
       appendMessages(chatId, logTask
         ? [{ role: "user", content: `🖥️ Task on the computer: ${task}`, at }, { role: "assistant", content: finalText || "Finished.", at }]
         : [{ role: "assistant", content: finalText || "Finished.", at }]);
-    }
-    if (opts?.stopAfter) {
-      const r = await pausePc(chatId);
-      say(chatId, r.ok ? "✅ Computer turned off. Everything is saved — turn it on again and it continues where it stopped." : `⚠️ Could not turn the computer off: ${r.error ?? "unknown error"}`);
+      void autoOff(chatId); // finished → computer off
     }
     return finalText;
   }
@@ -608,17 +636,13 @@ export default function DashboardPage() {
     say(chat.id, `▶️ Running recipe **${hit.name}** (${hit.steps.length} steps) — no AI model used.`);
     try {
       const r = await replayRecipe({
-        token: () => user.getIdToken(), uid: user.uid, chatId: chat.id,
-        connectors: chatsRef.current.find((c) => c.id === chat.id)?.connectors ?? {},
-        recipe: hit, creds: findCredential(hit.site) ?? undefined,
+        token: () => user.getIdToken(), uid: user.uid, chatId: chat.id, connectors: {},
+        recipe: hit, creds: undefined,
         shell: async (command) => {
           if (!e2bKey) return { ok: false, text: "Add an E2B key first." };
           const id = await startOrResumePc(chat.id);
           if (!id) return { ok: false, text: "The computer could not be started." };
-          const res = await readJson(await fetch("/api/e2b/shell", {
-            method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-            body: JSON.stringify({ uid: user.uid, e2bKey, sandboxId: id, command }),
-          }));
+          const res = await readJson(await fetch("/api/e2b/shell", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ e2bKey, sandboxId: id, command }) }));
           return { ok: !res.error && (res.done ? res.exitCode === 0 : true), text: String(res.error ?? res.output ?? "") };
         },
         approve: async (summary) => window.confirm(`Approve this recipe action?\n\n${summary}`),
@@ -628,11 +652,10 @@ export default function DashboardPage() {
 
       const k = r.failedAt ?? 0;
       if (!e2bKey) return say(chat.id, `⚠️ Recipe broke at step ${k + 1}. Add an E2B key and I can repair it.\n\n${r.snapshot.slice(0, 400)}`);
-      say(chat.id, `🩹 Step ${k + 1} of ${hit.steps.length} broke (${describeStep(hit.steps[k])}). I will re-learn only that part and keep the steps before it.`);
+      say(chat.id, `🩹 Step ${k + 1} of ${hit.steps.length} broke (${describeStep(hit.steps[k])}). I will re-learn only that part on the computer and keep the steps before it.`);
       const healTask =
         `A saved recipe "${hit.name}" (original goal: ${hit.task}) broke at step ${k + 1} of ${hit.steps.length} because the site changed.\n` +
-        `The browser is already open${r.url ? ` on ${r.url}` : ""} with the login kept: do NOT start over and do NOT repeat the finished steps.\n` +
-        `Do what the broken step intended, then finish the rest of the goal. Steps still to do, for reference:\n` +
+        `The browser is open${r.url ? ` on ${r.url}` : ""}. Do what the broken step intended, then finish the rest of the goal. Steps still to do, for reference:\n` +
         hit.steps.slice(k).map((s, i) => `${k + i + 1}. ${describeStep(s)}`).join("\n");
       await runPcTask(chat, healTask, true, { heal: { recipe: hit, keep: hit.steps.slice(0, k), session: r.session, snapshot: r.snapshot, url: r.url } });
     } catch (e) {
@@ -683,26 +706,44 @@ export default function DashboardPage() {
       return out(`⚠️ The video could not be finished: ${final.error ?? "unknown error"}\n\n[Open it in Venus Pro](/venus?project=${final.id}) to retry from the failed step.`);
     } catch (err) {
       return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { venusBusyRef.current = false; busyChats.current.delete(chat.id); setVenusRun(null); }
+    } finally {
+      venusBusyRef.current = false; busyChats.current.delete(chat.id); setVenusRun(null);
+      if (!opts.silent) void autoOff(chat.id);
+    }
   }
 
   // ---- Connectors & deploy ----
 
   async function testConnector(kind: string, token: string): Promise<{ ok: boolean; label?: string; error?: string }> {
     if (!user) return { ok: false, error: "Not signed in." };
-    const res = await fetch("/api/connectors/test", {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-      body: JSON.stringify({ uid: user.uid, kind, token }),
-    });
+    const res = await fetch("/api/connectors/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, token }) });
     return readJson(res);
   }
 
+  // Writes ONE key at a time, so a connector the server added (e.g. the agent's own inbox) is never overwritten.
   async function saveConnector(kind: string, token: string) {
     if (!user || !activeChat) return;
-    const next = { ...(chatsRef.current.find((c) => c.id === activeChat.id)?.connectors ?? activeChat.connectors ?? {}) };
-    if (token) next[kind] = token; else delete next[kind];
-    patchChat(activeChat.id, { connectors: next });
-    await updateChatConnectors(user.uid, activeChat.id, next).catch(() => {});
+    const chatId = activeChat.id;
+    const ref = doc(db, "users", user.uid, "chats", chatId);
+    const name = `conn.${chatId.toLowerCase()}.${kind.toLowerCase().replace(/[^a-z0-9:]+/g, "_")}`;
+    const next = { ...(chatsRef.current.find((c) => c.id === chatId)?.connectors ?? {}) };
+    try {
+      if (kind.startsWith("auto:")) {
+        if (token) { await updateDoc(ref, new FieldPath("connectors", kind), token); next[kind] = token; }
+        else { await updateDoc(ref, new FieldPath("connectors", kind), deleteField()); delete next[kind]; }
+      } else if (token) {
+        const r = await readJson(await fetch("/api/vault", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "set", name, value: token }) }));
+        if (r.error) throw new Error(r.error);
+        await updateDoc(ref, new FieldPath("connectors", kind), r.placeholder as string);
+        next[kind] = r.placeholder as string;
+      } else {
+        await updateDoc(ref, new FieldPath("connectors", kind), deleteField());
+        delete next[kind];
+        await fetch("/api/vault", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete", name }) }).catch(() => {});
+      }
+    } catch (e) { setPcMessage(`⚠️ Could not save the connector: ${e instanceof Error ? e.message : "unknown error"}`); return; }
+    patchChat(chatId, { connectors: next });
+    delete toolCache.current[chatId];
   }
 
   async function runDeploy(chat: Chat, name?: string): Promise<string> {
@@ -716,16 +757,13 @@ export default function DashboardPage() {
     if (!sid) return out("This chat's computer could not be started — turn it on with the monitor button first.");
     say(chat.id, "🚀 Deploying to Vercel… this takes up to a minute.");
     try {
-      const res = await fetch("/api/deploy", {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-        body: JSON.stringify({ uid: user.uid, e2bKey, sandboxId: sid, ws: chat.id, vercelToken: token, name: name?.trim() || undefined }),
-      });
+      const res = await fetch("/api/deploy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ e2bKey, sandboxId: sid, ws: chat.id, vercelToken: token, name: name?.trim() || undefined }) });
       const data = await readJson(res);
       if (!res.ok) return out(`⚠️ Deploy failed: ${data?.error ?? "unknown error"}`);
       return out(`✅ Live: [${data.url}](${data.url})${data.state && data.state !== "READY" ? `\n\nVercel is still finishing the build (${data.state}) — the link works in a minute.` : ""}`);
     } catch (err) {
       return out(`⚠️ Deploy failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    }
+    } finally { void autoOff(chat.id); }
   }
 
   // ---- Team ----
@@ -747,25 +785,36 @@ export default function DashboardPage() {
     if (activeIdRef.current === chat.id) { setTeamOpen(true); setPcOpen(false); }
     say(chat.id, "👥 Chief is assembling a team for this. Open the **Team** panel (people icon) to watch who does what — I'll post one final report here.");
     try {
-      const report = await runTeamGoal({ uid: user.uid, chatId: chat.id, goal, ctx: brainPrompt(brainRef.current, goal, { noSkills: true }), host: teamHost(chat) });
+      const report = await runTeamGoal({ uid: user.uid, chatId: chat.id, goal, ctx: brainPrompt(brainOf(chat.id), goal, { noSkills: true }), host: teamHost(chat) });
       say(chat.id, report);
     } catch (err) {
       say(chat.id, `⚠️ The team could not finish: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { teamBusyRef.current = false; setTeamRun(null); }
+    } finally { teamBusyRef.current = false; setTeamRun(null); void autoOff(chat.id); }
+  }
+
+  /** "Assemble a team" only prepares the roster. Nothing is started. */
+  async function assembleFor(chat: Chat, brief: string) {
+    if (!user) return;
+    setTeamOpen(true); setPcOpen(false);
+    try {
+      const members = await assembleTeam({ uid: user.uid, chatId: chat.id, brief: `${roleOf(chat.id)}\n${brief}`.trim(), ctx: brainPrompt(brainOf(chat.id), brief, { noSkills: true }), llm: (s, p) => callLLM(chat, s, p, [], "plan") });
+      say(chat.id, `👥 Team ready: ${members.map((m) => `${m.name} (${m.title})`).join(", ")}.\n\nTell me the first goal and I will plan it with them. Nothing has been started yet.`);
+    } catch (e) { say(chat.id, `⚠️ Could not assemble the team: ${e instanceof Error ? e.message : "unknown error"}`); }
   }
 
   async function applyMemoryCommand(chat: Chat, arg: string, quiet = false) {
     if (!user) return;
     const m = /^(add|forget)\s*\|\s*([\s\S]+)$/i.exec(arg);
     if (!m) return;
+    const scope = { uid: user.uid, chatId: chat.id };
     if (m[1].toLowerCase() === "add") {
-      const saved = await addMemory(user.uid, m[2]);
-      if (saved && !quiet) say(chat.id, `🧠 Remembered: ${saved.text}`);
+      const saved = await addMemory(scope, m[2]);
+      if (saved && !quiet) say(chat.id, `🧠 Remembered (in this chat): ${saved.text}`);
     } else {
-      const n = await forgetMemory(user.uid, m[2]);
+      const n = await forgetMemory(scope, m[2]);
       if (!quiet) say(chat.id, n ? `🧠 Forgot ${n} item${n > 1 ? "s" : ""} about “${m[2]}”.` : `I had nothing saved about “${m[2]}”.`);
     }
-    await refreshBrain();
+    await loadChatBrain(chat.id);
   }
 
   async function runMemberCommands(cmds: Cmd[], chat: Chat, who: Member): Promise<string> {
@@ -781,21 +830,22 @@ export default function DashboardPage() {
 
   async function talkMember(chat: Chat, who: Member, history: TMsg[], text: string): Promise<string> {
     const hint =
-      who.tool === "pc" ? "To do work on the computer (browse, search, download, terminal), end your reply with [[PC:task|<clear instruction>]]."
-      : who.tool === "code" ? "To build or change code, end your reply with [[CODE:<detailed instruction>]]."
+      who.tool === "pc" ? "To do work on the computer (browse, scrape, download, terminal), end your reply with [[PC:task|<clear instruction>]]."
+      : who.tool === "code" ? "Only if the user wants a software project built or changed, end your reply with [[CODE:<detailed instruction>]]."
       : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]."
       : who.tool === "email" ? "You draft emails (sending needs a Gmail MCP connector): write the full draft in your reply."
       : "Answer directly and concretely.";
-    const reply = await callLLM(chat, `${personaOf(who)}\n${hint}${brainPrompt(brainRef.current, text)}`, text, history.slice(-12).map((m) => ({ role: m.role, content: m.content })));
+    const reply = await callLLM(chat, `${personaOf(who)}\n${hint}${brainPrompt(brainOf(chat.id), text)}`, text, history.slice(-12).map((m) => ({ role: m.role, content: m.content })));
     const parsed = extractCommands(reply);
     const extra = parsed.cmds.length ? await runMemberCommands(parsed.cmds, chat, who) : "";
     return [parsed.clean, extra].filter(Boolean).join("\n\n") || "Done.";
   }
 
-  // ---- Skills & memory from chat ----
+  // ---- Skills from chat (saved for THIS chat only) ----
 
   async function installSkillFrom(chat: Chat, input: string): Promise<{ names: string[]; message: string }> {
     if (!user) return { names: [], message: "" };
+    const scope = { uid: user.uid, chatId: chat.id };
     const env = { apiKeys, provider: chat.provider, model: chat.model };
     const urls = input.match(/https?:\/\/[^\s)>\]]+/g) ?? [];
     const sources: Array<{ text: string; src: string }> = [];
@@ -810,23 +860,40 @@ export default function DashboardPage() {
     const names: string[] = [];
     for (const s of sources) {
       const parsed = parseSkillMarkdown(s.text) ?? (await skillFromText(env, s.text));
-      if (parsed) names.push((await saveSkill(user.uid, { ...parsed, source: s.src })).name);
+      if (parsed) names.push((await saveSkill(scope, { ...parsed, source: s.src })).name);
     }
-    await refreshBrain();
-    return { names, message: names.length ? `🧩 Skill saved: **${names.join(", ")}**. I'll use it automatically whenever it fits a task (manage skills on the [Skills page](/skills)).` : "⚠️ I could not read that as a skill. Send a link to a SKILL.md or paste its text." };
+    await loadChatBrain(chat.id);
+    return { names, message: names.length ? `🧩 Skill saved for this chat: **${names.join(", ")}**. I'll use it whenever it fits (manage it on the [Skills page](/skills?chat=${chat.id})).` : "⚠️ I could not read that as a skill. Send a link to a SKILL.md or paste its text." };
   }
 
   async function runCommands(cmds: Cmd[], chat: Chat) {
     for (const c of cmds) {
-      if (c.cmd === "start") await startOrResumePc(chat.id);
-      else if (c.cmd === "stop") await pausePc(chat.id);
-      else if (c.cmd === "task" && c.arg) await runPcTask(chat, c.arg, true);
-      else if (c.cmd === "venus" && c.arg) await startVenus(chat, c.arg);
-      else if (c.cmd === "code" && c.arg) await runCodeFor(chat, c.arg);
-      else if (c.cmd === "team" && c.arg) await runTeam(chat, c.arg);
-      else if (c.cmd === "deploy") await runDeploy(chat, c.arg);
+      if (c.cmd === "deploy") await runDeploy(chat, c.arg);
       else if (c.cmd === "skill" && c.arg) say(chat.id, (await installSkillFrom(chat, c.arg)).message);
       else if (c.cmd === "memory" && c.arg) await applyMemoryCommand(chat, c.arg);
+    }
+  }
+
+  /** Acts on what the "understand first" step decided. Work only starts when the user really asked for it. */
+  async function routeIntent(chat: Chat, u: Understanding, text: string) {
+    if (!user) return;
+    const task = u.task || text;
+    const ack = (fallback: string) => say(chat.id, u.reply || fallback);
+    switch (u.intent) {
+      case "set_role":
+        await setRole({ uid: user.uid, chatId: chat.id }, u.role || text);
+        await loadChatBrain(chat.id);
+        return ack("Understood — I will act in that role from now on. What is the first thing you want me to handle?");
+      case "assemble": ack("On it — putting the team together. Nothing will be started yet."); void assembleFor(chat, text); return;
+      case "clarify": return ack("Can you tell me a little more about what exactly you want me to do?");
+      case "remember": return void (await applyMemoryCommand(chat, `add|${task}`));
+      case "forget": return void (await applyMemoryCommand(chat, `forget|${task}`));
+      case "pc":
+        if (!e2bKey) return say(chat.id, "That needs a computer you can watch. Add your E2B key under API keys first.");
+        ack("On it — opening the computer. You can watch it work in the panel."); void runPcTask(chat, task, false); return;
+      case "code": ack("Starting this as a coding project."); void runCodeFor(chat, task); return;
+      case "video": ack("Starting the video."); void startVenus(chat, task); return;
+      case "team": ack("This needs a few specialists — starting the team."); void runTeam(chat, task); return;
     }
   }
 
@@ -860,6 +927,7 @@ export default function DashboardPage() {
     appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now() }]);
     setDraft(""); setAttach(null);
 
+    // explicit commands: the user chose them, no guessing
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
     if (deploy) { void runDeploy(chat, deploy[1]); return; }
     if (video) { void startVenus(chat, video[1].trim()); return; }
@@ -895,22 +963,31 @@ export default function DashboardPage() {
       if (text.replace(/https?:\/\/\S+/g, "").length < 90) return;
     }
 
-    if (e2bKey && text.length > 60 && domainCount(text) >= 2) { void runTeam(chat, text); return; }
-
-    if (e2bKey && (computerMode || analysis.compound)) {
-      say(chat.id, "On it — starting the computer and working on your task in the background. Progress shows in the panel.");
-      void runPcTask(chat, text, false, { stopAfter: analysis.stopAfter });
+    // the user switched on Computer mode: that is an explicit order
+    if (e2bKey && computerMode) {
+      say(chat.id, "On it — opening the computer. You can watch it work in the panel.");
+      void runPcTask(chat, text, false);
       return;
     }
 
     setSending(true);
     let cmds: Cmd[] = [];
     try {
+      if (!brains.current[chat.id]) await loadChatBrain(chat.id);
       const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
       const specs = await loadTools(chat);
+
+      // 1) UNDERSTAND FIRST: what does the user really want right now?
+      const u = await understand((s, p) => callLLM(chat, s, p, [], "report"), {
+        text, recent: history.slice(0, -1), role: roleOf(chat.id), tools: specs.map((s) => s.name), hasComputer: Boolean(e2bKey),
+      });
+      traceOf(chat.id)?.add("intent", `${u.intent}: ${u.why}`);
+      if (u.intent !== "chat") { await routeIntent(chat, u, text); return; }
+
+      // 2) A normal answer: streaming, with the connected tools available
       const system =
         `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
-        brainPrompt(brainRef.current, text) + (e2bKey ? PC_PROMPT : "") + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem;
+        brainPrompt(brainOf(chat.id), text) + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem;
       const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
       const at = Date.now();
       const userPrompt = history.pop()?.content ?? text;
@@ -921,13 +998,16 @@ export default function DashboardPage() {
       });
 
       let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
+      let tainted = false;
       for (let round = 0; round < 3; round++) {
         const tc = extractToolCalls(reply);
         if (!tc.calls.length) break;
         const results: string[] = [];
         for (const c of tc.calls.slice(0, 4)) {
           patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
-          results.push(`### ${c.name}\n${await execTool(chat, c.name, c.args)}`);
+          const t = await execTool(chat, c.name, c.args, tainted);
+          if (t.flagged) tainted = true;
+          results.push(`### ${c.name}\n${t.text}`);
         }
         const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nAnswer the user now using these results. Call another tool only if it is really needed.`;
         const prev = reply;
@@ -936,8 +1016,8 @@ export default function DashboardPage() {
       }
 
       const parsed = extractCommands(extractToolCalls(reply).clean);
-      cmds = parsed.cmds;
-      say(chat.id, parsed.clean || (cmds.length ? "On it." : "…"));
+      cmds = parsed.cmds.filter((c) => c.cmd === "memory" || c.cmd === "skill" || c.cmd === "deploy"); // chat can never start heavy work by itself
+      say(chat.id, parsed.clean || (cmds.length ? "Done." : "…"));
     } catch (err) {
       say(chat.id, `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`);
     } finally { setSending(false); setStreaming(false); }
@@ -979,6 +1059,8 @@ export default function DashboardPage() {
 
   const session: PcSession = activeChat ? sessions[activeChat.id] ?? EMPTY_SESSION : EMPTY_SESSION;
   const activeSandboxId = activeChat?.pcSandboxId ?? null;
+  const connectedNames = Object.keys(activeChat?.connectors ?? {}).filter((k) => !k.startsWith("auto:")).map((k) => (k.includes(":") ? k.replace(":", " · ") : k));
+  const pcStatus = !activeSandboxId ? "no computer yet" : session.status === "paused" ? "off (saved)" : session.running ? "working" : session.status === "ready" ? "on" : session.status;
 
   return (
     <div className="flex h-screen bg-bg">
@@ -989,8 +1071,9 @@ export default function DashboardPage() {
           {activeChat && (
             <ChatHeader
               name={activeChat.agentName} color={activeChat.agentColor} focusMode={focusMode} onToggleFocus={() => setFocusMode((v) => !v)}
-              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push("/skills")} onRuns={() => router.push("/runs")}
-              onConnectors={() => setConnectorsOpen(true)} hasConnectors={Object.keys(activeChat.connectors ?? {}).some((k) => !k.startsWith("auto:"))}
+              onIdentity={() => setIdentityOpen(true)}
+              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push(`/skills?chat=${activeChat.id}`)} onRuns={() => router.push("/runs")}
+              onConnectors={() => setConnectorsOpen(true)} hasConnectors={connectedNames.length > 0}
               onRoutines={() => setRoutinesOpen(true)} hasRoutines={routines.some((r) => r.enabled)}
               onTeam={handleTeamClick} teamOpen={teamOpen} teamRunning={Boolean(teamRun)}
               onPc={handlePcClick} pcOpen={pcOpen} hasComputer={Boolean(activeSandboxId)} pcPaused={session.status === "paused"}
@@ -1048,6 +1131,16 @@ export default function DashboardPage() {
       )}
       {activeChat && (
         <ConnectorsModal open={connectorsOpen} onClose={() => setConnectorsOpen(false)} chatName={activeChat.agentName} connectors={activeChat.connectors ?? {}} onTest={testConnector} onSave={saveConnector} />
+      )}
+      {activeChat && (
+        <IdentityPanel
+          open={identityOpen} onClose={() => setIdentityOpen(false)} chatId={activeChat.id} name={activeChat.agentName} color={activeChat.agentColor}
+          presetRole={PRESET_AGENTS.find((a) => a.name === activeChat.agentName)?.role} role={roleOf(activeChat.id)}
+          model={`${activeChat.provider} · ${activeChat.model}`} plugins={connectedNames}
+          memories={brainOf(activeChat.id).memories.length} skills={brainOf(activeChat.id).skills.length} computer={pcStatus}
+          getToken={() => user.getIdToken()}
+          onEmailCreated={(ph) => { patchChat(activeChat.id, { connectors: { ...(activeChat.connectors ?? {}), identity: ph } }); delete toolCache.current[activeChat.id]; }}
+        />
       )}
     </div>
   );
