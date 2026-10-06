@@ -117,7 +117,8 @@ function toolLabel(c: ToolCall): string {
 async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; maxSteps: number; depth: number }): Promise<string> {
   const { env, hooks } = ctx;
   const d = o.depth;
-  const skillList = ctx.brain.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
+  const scope = { uid: env.uid, chatId: env.chatId }; // memory and skills belong to THIS chat only
+  const skillList = ctx.brain.skills.filter((s) => !s.disabled).map((s) => `- ${s.name}: ${s.description}`).join("\n");
   const system = codeSystemPrompt({
     readOnly: o.readOnly, ws: ctx.project.id, persona: ctx.persona,
     memory: brainPrompt(ctx.brain, instruction, { noSkills: true }),
@@ -200,10 +201,10 @@ async function agentLoop(ctx: Ctx, instruction: string, o: { readOnly: boolean; 
         out[i] = `User answered: ${await hooks.ask(q || "Need your input", opts)}`;
       } else if (c.name === "skill") {
         const s = ctx.brain.skills.find((x) => x.name.toLowerCase() === (c.attrs.name ?? "").toLowerCase());
-        if (s) { out[i] = `# Skill: ${s.name}\n${s.instructions.slice(0, 12000)}`; bumpSkillUse(env.uid, s); }
+        if (s) { out[i] = `# Skill: ${s.name}\n${s.instructions.slice(0, 12000)}`; bumpSkillUse(scope, s); }
         else out[i] = `ERROR: no skill named "${c.attrs.name}". Available: ${ctx.brain.skills.map((x) => x.name).join(", ") || "none"}`;
       } else if (c.name === "remember") {
-        out[i] = (await addMemory(env.uid, c.body, true)) ? "Saved to memory." : "Not saved (duplicate or not allowed).";
+        out[i] = (await addMemory(scope, c.body, true)) ? "Saved to memory." : "Not saved (duplicate or not allowed).";
       } else if (c.name === "web_search" || c.name === "web_fetch") {
         try {
           out[i] = String((await wsCall(env, "web", c.name === "web_search" ? { query: c.body.trim() } : { url: c.body.trim() })).text);
@@ -239,6 +240,7 @@ export async function runCodeAgent(
 ): Promise<{ ok: boolean; summary: string; project: CodeProject }> {
   let p: CodeProject = { ...project, running: true, stop: false };
   const log: CodeLog[] = [...(p.log ?? [])];
+  const scope = { uid: env.uid, chatId: env.chatId };
   let last = 0;
   let stopped = false;
   const flush = async (force = false) => {
@@ -264,7 +266,7 @@ export async function runCodeAgent(
     emit({ kind: "user", text: instruction });
     const sandboxId = await resolveSandbox(env);
     await ensureCodeTools(env, sandboxId, wrapped);
-    const brain = opts.brain ?? (await loadBrain(env.uid));
+    const brain = opts.brain ?? (await loadBrain(scope));
     const ensured = await wsCall(env, "ensure", { sandboxId, ws: p.id, backupPath: p.backupPath });
     if (ensured.restored) emit({ kind: "info", text: "Codespace restored from your backup." });
     const ctx: Ctx = { env, hooks: wrapped, project: p, sandboxId, brain, venusMd: ensured.venusMd, tree: ensured.tree, persona: opts.persona };
@@ -284,7 +286,7 @@ export async function runCodeAgent(
     p = { ...p, ctx: (p.ctx + `\n- ${instruction.slice(0, 120)} → ${summary.slice(0, 300)}`).slice(-4000) };
     try { p = { ...p, backupPath: (await wsCall(env, "backup", { sandboxId, ws: p.id })).path }; } catch { /* best-effort */ }
 
-    reflect(env.uid, { apiKeys: env.apiKeys, provider: env.provider, model: env.model }, brain, { task: instruction, outcome: summary })
+    reflect(scope, { apiKeys: env.apiKeys, provider: env.provider, model: env.model }, brain, { task: instruction, outcome: summary })
       .then((l) => { if (l.length) hooks.event({ kind: "info", text: "🧠 Learned: " + l.join("; ") }); })
       .catch(() => {});
     unsub();
