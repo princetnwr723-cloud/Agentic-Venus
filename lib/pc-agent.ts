@@ -1,5 +1,6 @@
 import { deleteField, doc, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { contractPrompt, extractContract, NO_CONTRACT, type Contract } from "@/lib/contract";
 import type { Recipe, RecipeStep } from "@/lib/recipes";
 import type { ProviderId } from "@/lib/providers";
 
@@ -41,12 +42,31 @@ export async function ensureNode(env: PcEnv, sandboxId: string, onLine: (l: stri
   throw new Error("Computer setup timed out.");
 }
 
+/** "100 leads" becomes a contract the runner enforces: only independently verified items count. */
+async function contractFor(env: PcEnv, a: { provider: ProviderId; model: string; apiKey: string; task: string }): Promise<Contract> {
+  const llm = async (system: string, prompt: string) => {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
+      body: JSON.stringify({ provider: a.provider, apiKey: a.apiKey, model: a.model, systemPrompt: system, messages: [{ role: "user", content: prompt }] }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d?.error || "contract step failed");
+    return String(d.reply ?? "");
+  };
+  return extractContract(llm, a.task);
+}
+
 export async function startPcJob(env: PcEnv, a: {
   sandboxId: string; chatId: string; task: string; provider: ProviderId; model: string; apiKey: string; context?: string; heal?: HealCtx;
 }): Promise<string> {
+  const contract = a.heal ? NO_CONTRACT : await contractFor(env, a).catch(() => NO_CONTRACT);
+  const instruction = a.heal ? a.task : a.task + contractPrompt(contract);
   const r = await post(env, "/api/runner", {
-    action: "pcstart", sandboxId: a.sandboxId, chatId: a.chatId, task: a.task, provider: a.provider, model: a.model, apiKey: a.apiKey,
+    action: "pcstart", sandboxId: a.sandboxId, chatId: a.chatId, task: instruction, provider: a.provider, model: a.model, apiKey: a.apiKey,
     context: a.context, appUrl: window.location.origin, proof: true,
+    contract: contract.kind === "list" ? contract : undefined,
+    maxSteps: contract.kind === "list" ? Math.min(200, 70 + contract.quota) : undefined,
     ...(a.heal ? { session: a.heal.session, healSnapshot: a.heal.snapshot, startUrl: a.heal.url } : {}),
   });
   const jobId = String(r.jobId);
