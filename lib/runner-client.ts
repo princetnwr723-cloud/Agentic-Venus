@@ -43,7 +43,7 @@ export async function runCodeViaRunner(a: {
     const r = await rcall(env, "start", {
       sandboxId, ws: project.id, instruction: a.instruction, provider: env.provider, model: env.model, apiKey,
       persona: a.persona, memory: brainPrompt(brain, a.instruction, { noSkills: true }),
-      skills: brain.skills.map((s) => ({ name: s.name, description: s.description, instructions: s.instructions })),
+      skills: brain.skills.filter((s) => !s.disabled).map((s) => ({ name: s.name, description: s.description, instructions: s.instructions })),
       earlier: project.ctx || undefined, maxSteps: a.maxSteps, backupPath: project.backupPath,
     });
     jobId = String(r.jobId);
@@ -98,7 +98,8 @@ export async function runCodeViaRunner(a: {
     if (finalState) a.setJob(null);
   }
 
-  for (const m of finalState?.memories ?? []) await addMemory(env.uid, m, true).catch(() => null);
+  // what the agent chose to remember is saved for THIS chat only
+  for (const m of finalState?.memories ?? []) await addMemory({ uid: env.uid, chatId: env.chatId }, m, true).catch(() => null);
   const summary = String(finalState?.summary || "Done.");
   if (finalState?.status === "stopped") throw new Error("Stopped.");
   if (finalState?.status === "error") throw new Error(summary);
