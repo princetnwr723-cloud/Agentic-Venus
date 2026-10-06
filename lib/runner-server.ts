@@ -76,7 +76,7 @@ export async function stopRunner(sb: Sb, jobId: string) {
 const BG_NOTE = `
 
 # BACKGROUND MODE
-You run as a detached background worker inside the computer. The user may have closed the browser. Nobody can answer questions (<ask> is auto-answered with "use your best judgment") and sub-agents (<task>) are unavailable. Work autonomously and finish with <finish>.
+You run as a detached background worker inside the computer. The user may have closed the browser. Nobody can answer questions (<ask> is auto-answered with "use your best judgment") and sub-agents (<task type="explore">) run read-only in parallel (up to 4 per reply). Work autonomously and finish with <finish>.
 Dev servers: start them with <bash background="true"> on port 3000 bound to 0.0.0.0 (for example: npx next dev -H 0.0.0.0 -p 3000, npx vite --host 0.0.0.0 --port 3000, or python3 -m http.server 3000 --bind 0.0.0.0). The user opens them from the Preview tab ("Live server"). Never block on a foreground server command.
 <look url="http://localhost:3000"/> works for checking a running dev server.`;
 
