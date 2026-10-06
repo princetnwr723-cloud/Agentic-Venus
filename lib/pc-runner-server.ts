@@ -13,11 +13,20 @@ async function installPcRunner(sb: Sb) {
   await writeFiles(sb, { [`${RDIR}/pc-runner.mjs`]: PC_RUNNER_SOURCE, [`${RDIR}/.pcversion`]: PC_RUNNER_VERSION });
 }
 
+/** The contract is re-built here from plain numbers/words, so nothing odd from the browser reaches the sandbox. */
+function cleanContract(c: unknown): { kind: "list"; quota: number; item: string; verify: string } | null {
+  const x = c as { kind?: string; quota?: unknown; item?: unknown; verify?: unknown } | null;
+  if (!x || x.kind !== "list") return null;
+  const quota = Math.min(300, Math.max(1, Math.floor(Number(x.quota)) || 0));
+  if (!quota) return null;
+  return { kind: "list", quota, item: String(x.item ?? "item").replace(/[^\w -]/g, "").slice(0, 30), verify: ["leads", "facts", "urls"].includes(String(x.verify)) ? String(x.verify) : "urls" };
+}
+
 export async function startPcJob(
   sb: Sb,
   o: {
     uid: string; chatId: string; task: string; provider: string; model: string; apiKey: string; appUrl: string;
-    context?: string; maxSteps?: number; proof?: boolean; session?: unknown; healSnapshot?: string; startUrl?: string;
+    context?: string; maxSteps?: number; proof?: boolean; session?: unknown; healSnapshot?: string; startUrl?: string; contract?: unknown;
   }
 ): Promise<{ jobId: string }> {
   const chat = wsId(o.chatId);
@@ -36,10 +45,11 @@ export async function startPcJob(
   const dir = `${RDIR}/jobs/${jobId}`;
   await writeFiles(sb, {
     [`${dir}/job.json`]: JSON.stringify({
-      jobId, instruction: o.task.slice(0, 6000), provider: o.provider, model: o.model, appUrl: o.appUrl,
+      jobId, instruction: o.task.slice(0, 9000), provider: o.provider, model: o.model, appUrl: o.appUrl,
       token: signJob(o.uid, o.chatId, jobId), context: (o.context ?? "").slice(0, 6000),
       maxSteps: Math.min(200, Math.max(10, o.maxSteps ?? 90)), proof: o.proof !== false,
       session: o.session ?? null, healSnapshot: o.healSnapshot?.slice(0, 6000), startUrl: o.startUrl,
+      contract: cleanContract(o.contract),
     }),
     [`${dir}/key`]: o.apiKey,
   });
