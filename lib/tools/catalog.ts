@@ -6,8 +6,8 @@ export type PluginMeta = {
 
 export const FREE_PACK = {
   label: "Free pack",
-  note: "Always on. No key, no account.",
-  tools: ["web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read"],
+  note: "Always on. No key, no account. Includes the verifiers that check leads, facts and links before the agent delivers them.",
+  tools: ["web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read", "verify.leads", "verify.facts", "verify.urls"],
 };
 
 // Only the tools people need most. Everything else: add an MCP server in the Custom tab.
