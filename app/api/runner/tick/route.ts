@@ -1,6 +1,7 @@
 // Called by your scheduler (GitHub Actions) every few minutes with the same secret as /api/routines/run.
-// 1) keeps background jobs alive, 2) finishes jobs nobody is watching and posts the report in the chat,
-// 3) pings you when an unattended job needs an approval, 4) pauses idle computers (saves money).
+// 1) keeps background jobs alive, 2) finishes jobs nobody is watching, posts the report in the chat and
+// switches the computer off, 3) pings you when an unattended job needs an approval,
+// 4) pauses idle computers (saves money).
 import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
@@ -38,6 +39,14 @@ async function telegram(userRef: Ref, chatId: string, text: string) {
     const [token, chat] = unpack(c);
     if (token && chat) await http(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chat, text: text.slice(0, 3500) }) });
   } catch { /* notification is best-effort */ }
+}
+
+/** The work is finished and nobody is watching: switch the computer off right away. */
+async function switchOff(userRef: Ref, chatId: string, e2bKey: string, sandboxId: string) {
+  try {
+    await pauseSandbox(e2bKey, sandboxId);
+    await userRef.collection("chats").doc(chatId).update({ pcPaused: true });
+  } catch { /* already off or gone */ }
 }
 
 export async function POST(req: Request) {
@@ -116,6 +125,7 @@ export async function POST(req: Request) {
         });
         if (finalized) {
           await postChat(userRef, d.id, `${ok ? "✅ Venus Code finished while you were away." : "⚠️ Venus Code stopped: "}\n\n${summary}\n\n[Open the Code page](/code?chat=${d.id})`);
+          await switchOff(userRef, d.id, e2bKey, job.sandboxId);
         }
         out.push({ id: d.id, status: state.status, finalized });
       } catch (e) {
@@ -172,9 +182,10 @@ export async function POST(req: Request) {
           finalized = true;
         });
         if (finalized) {
-          const msg = `${ok ? "✅ Your background task finished while you were away." : "⚠️ Your background task stopped:"}\n\n**${(p.task ?? "").slice(0, 120)}**\n\n${summary}${replay}`;
+          const msg = `${ok ? "✅ Your background task finished while you were away." : "⚠️ Your background task stopped:"}\n\n**${(p.task ?? "").slice(0, 120)}**\n\n${summary}${replay}\n\n🔌 The computer was switched off to save credits.`;
           await postChat(userRef, d.id, msg);
           await telegram(userRef, d.id, `${ok ? "✅" : "⚠️"} ${(p.task ?? "Task").slice(0, 100)}\n${summary.slice(0, 600)}`);
+          await switchOff(userRef, d.id, e2bKey, job.sandboxId);
         }
         out.push({ pc: d.id, status: state.status, finalized });
       } catch (e) {
