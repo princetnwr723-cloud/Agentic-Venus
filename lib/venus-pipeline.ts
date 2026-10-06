@@ -301,6 +301,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
   const run = newRun(env, hooks, start);
   const todo = (s: Stage) => STAGES.indexOf(from) <= STAGES.indexOf(s);
   const say = hooks.log;
+  // memory and skills belong to the chat this video was ordered in (nothing is shared between chats)
+  const scope = { uid: env.uid, chatId: start.chatId ?? "global" };
   let brain: Brain = { memories: [], skills: [] };
 
   try {
@@ -308,7 +310,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     say("🎬 Checking the studio computer…");
     hooks.progress({ label: "Computer", value: null });
     await ensureStudio(run);
-    brain = await loadBrain(env.uid).catch(() => brain);
+    brain = await loadBrain({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }).catch(() => brain);
     say("✅ Ready.");
 
     if (todo("script")) {
@@ -471,7 +473,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     hooks.progress(null);
     say("🎉 Your video is ready!");
 
-    reflect(env.uid, { apiKeys: env.apiKeys, provider: run.p.provider, model: run.p.model }, brain, {
+    reflect({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }, { apiKeys: env.apiKeys, provider: run.p.provider, model: run.p.model }, brain, {
       task: `Make a video: ${run.p.brief}`,
       outcome: `Finished a ${run.p.seconds}s ${run.p.aspect} video "${run.p.title}" (${run.p.design ?? "ai"} design).`,
     }).then((l) => { if (l.length) say("🧠 Learned: " + l.join("; ")); }).catch(() => {});
