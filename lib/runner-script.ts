@@ -2,7 +2,7 @@
 // It is a self-contained agent loop (LLM calls + tools), so it keeps working when the browser tab is closed.
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "1";
+export const RUNNER_VERSION = "2";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -280,7 +280,21 @@ async function runTool(c, ctx) {
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return {text: "ERROR: file not found: " + a.path};
       const cur = fs.readFileSync(abs, "utf8");
       const count = cur.split(oldS).length - 1;
-      if (count === 0) return {text: "ERROR: the <old> text was not found in " + a.path + ". Read the file again and copy the exact text (including whitespace)."};
+      if (count === 0) {
+        // the model often gets the indentation slightly wrong: retry ignoring leading/trailing whitespace per line
+        const lines = cur.split("\n"), want = oldS.split("\n").map((l) => l.trim());
+        let at = -1;
+        for (let i = 0; i + want.length <= lines.length && at < 0; i++) {
+          let same = true;
+          for (let j = 0; j < want.length; j++) if (lines[i + j].trim() !== want[j]) { same = false; break; }
+          if (same) at = i;
+        }
+        if (at >= 0) {
+          fs.writeFileSync(abs, lines.slice(0, at).concat(newS.split("\n"), lines.slice(at + want.length)).join("\n"));
+          return {text: "Edited " + a.path + " (matched ignoring indentation).", mutated: true};
+        }
+        return {text: "ERROR: the <old> text was not found in " + a.path + ". Read the file again and copy the exact text."};
+      }
       const all = a.replace_all === "true";
       if (count > 1 && !all) return {text: "ERROR: the <old> text appears " + count + " times in " + a.path + ". Add more surrounding lines to make it unique, or set replace_all=\"true\"."};
       const next = all ? cur.split(oldS).join(newS) : cur.replace(oldS, () => newS);
@@ -349,10 +363,28 @@ async function runTool(c, ctx) {
   }
 }
 
+// ---------------- verification gate: finish is only accepted when the project checks pass ----------------
+function verifyProject() {
+  let cmd = "";
+  const pj = ROOT + "/package.json";
+  if (fs.existsSync(pj)) {
+    try {
+      const s = (JSON.parse(fs.readFileSync(pj, "utf8")).scripts) || {};
+      if (s.test && !/no test specified/.test(s.test)) cmd = "npm test --silent";
+      else if (s.build) cmd = "npm run build --silent";
+      else if (s.lint) cmd = "npm run lint --silent";
+    } catch (e) {}
+    if (cmd && !fs.existsSync(ROOT + "/node_modules")) return null;
+  } else if (fs.existsSync(ROOT + "/pytest.ini") || fs.existsSync(ROOT + "/tests")) cmd = "python3 -m pytest -q";
+  if (!cmd) return null;
+  const r = spawnSync("bash", ["-lc", "set -o pipefail; cd " + q(ROOT) + " && export CI=1 && timeout 170 " + cmd + " 2>&1 | tail -c 4000"], {encoding: "utf8", timeout: 180000});
+  return {ok: r.status === 0, cmd: cmd, out: String(r.stdout || "")};
+}
+
 // ---------------- main loop ----------------
 async function main() {
   emit("info", "Background runner started - it keeps working even if you close the browser.");
-  const ctx = {skills: job.skills || [], memories: []};
+  const ctx = {skills: job.skills || [], memories: [], gates: 0};
   let messages = [{role: "user", content: job.system + "\n\n# TASK\n" + job.instruction}];
   const maxSteps = job.maxSteps || 120;
   const deadline = Date.now() + (job.maxMinutes || 120) * 60000;
@@ -411,7 +443,20 @@ async function main() {
       const sha = checkpoint("Step: " + parsed.calls.map((c) => c.name + (c.attrs.path ? " " + c.attrs.path : "")).join(", "));
       if (sha) emit("checkpoint", sha);
     }
-    if (fin !== null) return end("done", fin, ctx.memories);
+    if (fin !== null) {
+      // finish is only accepted when the project's own tests/build pass (up to 3 repair rounds)
+      if (ctx.gates < 3) {
+        const v = verifyProject();
+        if (v && !v.ok) {
+          ctx.gates++;
+          emit("info", "Verification failed - fixing it (" + ctx.gates + "/3): " + v.cmd);
+          messages.push({role: "user", content: "You called finish, but the project check FAILED.\nCommand: " + v.cmd + "\nOutput:\n" + v.out.slice(-3500) + "\nFix the cause, then finish again."});
+          continue;
+        }
+        if (v && v.ok) emit("info", "Verified: " + v.cmd + " passed.");
+      }
+      return end("done", fin, ctx.memories);
+    }
 
     const results = parsed.calls.map((c, i) => "<result tool=\"" + c.name + "\"" + (c.attrs.path ? " path=\"" + c.attrs.path + "\"" : "") + ">\n" + String(out[i] || "").slice(0, 14000) + "\n</result>").join("\n");
     const next = {role: "user", content: "<results>\n" + results.slice(0, 40000) + "\n</results>\nContinue. Call <finish> when the task is complete and verified."};
