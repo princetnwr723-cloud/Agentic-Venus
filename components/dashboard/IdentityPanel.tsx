@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Copy, Mail, RefreshCw, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
+import { browserCreate, browserOverview } from "@/lib/mail-browser";
 import type { AvatarColor } from "@/lib/bots";
 
 type MailItem = { id: string; from: string; domain: string; subject: string; at: string; intro: string; body: string; codes: string[]; links: string[] };
 type Service = { domain: string; mails: number; lastAt: string; lastSubject: string; codes: string[]; used: boolean };
 type LogRow = { at: number; kind: string; site: string; text: string };
-type Overview = { enabled: boolean; address: string | null; mails: MailItem[]; services: Service[]; log: LogRow[] };
+type Overview = { enabled: boolean; address: string | null; mails: MailItem[]; services: Service[]; log: LogRow[]; mailError?: string };
 
 const when = (v: string | number) => { const d = new Date(v); return isNaN(d.getTime()) ? "" : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); };
 const KIND: Record<string, string> = { created: "📬 inbox created", mail: "✉️ mail arrived", otp: "🔑 code arrived", used: "✍️ email used" };
@@ -27,8 +28,8 @@ export default function IdentityPanel({
   const [openMail, setOpenMail] = useState<string | null>(null);
   const [copied, setCopied] = useState("");
 
-  const call = useCallback(async (action: string) => {
-    const res = await fetch("/api/identity", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await getToken()) }, body: JSON.stringify({ action, chatId }) });
+  const call = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
+    const res = await fetch("/api/identity", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await getToken()) }, body: JSON.stringify({ action, chatId, ...extra }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d?.error || "Request failed.");
     return d;
@@ -36,17 +37,45 @@ export default function IdentityPanel({
 
   const load = useCallback(async () => {
     setBusy(true); setErr("");
-    try { setData(await call("overview")); } catch (e) { setErr(e instanceof Error ? e.message : "Could not load."); }
+    let d: Overview | null = null;
+    try { d = await call("overview"); } catch (e) { setErr(e instanceof Error ? e.message : "Could not load."); }
+    // If the server cannot reach the mailbox service, read the inbox from this browser (works for inboxes created here).
+    if (d && d.mailError) {
+      const raw = localStorage.getItem("av:mail:" + chatId);
+      if (raw) {
+        try { d = { ...d, ...(await browserOverview(JSON.parse(raw))), mailError: undefined }; } catch { /* keep the server data and its error */ }
+      }
+    }
+    if (d) setData(d);
     setBusy(false);
-  }, [call]);
+  }, [call, chatId]);
 
   useEffect(() => { if (open) { setData(null); void load(); } }, [open, chatId, load]);
   if (!open) return null;
 
   const copy = (v: string) => { navigator.clipboard?.writeText(v); setCopied(v); setTimeout(() => setCopied(""), 1200); };
+
   async function enable() {
     setBusy(true); setErr("");
-    try { const d = await call("enable"); onEmailCreated(String(d.placeholder)); await load(); } catch (e) { setErr(e instanceof Error ? e.message : "Could not create the inbox."); setBusy(false); }
+    try {
+      const d = await call("enable");
+      onEmailCreated(String(d.placeholder));
+      await load();
+      return;
+    } catch (e1) {
+      try {
+        // The server's network can be blocked by the mailbox services: create the inbox from this browser instead.
+        const b = await browserCreate();
+        const d = await call("adopt", b);
+        localStorage.setItem("av:mail:" + chatId, JSON.stringify(b));
+        onEmailCreated(String(d.placeholder));
+        await load();
+        return;
+      } catch (e2) {
+        setErr(`Server: ${e1 instanceof Error ? e1.message : "failed"}\nThis browser: ${e2 instanceof Error ? e2.message : "failed"}`);
+      }
+    }
+    setBusy(false);
   }
   const row = "flex justify-between gap-3 border-b border-line py-2 text-sm";
 
@@ -65,7 +94,8 @@ export default function IdentityPanel({
           <button onClick={load} title="Refresh" className="ml-auto rounded-md p-1.5 text-muted hover:text-ink"><RefreshCw size={14} className={busy ? "animate-spin" : ""} /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {err && <p className="mb-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{err}</p>}
+          {err && <p className="mb-3 whitespace-pre-wrap break-words rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{err}</p>}
+          {data?.mailError && <p className="mb-3 whitespace-pre-wrap break-words rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">The mailbox service could not be reached from the server: {data.mailError}</p>}
 
           {tab === "profile" && (
             <div>
