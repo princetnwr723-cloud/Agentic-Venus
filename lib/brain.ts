@@ -1,9 +1,8 @@
-import { collection, deleteDoc, doc, getDoc, getDocs, setDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 import { bm25, jaccard } from "@/lib/bm25";
 import type { ProviderId } from "@/lib/providers";
 
-/** Memory and skills belong to ONE chat. Nothing is shared between chats. */
+/** Memory and skills belong to ONE chat. Nothing is shared between chats. Storage is the server API (not client Firestore). */
 export type Scope = { uid: string; chatId: string };
 export type MemoryKind = "fact" | "preference" | "lesson" | "role";
 export type Memory = { id: string; text: string; at: number; auto?: boolean; kind?: MemoryKind; weight?: number };
@@ -15,21 +14,27 @@ export type Brain = { memories: Memory[]; skills: Skill[] };
 export type LlmEnv = { apiKeys: Partial<Record<ProviderId, string>>; provider: ProviderId; model: string };
 export type Verdict = "pass" | "partial" | "fail";
 
-const memRef = (s: Scope) => doc(db, "users", s.uid, "chats", s.chatId, "brain", "memories");
-const skillCol = (s: Scope) => collection(db, "users", s.uid, "chats", s.chatId, "skills");
 const slug = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "skill";
 const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-const clean = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+
+async function bcall<T = any>(s: Scope, action: string, extra: Record<string, unknown> = {}): Promise<T> {
+  const token = await auth.currentUser?.getIdToken();
+  const res = await fetch("/api/brain", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+    body: JSON.stringify({ action, chatId: s.chatId, ...extra }),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d?.error || `Memory service error (HTTP ${res.status}).`);
+  return d as T;
+}
 
 export async function loadBrain(s: Scope): Promise<Brain> {
-  const [m, k] = await Promise.all([getDoc(memRef(s)).catch(() => null), getDocs(skillCol(s)).catch(() => null)]);
-  return {
-    memories: ((m?.data() as { items?: Memory[] } | undefined)?.items ?? []) as Memory[],
-    skills: (k?.docs ?? []).map((d) => d.data() as Skill),
-  };
+  const d = await bcall<Brain>(s, "load");
+  return { memories: d.memories ?? [], skills: d.skills ?? [] };
 }
-const readMem = async (s: Scope) => ((await getDoc(memRef(s)).catch(() => null))?.data() as { items?: Memory[] } | undefined)?.items ?? [];
-const writeMem = (s: Scope, items: Memory[]) => setDoc(memRef(s), clean({ items }));
+const readMem = async (s: Scope) => (await bcall<{ items: Memory[] }>(s, "mem_get")).items ?? [];
+const writeMem = (s: Scope, items: Memory[]) => bcall(s, "mem_set", { items });
 
 // ---------------- memory ----------------
 type AddOpts = boolean | { auto?: boolean; kind?: MemoryKind; weight?: number };
@@ -38,7 +43,7 @@ export async function addMemory(s: Scope, text: string, o: AddOpts = false): Pro
   const opt = typeof o === "boolean" ? { auto: o } : o;
   const t = text.replace(/\s+/g, " ").trim().slice(0, 300);
   if (t.length < 3) return null;
-  if (/(password|passwd|api[_ -]?key|secret|token)\s*[:=]/i.test(t)) return null; // never store secrets
+  if (/(password|passwd|api[_ -]?key|secret|token|card number|cvv|otp)\s*[:=]/i.test(t)) return null; // never store secrets
   const items = await readMem(s);
   if (items.some((i) => norm(i.text) === norm(t))) return null;
   const similar = items.find((i) => i.kind !== "role" && jaccard(i.text, t) > 0.7);
@@ -52,7 +57,6 @@ export async function addMemory(s: Scope, text: string, o: AddOpts = false): Pro
   };
   let next = [...items, mem];
   if (next.length > 200) {
-    // full: forget the least important auto-learned fact first, never the role or something the user typed
     const drop = next.filter((i) => i.auto && i.kind !== "role" && i.id !== mem.id).sort((a, b) => (a.weight ?? 1) - (b.weight ?? 1) || a.at - b.at)[0] ?? next[0];
     next = next.filter((i) => i.id !== drop.id);
   }
@@ -79,22 +83,11 @@ export async function saveSkill(
   s: Scope,
   k: { name: string; description: string; instructions: string; source?: string; auto?: boolean; trial?: boolean; prev?: string; version?: number; resetStats?: boolean }
 ): Promise<Skill> {
-  const id = slug(k.name);
-  const prev = await getDoc(doc(skillCol(s), id)).catch(() => null);
-  const old = prev?.exists() ? (prev.data() as Skill) : null;
-  const skill: Skill = {
-    id, name: k.name.trim().slice(0, 80), description: k.description.trim().slice(0, 300), instructions: k.instructions.trim().slice(0, 20000),
-    ...(k.source ? { source: k.source.slice(0, 300) } : {}), ...(k.auto ? { auto: true } : {}),
-    uses: old?.uses ?? 0, wins: k.resetStats ? 0 : old?.wins ?? 0, fails: k.resetStats ? 0 : old?.fails ?? 0,
-    version: k.version ?? old?.version ?? 1, trial: k.trial ?? old?.trial ?? false, disabled: k.resetStats ? false : old?.disabled ?? false,
-    ...(k.prev ? { prev: k.prev.slice(0, 20000) } : old?.prev ? { prev: old.prev } : {}), updatedAt: Date.now(),
-  };
-  await setDoc(doc(skillCol(s), id), clean(skill));
-  return skill;
+  return (await bcall<{ skill: Skill }>(s, "skill_put", { skill: k })).skill;
 }
-export async function deleteSkill(s: Scope, id: string) { await deleteDoc(doc(skillCol(s), id)); }
-export async function setSkillDisabled(s: Scope, id: string, disabled: boolean) { await setDoc(doc(skillCol(s), id), { disabled }, { merge: true }); }
-export async function bumpSkillUse(s: Scope, skill: Skill) { await setDoc(doc(skillCol(s), skill.id), { uses: (skill.uses ?? 0) + 1 }, { merge: true }).catch(() => {}); }
+export const deleteSkill = async (s: Scope, id: string) => { await bcall(s, "skill_del", { id }); };
+export const setSkillDisabled = async (s: Scope, id: string, disabled: boolean) => { await bcall(s, "skill_patch", { id, patch: { disabled } }); };
+export async function bumpSkillUse(s: Scope, skill: Skill) { await bcall(s, "skill_patch", { id: skill.id, patch: { incUses: true } }).catch(() => {}); }
 
 /** Did the skills that were used actually work? Trial skills get promoted, failing skills get paused. */
 export async function recordSkillOutcome(s: Scope, brain: Brain, names: string[], verdict: Verdict): Promise<string[]> {
@@ -107,7 +100,7 @@ export async function recordSkillOutcome(s: Scope, brain: Brain, names: string[]
     let trial = Boolean(sk.trial), disabled = Boolean(sk.disabled);
     if (trial && wins >= 2) { trial = false; out.push(`skill proven: ${name}`); }
     if (!disabled && fails >= 3 && fails > wins * 2) { disabled = true; out.push(`skill paused (keeps failing): ${name}`); }
-    await setDoc(doc(skillCol(s), sk.id), { wins, fails, trial, disabled }, { merge: true });
+    await bcall(s, "skill_patch", { id: sk.id, patch: { wins, fails, trial, disabled } });
   }
   return out;
 }
@@ -176,11 +169,7 @@ async function consolidate(s: Scope, env: LlmEnv) {
   await writeMem(s, [...keep, ...fresh]);
 }
 
-/**
- * Self-improvement after a task (this chat only):
- * 1) skills that were used are scored, 2) durable facts are kept, 3) a new procedure becomes a TRIAL skill,
- * 4) if the run failed or was partial: lessons are stored and the skill that was used is rewritten (old version kept).
- */
+/** Self-improvement after a task (this chat only): score used skills, keep facts, make trial skills, store lessons, rewrite failing skills. */
 export async function reflect(
   s: Scope, env: LlmEnv, brain: Brain,
   input: { task: string; outcome: string; steps?: string; verdict?: Verdict; skillsUsed?: string[] }
@@ -197,7 +186,7 @@ Reply with JSON only:
  "skill":null | {"name":"kebab-case","description":"what it does + when to use it","instructions":"markdown steps that worked"},
  "revisions":[{"skill":"name of a skill that was used","instructions":"the FULL improved instructions"}],
  "lessons":["what to do differently next time"]}
-Rules: at most 3 memories; only durable, reusable, non-sensitive things (NEVER passwords, keys, tokens, private data). Create "skill" only when a multi-step procedure worked AND is likely to repeat; not a duplicate of: ${brain.skills.map((x) => x.name).join(", ") || "(none)"}. "revisions" and "lessons" ONLY if the result below is "${verdict}" and not "pass": explain the real cause of the problem. Otherwise return empty lists.
+Rules: at most 3 memories; only durable, reusable, non-sensitive things (NEVER passwords, keys, tokens, card data, private data). Create "skill" only when a multi-step procedure worked AND is likely to repeat; not a duplicate of: ${brain.skills.map((x) => x.name).join(", ") || "(none)"}. "revisions" and "lessons" ONLY if the result below is "${verdict}" and not "pass": explain the real cause of the problem. Otherwise return empty lists.
 
 RESULT: ${verdict}
 TASK: ${input.task.slice(0, 600)}
@@ -233,10 +222,9 @@ ${verdict !== "pass" ? "SKILLS THAT WERE USED:\n" + usedSkills.map((x) => `### $
 
 /** One-click move of the OLD account-wide memory/skills into one chat (optional). */
 export async function importLegacy(s: Scope): Promise<number> {
-  const m = await getDoc(doc(db, "users", s.uid, "brain", "memories")).catch(() => null);
-  const k = await getDocs(collection(db, "users", s.uid, "skills")).catch(() => null);
+  const d = await bcall<{ memories: Memory[]; skills: Skill[] }>(s, "legacy");
   let n = 0;
-  for (const it of ((m?.data() as { items?: Memory[] } | undefined)?.items ?? [])) if (await addMemory(s, it.text, { auto: it.auto, kind: "fact" })) n++;
-  for (const d of k?.docs ?? []) { const x = d.data() as Skill; await saveSkill(s, { name: x.name, description: x.description, instructions: x.instructions, source: x.source, auto: x.auto }); n++; }
+  for (const it of d.memories ?? []) if (await addMemory(s, it.text, { auto: it.auto, kind: "fact" })) n++;
+  for (const x of d.skills ?? []) { await saveSkill(s, { name: x.name, description: x.description, instructions: x.instructions, source: x.source, auto: x.auto }); n++; }
   return n;
 }
