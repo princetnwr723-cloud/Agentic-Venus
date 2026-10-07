@@ -4,6 +4,7 @@ import { writeFiles, type Sb } from "@/lib/venus-server";
 import { codeSystemPrompt } from "@/lib/code-prompts";
 import { ensureWorkspace } from "@/lib/code-server";
 import { RUNNER_SOURCE, RUNNER_VERSION } from "@/lib/runner-script";
+import { signJob } from "@/lib/job-token";
 
 export const RDIR = "/home/user/runner";
 const okId = (s: string) => /^[a-z0-9]{4,24}$/.test(s);
@@ -76,14 +77,17 @@ export async function stopRunner(sb: Sb, jobId: string) {
 const BG_NOTE = `
 
 # BACKGROUND MODE
-You run as a detached background worker inside the computer. The user may have closed the browser. Nobody can answer questions (<ask> is auto-answered with "use your best judgment") and sub-agents (<task type="explore">) run read-only in parallel (up to 4 per reply). Work autonomously and finish with <finish>.
-Dev servers: start them with <bash background="true"> on port 3000 bound to 0.0.0.0 (for example: npx next dev -H 0.0.0.0 -p 3000, npx vite --host 0.0.0.0 --port 3000, or python3 -m http.server 3000 --bind 0.0.0.0). The user opens them from the Preview tab ("Live server"). Never block on a foreground server command.
-<look url="http://localhost:3000"/> works for checking a running dev server.`;
+You run as a detached background worker inside the computer. The user may have closed the browser. Nobody can answer questions (<ask> is auto-answered with "use your best judgment"). Work autonomously and finish with the finish tool.
+Sub-agents work: task type=explore is read-only research, task type=write starts a WRITER in its own git worktree on exactly the files you list (up to 3 in parallel, disjoint files, merged back when done). Up to 4 task calls in ONE reply run in parallel.
+Connected tools (GitHub, MCP servers...) are used through the tool function; write actions need the user's approval, so when the user is away they are NOT done: list them under "Needs you" in your final summary.
+Big projects: keep a todo plan of milestones. After every milestone you get a clean context with your saved state (.venus/state.json), so put what matters into VENUS.md and the todo list.
+Dev servers: start them with bash background=true on port 3000 bound to 0.0.0.0 (for example: npx next dev -H 0.0.0.0 -p 3000, npx vite --host 0.0.0.0 --port 3000, or python3 -m http.server 3000 --bind 0.0.0.0). The user opens them from the Preview tab ("Live server"). Never block on a foreground server command.
+The look tool also works for a running dev server: look url=http://localhost:3000.`;
 
 export async function startRunnerJob(
   sb: Sb,
   o: {
-    ws: string; instruction: string; provider: string; model: string; apiKey: string;
+    ws: string; instruction: string; provider: string; model: string; apiKey: string; uid?: string; appUrl?: string;
     persona?: string; memory?: string;
     skills?: Array<{ name: string; description: string; instructions: string }>;
     earlier?: string; maxSteps?: number; restoreUrl?: string;
@@ -107,17 +111,23 @@ export async function startRunnerJob(
   const system =
     codeSystemPrompt({
       readOnly: false, ws: o.ws, persona: o.persona, memory: o.memory ?? "",
-      skills: skillList ? `## Skills (load one with <skill name="..."/> when it matches)\n${skillList}` : "",
+      skills: skillList ? `## Skills (load one with the skill tool when it matches)\n${skillList}` : "",
       venusMd: ws.venusMd, tree: ws.tree,
     }) + BG_NOTE;
-  const instruction = o.earlier ? `${o.instruction}\n\n# Earlier work in this codespace\n${o.earlier.slice(-3500)}` : o.instruction;
+  // keep a leading "[mode:...]" at the very start: the runner reads it from there
+  const modeMatch = /^\s*\[mode:(plan|strict|auto)\]\s*/i.exec(o.instruction);
+  const body = modeMatch ? o.instruction.slice(modeMatch[0].length) : o.instruction;
+  const instruction = (modeMatch ? `[mode:${modeMatch[1].toLowerCase()}] ` : "") + (o.earlier ? `${body}\n\n# Earlier work in this codespace\n${o.earlier.slice(-3500)}` : body);
 
   const jobId = "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const dir = `${RDIR}/jobs/${jobId}`;
+  let token = "";
+  try { if (o.uid && o.appUrl && /^https?:\/\//i.test(o.appUrl)) token = signJob(o.uid, o.ws, jobId); } catch { /* tools are simply unavailable */ }
   await writeFiles(sb, {
     [`${dir}/job.json`]: JSON.stringify({
       jobId, ws: o.ws, instruction, provider: o.provider, model: o.model, system, skills,
-      maxSteps: Math.min(300, Math.max(10, o.maxSteps ?? 120)), maxMinutes: 120,
+      appUrl: o.appUrl && /^https?:\/\//i.test(o.appUrl) ? o.appUrl : "", token,
+      maxSteps: Math.min(500, Math.max(10, o.maxSteps ?? 250)), maxMinutes: 360, budgetChars: 9_000_000,
     }),
     [`${dir}/key`]: o.apiKey,
   });
