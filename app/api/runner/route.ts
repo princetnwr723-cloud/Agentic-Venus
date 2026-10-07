@@ -40,6 +40,7 @@ export async function POST(req: Request) {
         try {
           const r = await startRunnerJob(sb, {
             ws: String(body.ws || ""), instruction: instruction.slice(0, 12000), provider, model, apiKey,
+            uid, appUrl: typeof body.appUrl === "string" ? body.appUrl : "",
             persona: typeof body.persona === "string" ? body.persona.slice(0, 2000) : undefined,
             memory: typeof body.memory === "string" ? body.memory.slice(0, 12000) : "",
             skills, earlier: typeof body.earlier === "string" ? body.earlier : undefined,
