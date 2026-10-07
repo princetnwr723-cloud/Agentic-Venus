@@ -38,10 +38,20 @@ export async function POST(req: Request) {
     if (action === "enable") {
       if (pair) return NextResponse.json({ address: pair[0], placeholder: raw });
       const c = await createInbox();
-      const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.identity`, `${c.address}::${c.password}::${c.base}`);
+      const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.identity`, `${c.address}::${c.secret}::${c.provider}`);
       await chatRef.update({ "connectors.identity": ph });
       await identityLog(uid, { chatId, kind: "created", site: domainOf(c.address), text: `Inbox created: ${c.address}` });
       return NextResponse.json({ address: c.address, placeholder: ph });
+    }
+
+    // An inbox that was created in the user's browser because the server's network is blocked by the mailbox service.
+    if (action === "adopt") {
+      const address = String(body.address || ""), secret = String(body.secret || ""), provider = String(body.provider || "");
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) || !secret || !["tm", "gw"].includes(provider)) return fail("Bad inbox details.", 400);
+      const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.identity`, `${address}::${secret}::${provider}`);
+      await chatRef.update({ "connectors.identity": ph });
+      await identityLog(uid, { chatId, kind: "created", site: domainOf(address), text: `Inbox created in the browser: ${address}` });
+      return NextResponse.json({ address, placeholder: ph });
     }
 
     if (action === "overview") {
@@ -49,10 +59,15 @@ export async function POST(req: Request) {
       const log = logSnap.docs.map((d) => d.data() as { at: number; kind: string; site: string; text: string; chatId: string }).filter((x) => x.chatId === chatId).slice(0, 60);
       if (!pair) return NextResponse.json({ enabled: Boolean(raw), address: null, mails: [], services: [], log });
 
-      const rows = await listMail(cred, 12);
       const mails: MailFull[] = [];
-      for (let i = 0; i < rows.length; i += 3) {
-        mails.push(...(await Promise.all(rows.slice(i, i + 3).map((r) => readMail(cred, r.id).catch(() => ({ ...r, body: "", codes: [], links: [] } as MailFull))))));
+      let mailError = "";
+      try {
+        const rows = await listMail(cred, 12);
+        for (let i = 0; i < rows.length; i += 3) {
+          mails.push(...(await Promise.all(rows.slice(i, i + 3).map((r) => readMail(cred, r.id).catch(() => ({ ...r, body: "", codes: [], links: [] } as MailFull))))));
+        }
+      } catch (e) {
+        mailError = e instanceof Error ? e.message : "Could not reach the mailbox service.";
       }
       const map = new Map<string, { domain: string; mails: number; lastAt: string; lastSubject: string; codes: string[]; used: boolean }>();
       for (const m of mails) {
@@ -69,7 +84,7 @@ export async function POST(req: Request) {
         map.set(d, s);
       }
       return NextResponse.json({
-        enabled: true, address: pair[0],
+        enabled: true, address: pair[0], mailError,
         mails: mails.map((m) => ({ ...m, body: m.body.slice(0, 3000) })),
         services: Array.from(map.values()).sort((a, b) => b.lastAt.localeCompare(a.lastAt)),
         log,
