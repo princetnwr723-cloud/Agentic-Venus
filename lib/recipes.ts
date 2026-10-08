@@ -96,7 +96,7 @@ export async function replayRecipe(a: {
       if (!r.ok) return fail(i, r.text);
       snapshot = r.text;
     } else {
-      const res = await fetch("/api/browser", { method: "POST", headers, body: JSON.stringify({ uid: a.uid, url: step.url, ops: step.ops, session, creds: a.creds }) });
+      const res = await fetch("/api/browser", { method: "POST", headers, body: JSON.stringify({ uid: a.uid, chatId: a.chatId, persistProfile: true, url: step.url, ops: step.ops, session, creds: a.creds }) });
       const d = await res.json().catch(() => ({ error: "Bad response" }));
       if (!res.ok || d.error) return fail(i, String(d.error ?? ""));
       session = d.session;
