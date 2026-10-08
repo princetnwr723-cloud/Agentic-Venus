@@ -37,9 +37,15 @@ export default function SkillsPage() {
     });
   }, [user]);
 
-  const scope = user && chatId ? { uid: user.uid, chatId } : null;
+  const uid = user?.uid ?? null;
+  const scope = uid && chatId ? { uid, chatId } : null;
   const refresh = () => scope && loadBrain(scope).then(setBrain);
-  useEffect(() => { if (scope) loadBrain(scope).then(setBrain); setOpen(null); setMsg(null); /* eslint-disable-next-line */ }, [chatId, user]);
+  useEffect(() => {
+    if (uid && chatId) loadBrain({ uid, chatId }).then(setBrain);
+    else setBrain(null);
+    setOpen(null);
+    setMsg(null);
+  }, [chatId, uid]);
 
   function llmEnv() {
     const pref = getModelPref();
