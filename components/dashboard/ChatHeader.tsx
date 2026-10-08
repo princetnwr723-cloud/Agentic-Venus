@@ -4,7 +4,7 @@ import type { AvatarColor } from "@/lib/bots";
 
 type Props = {
   name: string; color: AvatarColor; focusMode: boolean; onToggleFocus: () => void; onIdentity: () => void;
-  onCode: () => void; onVenus: () => void; onSkills: () => void; onRuns: () => void;
+  onCode: () => void; onVenus: () => void; onSkills: () => void; onRuns: () => void; onVpassword: () => void;
   onConnectors: () => void; hasConnectors: boolean;
   onRoutines: () => void; hasRoutines: boolean;
   onTeam: () => void; teamOpen: boolean; teamRunning: boolean;
@@ -29,6 +29,7 @@ export default function ChatHeader(p: Props) {
         <button onClick={p.onCode} title="Venus Code — only for coding projects" className={link}>Code</button>
         <button onClick={p.onVenus} title="Venus Pro — motion graphics" className={link}>Venus Pro</button>
         <button onClick={p.onSkills} title="This chat's memory & skills" className={link}>Skills</button>
+        <button onClick={p.onVpassword} title="vPassword — logins and cards your agents can use but never see" className={link}>vPassword</button>
         <button onClick={p.onRuns} title="Runs — every agent run, step by step" className={link}><Activity size={13} className="mr-1 inline" />Runs</button>
         <button onClick={p.onConnectors} title="Connectors — plugins, MCP, APIs" className={icon(false)}><Plug size={17} />{p.hasConnectors && dot("bg-avatar-teal")}</button>
         <button onClick={p.onRoutines} title="Routines" className={icon(false)}><Clock size={17} />{p.hasRoutines && dot("bg-avatar-teal")}</button>
