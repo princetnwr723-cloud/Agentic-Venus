@@ -34,11 +34,11 @@ EVIDENCE (raw tool outputs):
 ${a.evidence.length ? a.evidence.join("\n---\n").slice(0, 3500) : "(none)"}`
     );
     const j = /\{[\s\S]*\}/.exec(raw);
-    if (!j) return { verdict: "pass", reason: "Verifier gave no usable answer." };
+    if (!j) return { verdict: "partial", reason: "Verifier gave no usable answer; the result was not marked as fully verified." };
     const p = JSON.parse(j[0]) as { verdict?: string; reason?: string };
     const verdict = p.verdict === "fail" || p.verdict === "partial" ? p.verdict : "pass";
     return { verdict, reason: String(p.reason ?? "").slice(0, 240) || "No reason given." };
   } catch {
-    return { verdict: "pass", reason: "Verifier unavailable." }; // never block the user on a checker failure
+    return { verdict: "partial", reason: "Verifier unavailable; the result was not marked as fully verified." };
   }
 }
