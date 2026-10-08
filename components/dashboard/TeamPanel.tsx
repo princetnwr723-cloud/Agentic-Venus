@@ -20,7 +20,9 @@ export default function TeamPanel({ uid, chatId, chatName, onClose, onTalk }: {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => watchTeam(uid, chatId, setTeam), [uid, chatId]);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [team?.feed.length, open, team?.threads[open ?? ""]?.length]);
+  const openThreadLength = open ? (team?.threads[open]?.length ?? 0) : 0;
+  const feedLength = team?.feed.length ?? 0;
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [feedLength, open, openThreadLength]);
 
   const member = open ? byId(open) : null;
   const working = team?.working ?? {};
