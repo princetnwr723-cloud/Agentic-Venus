@@ -284,6 +284,9 @@ export default function DashboardPage() {
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
       setSandboxId(chatId, data.sandboxId);
+      if (user) {
+        updateChatPc(user.uid, chatId, data.sandboxId as string, false, { persistence: data.persistence }).catch(() => {});
+      }
       runStartRef.current[chatId] = Date.now();
       const r = await loadScreen(chatId, data.sandboxId);
       return r === "ok" ? (data.sandboxId as string) : null;
@@ -299,7 +302,12 @@ export default function DashboardPage() {
     if (!id) return createPc(chatId);
     if (sessionsRef.current[chatId]?.status === "ready") return id;
     const r = await loadScreen(chatId, id);
-    if (r === "ok") return id;
+    if (r === "ok") {
+      if (user && chatsRef.current.find((c) => c.id === chatId)?.pcPaused) {
+        updateChatPc(user.uid, chatId, id, false, { recovery: true }).catch(() => {});
+      }
+      return id;
+    }
     if (r === "gone") return createPc(chatId);
     return null;
   }
@@ -593,7 +601,7 @@ export default function DashboardPage() {
 
   async function runPcTask(
     chat: Chat, task: string, logTask: boolean,
-    opts?: { quiet?: boolean; showPanel?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string } }
+    opts?: { quiet?: boolean; showPanel?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string }; onLine?: (line: string) => void }
   ): Promise<string> {
     const chatId = chat.id;
     if (!user || !e2bKey) return "";
@@ -627,7 +635,7 @@ export default function DashboardPage() {
 
       const out = await followPcJob({
         env, chatId, sandboxId: sid, jobId,
-        onStep: (l) => { pushStep(chatId, l); touch(chatId); },
+        onStep: (l) => { pushStep(chatId, l); opts?.onLine?.(l); touch(chatId); },
         cancelled: () => Boolean(stopRef.current[chatId]),
         onAsk: async (p) => {
           if (p.kind === "login" && findCredential(p.site ?? "")) return { type: "login_saved", site: p.site ?? "" };
@@ -829,7 +837,7 @@ export default function DashboardPage() {
   function teamHost(chat: Chat): TeamHost {
     return {
       llm: (system, prompt) => callLLM(chat, system, prompt),
-      runPc: (task) => runPcTask(chat, task, false, { quiet: true, verify: true, showPanel: true }),
+      runPc: (task, who, onLine) => runPcTask(chat, task, false, { quiet: true, showPanel: true, onLine }),
       runCode: (task, who) => runCodeFor(chat, task, { silent: true, persona: personaOf(who) }),
       runVideo: (task) => startVenus(chat, task, { silent: true }),
     };
