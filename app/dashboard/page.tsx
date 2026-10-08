@@ -248,6 +248,31 @@ export default function DashboardPage() {
 
   // ---- This chat's computer (for computer tasks). Venus Code and Venus Pro get their OWN computers. ----
 
+  async function backupPc(chatId: string, force = false): Promise<string | null> {
+    if (!user || !e2bKey) return null;
+    const chat = chatsRef.current.find((c) => c.id === chatId);
+    const sandboxId = sandboxRef.current[chatId] ?? chat?.pcSandboxId ?? null;
+    if (!sandboxId) return null;
+    if (!force && chat?.pcLastBackupAt && Date.now() - chat.pcLastBackupAt < 45_000) return chat.pcRecoveryPath ?? null;
+    try {
+      const res = await fetch("/api/e2b/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: e2bKey, sandboxId, uid: user.uid, chatId }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data?.error || "Backup failed.");
+      const path = String(data.path || "");
+      patchChat(chatId, { pcRecoveryPath: path, pcLastBackupAt: Date.now() });
+      await updateChatPc(user.uid, chatId, sandboxId, Boolean(chat?.pcPaused), { recoveryPath: path, backup: true });
+      return path || null;
+    } catch (err) {
+      // Backup is a resilience layer; never turn a successful user task into a failure.
+      patchSession(chatId, { error: `Durable backup skipped: ${err instanceof Error ? err.message : "backup unavailable"}` });
+      return null;
+    }
+  }
+
   async function loadScreen(chatId: string, sandboxId: string): Promise<"ok" | "gone" | "error"> {
     if (!e2bKey) { setSettingsOpen(true); return "error"; }
     const wasPaused = sessionsRef.current[chatId]?.status === "paused";
@@ -280,12 +305,14 @@ export default function DashboardPage() {
     if (activeIdRef.current === chatId) { setPcOpen(true); setTeamOpen(false); }
     patchSession(chatId, { status: "creating", error: null, screenUrl: null });
     try {
-      const res = await fetch("/api/e2b/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: e2bKey }) });
+      const recoveryPath = chatsRef.current.find((c) => c.id === chatId)?.pcRecoveryPath ?? "";
+      const res = await fetch("/api/e2b/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: e2bKey, uid: user.uid, recoveryPath: recoveryPath || undefined }) });
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not create a computer.");
       setSandboxId(chatId, data.sandboxId);
       if (user) {
-        updateChatPc(user.uid, chatId, data.sandboxId as string, false, { persistence: data.persistence }).catch(() => {});
+        updateChatPc(user.uid, chatId, data.sandboxId as string, false, { persistence: data.persistence, recoveryPath: recoveryPath || undefined }).catch(() => {});
+        patchChat(chatId, { pcPersistence: data.persistence, pcRecoveryPath: recoveryPath || (chatsRef.current.find((c) => c.id === chatId)?.pcRecoveryPath ?? null) });
       }
       runStartRef.current[chatId] = Date.now();
       const r = await loadScreen(chatId, data.sandboxId);
@@ -319,6 +346,7 @@ export default function DashboardPage() {
     const prev = sessionsRef.current[chatId]?.status ?? "idle";
     patchSession(chatId, { status: "loading", error: null });
     try {
+      await backupPc(chatId, true);
       const res = await fetch("/api/e2b/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: e2bKey, sandboxId: id }) });
       const data = await readJson(res);
       if (!res.ok) throw new Error(data?.error || "Could not turn the computer off.");
@@ -668,8 +696,10 @@ export default function DashboardPage() {
       appendMessages(chatId, logTask
         ? [{ role: "user", content: `🖥️ Task on the computer: ${task}`, at }, { role: "assistant", content: finalText || "Finished.", at }]
         : [{ role: "assistant", content: finalText || "Finished.", at }]);
-      void autoOff(chatId); // finished → computer off
     }
+    // Quiet/background/team tasks also get the same persistence + credit-saving lifecycle.
+    // Team execution keeps teamBusyRef true, so the computer is not paused between dependent steps.
+    void autoOff(chatId);
     return finalText;
   }
 
