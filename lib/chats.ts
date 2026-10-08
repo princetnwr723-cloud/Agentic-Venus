@@ -19,6 +19,8 @@ export type Chat = {
   pcPersistence?: "lifecycle" | "autoPause" | "none";
   pcLastSeenAt?: number;
   pcRecoveryCount?: number;
+  pcRecoveryPath?: string | null;
+  pcLastBackupAt?: number;
   codeWs?: string | null;
   connectors?: Record<string, string>;
   createdAt?: Timestamp;
@@ -57,10 +59,12 @@ export async function updateChatPc(
   chatId: string,
   pcSandboxId: string | null,
   pcPaused = false,
-  meta?: { persistence?: Chat["pcPersistence"]; recovery?: boolean },
+  meta?: { persistence?: Chat["pcPersistence"]; recovery?: boolean; recoveryPath?: string | null; backup?: boolean },
 ) {
   const patch: Record<string, unknown> = { pcSandboxId, pcPaused, pcLastSeenAt: Date.now() };
   if (meta?.persistence) patch.pcPersistence = meta.persistence;
+  if (meta?.recoveryPath !== undefined) patch.pcRecoveryPath = meta.recoveryPath;
+  if (meta?.backup) patch.pcLastBackupAt = Date.now();
   if (meta?.recovery) {
     const current = await getDoc(doc(db, "users", uid, "chats", chatId));
     const row = current.exists() ? current.data() as { pcRecoveryCount?: number } : undefined;
