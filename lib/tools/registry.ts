@@ -1,4 +1,5 @@
 import { FREE_TOOLS, PLUGIN_TOOLS, type Def } from "./plugins";
+import { GITHUB_EXTRA } from "./github-extra";
 import { IDENTITY_TOOLS } from "./identity";
 import { VERIFY_TOOLS } from "./verify";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
@@ -8,7 +9,11 @@ import { INJECTION_PATTERNS, wrapUntrusted } from "@/lib/shield";
 import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 
 type Conn = Record<string, string>;
-const ALL: Record<string, Def[]> = { ...PLUGIN_TOOLS, identity: IDENTITY_TOOLS };
+const ALL: Record<string, Def[]> = {
+  ...PLUGIN_TOOLS,
+  github: [...(PLUGIN_TOOLS.github ?? []), ...GITHUB_EXTRA],
+  identity: IDENTITY_TOOLS,
+};
 const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
