@@ -550,7 +550,7 @@ export default function DashboardPage() {
 
   // ---- The computer agent (visible on the screen) ----
 
-  async function finishPcRun(chat: Chat, task: string, out: PcOutcome, opts?: { quiet?: boolean; heal?: HealCtx }): Promise<string> {
+  async function finishPcRun(chat: Chat, task: string, out: PcOutcome, opts?: { quiet?: boolean; verify?: boolean; heal?: HealCtx }): Promise<string> {
     if (!user || !e2bKey) return out.summary;
     const chatId = chat.id;
     const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
@@ -565,7 +565,7 @@ export default function DashboardPage() {
 
     let replay = "";
     if (out.proof) { const url = await proofUrl(env, out.proof).catch(() => ""); if (url) replay = `\n\n🎥 [Watch the replay](${url}) (link works for 6 hours)`; }
-    if (opts?.quiet) return summary + replay;
+    if (opts?.quiet && !opts?.verify) return summary + replay;
 
     pushStep(chatId, "🔎 Verifier is checking the result…");
     const v = await verifyResult((s, p) => callLLM(chat, s, p, [], "verify"), { task, summary, evidence: [steps.slice(-25).join("\n")] });
@@ -593,7 +593,7 @@ export default function DashboardPage() {
 
   async function runPcTask(
     chat: Chat, task: string, logTask: boolean,
-    opts?: { quiet?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string } }
+    opts?: { quiet?: boolean; showPanel?: boolean; heal?: HealCtx; resume?: { jobId: string; sandboxId: string } }
   ): Promise<string> {
     const chatId = chat.id;
     if (!user || !e2bKey) return "";
@@ -606,8 +606,9 @@ export default function DashboardPage() {
     busyChats.current.add(chatId);
     patchSession(chatId, { running: true, steps: [`▶ ${task}`], request: null });
     const showWork = !opts?.quiet;
+    const showPanel = !opts?.quiet || Boolean(opts?.showPanel);
     if (showWork) workStart(chatId, opts?.resume ? "Chalte hue task se jud raha hoon…" : "Computer chalu kar raha hoon…", "pc");
-    if (activeIdRef.current === chatId && !opts?.quiet) { setPcOpen(true); setTeamOpen(false); }
+    if (activeIdRef.current === chatId && showPanel) { setPcOpen(true); setTeamOpen(false); }
     const trace = beginTrace(user.uid, chatId, task.slice(0, 80), "computer");
     const env = { uid: user.uid, token: () => user.getIdToken(), e2bKey };
     let finalText = "";
@@ -828,7 +829,7 @@ export default function DashboardPage() {
   function teamHost(chat: Chat): TeamHost {
     return {
       llm: (system, prompt) => callLLM(chat, system, prompt),
-      runPc: (task) => runPcTask(chat, task, false, { quiet: true }),
+      runPc: (task) => runPcTask(chat, task, false, { quiet: true, verify: true, showPanel: true }),
       runCode: (task, who) => runCodeFor(chat, task, { silent: true, persona: personaOf(who) }),
       runVideo: (task) => startVenus(chat, task, { silent: true }),
     };
@@ -1137,7 +1138,7 @@ export default function DashboardPage() {
             <ChatHeader
               name={activeChat.agentName} color={activeChat.agentColor} focusMode={focusMode} onToggleFocus={() => setFocusMode((v) => !v)}
               onIdentity={() => setIdentityOpen(true)}
-              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push(`/skills?chat=${activeChat.id}`)} onVpassword={() => router.push("/vpassword")} onRuns={() => router.push("/runs")}
+              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push(`/skills?chat=${activeChat.id}`)} onRuns={() => router.push("/runs")} onVpassword={() => router.push(`/vpassword?chat=${activeChat.id}`)}
               onConnectors={() => setConnectorsOpen(true)} hasConnectors={connectedNames.length > 0}
               onRoutines={() => setRoutinesOpen(true)} hasRoutines={routines.some((r) => r.enabled)}
               onTeam={handleTeamClick} teamOpen={teamOpen} teamRunning={Boolean(teamRun)}
