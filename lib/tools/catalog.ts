@@ -14,12 +14,15 @@ export const FREE_PACK = {
 export const PLUGINS: PluginMeta[] = [
   {
     id: "github", label: "GitHub",
-    note: "Search issues, read files, list repos, open issues. Free personal access token.",
+    note: "Search issues and PRs, read files, open issues, comment, open pull requests, commit to a branch. Free personal access token.",
     keysUrl: "https://github.com/settings/tokens",
     fields: [{ key: "token", placeholder: "ghp_… or github_pat_…", secret: true }],
     tools: [
       { name: "github.search_issues", risk: "read" }, { name: "github.list_repos", risk: "read" },
       { name: "github.get_file", risk: "read" }, { name: "github.create_issue", risk: "write" },
+      { name: "github.list_pull_requests", risk: "read" }, { name: "github.get_pull_request", risk: "read" },
+      { name: "github.comment", risk: "write" }, { name: "github.create_pull_request", risk: "write" },
+      { name: "github.commit_files", risk: "write" },
     ],
   },
   {
