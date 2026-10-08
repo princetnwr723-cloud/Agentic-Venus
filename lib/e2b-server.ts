@@ -1,5 +1,6 @@
 // Server-only. One E2B Desktop sandbox per chat.
 import type { Sandbox as SandboxClass } from "@e2b/desktop";
+import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
 
 const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -125,6 +126,48 @@ echo started
   } catch {
     // not fatal
   }
+}
+
+
+
+/**
+ * Durable computer recovery: E2B lifecycle persistence is the fast path, while this
+ * backup protects the user's workspace if the underlying sandbox is eventually gone.
+ * Credentials/browser profiles are intentionally excluded; those are stored encrypted
+ * in the Vault/browser-profile layer instead.
+ */
+const shellQuote = (v: string) => "'" + v.replace(/'/g, "'\''") + "'";
+
+export async function backupComputerState(apiKeyInput: string, sandboxId: string, uid: string, chatId: string): Promise<string> {
+  const sandbox = await connect(apiKeyInput, sandboxId);
+  const safeUid = uid.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+  const safeChat = chatId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+  if (!safeUid || !safeChat) throw new Error("Bad recovery identity.");
+  const path = `${safeUid}/pc-recovery/${safeChat}/latest.tgz`;
+  const upload = await createSignedUpload(path);
+  const cmd = `
+set -e
+rm -f /tmp/venus-pc-recovery.tgz
+# Keep a small machine manifest for reinstall/recovery diagnostics.
+{ echo '--- Venus PC recovery manifest ---'; date -u; echo '--- packages ---'; dpkg-query -W -f='\${Package}\t\${Version}\n' 2>/dev/null | tail -n 3000; echo '--- vscode extensions ---'; code --list-extensions 2>/dev/null | head -n 500; } > /tmp/venus-pc-manifest.txt || true
+tar -czf /tmp/venus-pc-recovery.tgz --ignore-failed-read -C /home/user work venus-assets Documents Desktop Downloads .code-version .code-ready .npm-global .config/Code/User -C /tmp venus-pc-manifest.txt 2>/dev/null || true
+code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 55 -X PUT ${shellQuote(upload)} -H 'Content-Type: application/gzip' -H 'x-upsert: true' --data-binary @/tmp/venus-pc-recovery.tgz)
+echo $code
+`.trim();
+  const r = await exec(sandbox, cmd, 58_000);
+  if (r.stdout.trim().split(/\s+/).pop() !== "200") throw new Error("Durable PC backup failed: " + (r.stderr || r.stdout).slice(-300));
+  return path;
+}
+
+/** Restores only user/workspace state from a durable PC backup. Secrets are never restored from this archive. */
+export async function restoreComputerState(sandbox: DesktopSandbox, signedUrl: string): Promise<boolean> {
+  if (!/^https?:\/\//i.test(signedUrl)) return false;
+  const r = await exec(sandbox, `rm -f /tmp/venus-pc-recovery.tgz && curl -fsSL --max-time 55 -o /tmp/venus-pc-recovery.tgz ${shellQuote(signedUrl)} && tar -xzf /tmp/venus-pc-recovery.tgz -C /home/user && echo restored`, 58_000);
+  return r.exitCode === 0 && r.stdout.includes("restored");
+}
+
+export async function recoveryDownloadUrl(path: string, expiresIn = 600): Promise<string> {
+  return createSignedDownload(path, expiresIn);
 }
 
 export type PersistenceMode = "lifecycle" | "autoPause" | "none";
