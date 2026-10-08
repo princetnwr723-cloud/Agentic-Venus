@@ -1137,7 +1137,7 @@ export default function DashboardPage() {
             <ChatHeader
               name={activeChat.agentName} color={activeChat.agentColor} focusMode={focusMode} onToggleFocus={() => setFocusMode((v) => !v)}
               onIdentity={() => setIdentityOpen(true)}
-              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push(`/skills?chat=${activeChat.id}`)} onRuns={() => router.push("/runs")}
+              onCode={() => router.push(`/code?chat=${activeChat.id}`)} onVenus={() => router.push("/venus")} onSkills={() => router.push(`/skills?chat=${activeChat.id}`)} onVpassword={() => router.push("/vpassword")} onRuns={() => router.push("/runs")}
               onConnectors={() => setConnectorsOpen(true)} hasConnectors={connectedNames.length > 0}
               onRoutines={() => setRoutinesOpen(true)} hasRoutines={routines.some((r) => r.enabled)}
               onTeam={handleTeamClick} teamOpen={teamOpen} teamRunning={Boolean(teamRun)}
