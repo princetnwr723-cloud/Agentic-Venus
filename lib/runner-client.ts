@@ -42,6 +42,7 @@ export async function runCodeViaRunner(a: {
   try {
     const r = await rcall(env, "start", {
       sandboxId, ws: project.id, instruction: a.instruction, provider: env.provider, model: env.model, apiKey,
+      appUrl: window.location.origin, // without this the runner gets no job token, so connected tools (GitHub, MCP) never worked
       persona: a.persona, memory: brainPrompt(brain, a.instruction, { noSkills: true }),
       skills: brain.skills.filter((s) => !s.disabled).map((s) => ({ name: s.name, description: s.description, instructions: s.instructions })),
       earlier: project.ctx || undefined, maxSteps: a.maxSteps, backupPath: project.backupPath,
