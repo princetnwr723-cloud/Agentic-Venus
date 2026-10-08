@@ -1,5 +1,5 @@
 import { addMemory, bumpSkillUse, brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
-import { listChats } from "@/lib/chats";
+import { listChats, updateChatPc } from "@/lib/chats";
 import { touch } from "@/lib/computers";
 import { codeSystemPrompt, parseTools, type ToolCall } from "@/lib/code-prompts";
 import { saveCodeProject, watchCodeProject, type CodeLog, type CodeProject, type RunnerJob } from "@/lib/code-store";
@@ -30,15 +30,42 @@ async function readJson(res: Response) {
 }
 
 export async function wsCall(env: CodeEnv, action: string, extra: Record<string, unknown> = {}) {
-  const res = await fetch("/api/code/ws", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
-    body: JSON.stringify({ action, uid: env.uid, e2bKey: env.e2bKey, ...extra }),
-  });
-  const data = await readJson(res);
-  if (!res.ok) throw new Error(data?.error || "Workspace request failed.");
-  if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
-  return data;
+  const send = async (sandboxId?: string) => {
+    const res = await fetch("/api/code/ws", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
+      body: JSON.stringify({ action, uid: env.uid, e2bKey: env.e2bKey, ...(sandboxId ? { sandboxId } : {}), ...extra }),
+    });
+    const data = await readJson(res);
+    return { res, data };
+  };
+
+  const current = typeof extra.sandboxId === "string" ? extra.sandboxId : env.sandboxId;
+  let { res, data } = await send(current);
+  if (res.ok) {
+    if (current) touch(current, env.e2bKey);
+    return data;
+  }
+
+  const message = String(data?.error || "Workspace request failed.");
+  // A deleted/expired E2B machine should not kill a long coding job. Create a fresh
+  // machine, restore the durable workspace on the next ensure call, and retry once.
+  if (/SANDBOX_GONE|expired|not found|does not exist/i.test(message)) {
+    const create = await fetch("/api/e2b/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: env.e2bKey, uid: env.uid, recoveryPath: typeof extra.backupPath === "string" ? extra.backupPath : undefined }),
+    });
+    const created = await readJson(create);
+    if (create.ok && created?.sandboxId) {
+      const next = String(created.sandboxId);
+      env.sandboxId = next;
+      await updateChatPc(env.uid, env.chatId, next, false, { persistence: created.persistence, recoveryPath: typeof extra.backupPath === "string" ? extra.backupPath : undefined, recovery: true }).catch(() => {});
+      ({ res, data } = await send(next));
+      if (res.ok) { touch(next, env.e2bKey); return data; }
+    }
+  }
+  throw new Error(message);
 }
 
 /** Venus Code runs on its own computer (the dashboard passes it in as env.sandboxId). */
@@ -50,20 +77,21 @@ export async function resolveSandbox(env: CodeEnv): Promise<string> {
   return id;
 }
 
-async function ensureCodeTools(env: CodeEnv, sid: string, hooks: CodeHooks) {
+async function ensureCodeTools(env: CodeEnv, sid: string, hooks: CodeHooks): Promise<string> {
   const s = await wsCall(env, "status", { sandboxId: sid });
-  if (s.state === "ready") return;
+  const actual = env.sandboxId ?? sid;
+  if (s.state === "ready") return actual;
   if (s.state !== "installing") {
     hooks.event({ kind: "info", text: "Installing coding tools on the computer (one time, a few minutes)…" });
-    await wsCall(env, "setup", { sandboxId: sid });
+    await wsCall(env, "setup", { sandboxId: env.sandboxId ?? sid });
   }
   for (let i = 0; i < 160; i++) {
     if (hooks.cancelled()) throw new Error("Stopped.");
     await sleep(5000);
-    const t = await wsCall(env, "status", { sandboxId: sid });
+    const t = await wsCall(env, "status", { sandboxId: env.sandboxId ?? sid });
     const last = String(t.log || "").split("\n").filter(Boolean).slice(-1)[0];
     if (last) hooks.event({ kind: "info", text: "⚙️ " + last.slice(0, 120) });
-    if (t.state === "ready") return;
+    if (t.state === "ready") return env.sandboxId ?? sid;
     if (t.state === "failed") throw new Error("Coding tools setup failed:\n" + String(t.log).slice(-500));
   }
   throw new Error("Coding tools setup timed out.");
@@ -264,8 +292,9 @@ export async function runCodeAgent(
 
   try {
     emit({ kind: "user", text: instruction });
-    const sandboxId = await resolveSandbox(env);
-    await ensureCodeTools(env, sandboxId, wrapped);
+    const initialSandboxId = await resolveSandbox(env);
+    const sandboxId = await ensureCodeTools(env, initialSandboxId, wrapped);
+    env.sandboxId = sandboxId;
     const brain = opts.brain ?? (await loadBrain(scope));
     const ensured = await wsCall(env, "ensure", { sandboxId, ws: p.id, backupPath: p.backupPath });
     if (ensured.restored) emit({ kind: "info", text: "Codespace restored from your backup." });
