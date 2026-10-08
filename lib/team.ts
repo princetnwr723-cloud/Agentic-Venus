@@ -74,12 +74,40 @@ export async function assembleTeam(a: { uid: string; chatId: string; brief: stri
 
 export type Step = { member: string; task: string; after: number[] };
 
+/**
+ * Keep team routing deterministic for high-impact workflows. The LLM is still
+ * responsible for the plan and wording, but it must not accidentally send a
+ * computer job through the lightweight research runner. This also keeps the
+ * existing PC/code/video workspaces from being raced by multiple steps.
+ */
+function enforceToolRouting(goal: string, steps: Step[]): Step[] {
+  const g = goal.toLowerCase();
+  const needsPc =
+    /\b(lead|leads|prospect|prospects|clinic|clinics|dentist|dentists|contact|contacts|crm|spreadsheet|scrape|scraping|download|downloads|browser|website|web site|login|log in|form|forms|booking|book|upload|uploading|file|files|desktop|computer|terminal)\b/.test(g) &&
+    /\b(find|search|research|collect|gather|verify|verified|validate|cross[- ]?check|enrich|scrape|download|upload|open|login|log in|book|fill|create|update|clean|dedupe|duplicate|contact|contacts|send|reply|read)\b/.test(g);
+
+  if (!needsPc || !steps.length) return steps;
+
+  const pcIds = steps.filter((s) => byId(s.member)?.tool === "pc").map((s) => s.member);
+  const preferred = pcIds[0] ?? "hunter";
+  const secondary = pcIds[1] ?? "intel";
+  let pcCount = 0;
+
+  return steps.map((s) => {
+    const tool = byId(s.member)?.tool;
+    if (tool === "research" || tool === "think") {
+      const member = pcCount++ === 0 ? preferred : secondary;
+      return { ...s, member };
+    }
+    return s;
+  });
+}
 export async function planTeam(llm: LlmFn, goal: string, ctx: string): Promise<Step[]> {
   const roster = CATALOG.map((x) => `${x.id}|${x.name}|${x.title}|${x.tool}`).join("\n");
   const reply = await llm(
     personaOf(byId("chief")!),
     `Assemble the SMALLEST team (2-5 members) from this roster to achieve the goal, and plan the steps.
-Roster (id|name|title|tool): tool "pc" = its own real computer with browser + terminal; "code" = Venus Code coding workspace; "video" = Venus Pro motion-graphics video; "research" = web research; "think" = writing/analysis; "email" = drafts emails (sending needs the Gmail connector, not connected yet).
+Roster (id|name|title|tool): tool "pc" = this chat's persistent real computer with browser + terminal; "code" = Venus Code coding workspace; "video" = Venus Pro motion-graphics video; "research" = web research; "think" = writing/analysis; "email" = drafts emails (sending needs the Gmail connector, not connected yet).
 ${roster}
 
 Rules: each step = {"member": id, "task": complete self-contained instruction incl. every detail the member needs, "after": [indices of EARLIER steps whose results this step needs]}. Steps that do not depend on each other must have an empty "after" so they run in parallel. Maximum 7 steps. Use the tool that fits the job (find leads → pc; build a website → code; emails → email; video → video).
@@ -93,7 +121,15 @@ GOAL: ${goal}`
     task: String(s?.task ?? "").slice(0, 2500),
     after: (Array.isArray(s?.after) ? s.after : []).map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < i),
   })).filter((s: Step) => s.task);
-  return steps.length ? steps : [{ member: "chief", task: goal, after: [] }];
+  const planned = steps.length ? steps : [{ member: "chief", task: goal, after: [] }];
+  const routed = enforceToolRouting(goal, planned);
+
+  // A routing replacement must never create a dependency cycle or invalid
+  // indexes; preserve the planner's dependency graph exactly as returned.
+  return routed.map((s, i) => ({
+    ...s,
+    after: s.after.filter((n) => Number.isInteger(n) && n >= 0 && n < i),
+  }));
 }
 
 // ---------- running a member's step ----------
@@ -146,11 +182,14 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
   for (let lv = 0; lv <= Math.max(...level); lv++) {
     const idxs = steps.map((_, i) => i).filter((i) => level[i] === lv);
     // The coding workspace and Venus Pro are single per chat → one after another.
-    // Everything else (each computer member has its OWN computer) runs in parallel.
+    // Research/think steps can run in parallel; this chat has one shared PC workspace, so PC work is serialized.
     const groups = new Map<string, number[]>();
     for (const i of idxs) {
       const tool = byId(steps[i].member)!.tool;
-      const k = tool === "code" || tool === "video" ? tool : "s" + i;
+      // All PC members currently share this chat's single persistent computer.
+      // Serialize PC work to prevent competing jobs from starting on the same
+      // sandbox. Code and video also have one workspace per chat.
+      const k = tool === "pc" || tool === "code" || tool === "video" ? tool : "s" + i;
       groups.set(k, [...(groups.get(k) ?? []), i]);
     }
     await Promise.all(Array.from(groups.values()).map(async (list) => {
@@ -169,7 +208,13 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
           void updateTeam(uid, chatId, (t) => { t.working[who.id] = line.slice(0, 140); });
         };
         try {
-          results[i] = await execMember(who, deps ? `${s.task}\n\n${deps}` : s.task, host, onLine);
+          const blocked = s.after.some((k) => /^Failed:|^⚠️|^❌/i.test(results[k].trim()));
+          if (blocked) {
+            results[i] = "Skipped: a required earlier step failed, so this step was not run with incomplete inputs.";
+            await say(who.id, "assistant", results[i]);
+          } else {
+            results[i] = await execMember(who, deps ? `${s.task}\n\n${deps}` : s.task, host, onLine);
+          }
         } catch (e) {
           results[i] = `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
         }
@@ -180,9 +225,10 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
     }));
   }
 
+  const failures = results.filter((r) => /^Failed:|^⚠️|^❌|^Skipped:/i.test(r.trim())).length;
   const report = await host.llm(
     personaOf(byId("chief")!),
-    `Write the final report to the user in clear English (markdown). Start with one outcome line (✅ done / ⚠️ partly / ❌ failed), then what each member did, concrete results (links, names, files) and what still needs the user. Never invent anything.\n\nGOAL: ${a.goal}\n\n${steps.map((s, i) => `STEP ${i + 1} — ${byId(s.member)?.name} (${s.task.slice(0, 160)}):\n${results[i].slice(0, 1800)}`).join("\n\n")}`
+    `Write the final report to the user in clear English (markdown). Start with one outcome line (use ❌ failed if the core goal failed, ⚠️ partly if any required step failed or was skipped, otherwise ✅ done), then what each member did, concrete results (links, names, files) and what still needs the user. Never invent anything and NEVER claim a skipped/failed step was completed.\n\nGOAL: ${a.goal}\nSTEPS WITH FAILURE/SKIP SIGNALS: ${failures}\n\n${steps.map((s, i) => `STEP ${i + 1} — ${byId(s.member)?.name} (${s.task.slice(0, 160)}):\n${results[i].slice(0, 1800)}`).join("\n\n")}`
   );
   await say("chief", "assistant", report);
   return report;
