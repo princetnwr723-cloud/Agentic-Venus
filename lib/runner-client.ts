@@ -55,7 +55,7 @@ export async function runCodeViaRunner(a: {
   }
 
   let offset = 0;
-  const job = (): RunnerJob => ({ id: jobId, sandboxId, offset, hb: Date.now() });
+  const job = (): RunnerJob => ({ id: jobId, sandboxId: env.sandboxId ?? sandboxId, offset, hb: Date.now() });
   a.setJob(job());
 
   const pump = (events: Array<{ k: string; text: string; depth?: number; path?: string; lines?: unknown[] }>) => {
@@ -72,17 +72,46 @@ export async function runCodeViaRunner(a: {
       await sleep(2500);
       if (hooks.cancelled() && !stopSent) {
         stopSent = true;
-        await rcall(env, "stop", { sandboxId, jobId }).catch(() => {});
+        await rcall(env, "stop", { sandboxId: env.sandboxId ?? sandboxId, jobId }).catch(() => {});
       }
       let st: any;
       try {
-        st = await rcall(env, "status", { sandboxId, jobId, offset });
+        st = await rcall(env, "status", { sandboxId: env.sandboxId ?? sandboxId, jobId, offset });
         fails = 0;
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/SANDBOX_GONE|expired|not found|does not exist/i.test(msg) && fails < 1) {
+          emit({ kind: "info", text: "⚠️ The computer disappeared. Recovering the coding workspace and continuing from the last saved state…" });
+          const create = await fetch("/api/e2b/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apiKey: env.e2bKey, uid: env.uid, recoveryPath: project.backupPath || undefined }),
+          });
+          const created = await create.json().catch(() => ({}));
+          if (create.ok && created?.sandboxId) {
+            const next = String(created.sandboxId);
+            env.sandboxId = next;
+            await import("@/lib/chats").then(({ updateChatPc }) => updateChatPc(env.uid, env.chatId, next, false, { persistence: created.persistence, recoveryPath: project.backupPath ?? null, recovery: true })).catch(() => {});
+            const restart = await rcall(env, "start", {
+              sandboxId: next, ws: project.id,
+              instruction: `The previous computer disappeared. Continue the user's task from the restored workspace and existing git state. Do not redo completed work. Re-read the current files, verify what is already done, then continue until the original task is complete and tested.\n\nORIGINAL TASK:\n${a.instruction}`,
+              provider: env.provider, model: env.model, apiKey,
+              uid: env.uid, appUrl: window.location.origin, persona: a.persona,
+              memory: brainPrompt(brain, a.instruction, { noSkills: true }),
+              skills: brain.skills.filter((s) => !s.disabled).map((s) => ({ name: s.name, description: s.description, instructions: s.instructions })),
+              earlier: project.ctx || undefined, maxSteps: a.maxSteps, backupPath: project.backupPath,
+            });
+            jobId = String(restart.jobId);
+            offset = 0;
+            fails = 0;
+            a.setJob({ id: jobId, sandboxId: next, offset, hb: Date.now() });
+            continue;
+          }
+        }
         if (++fails >= 25) throw e;
         continue;
       }
-      touch(sandboxId, env.e2bKey);
+      touch(env.sandboxId ?? sandboxId, env.e2bKey);
       pump(st.events ?? []);
       offset = st.next ?? offset;
       a.setJob(job());
@@ -90,7 +119,7 @@ export async function runCodeViaRunner(a: {
     }
     // drain whatever is left
     for (let i = 0; i < 6; i++) {
-      const more = await rcall(env, "status", { sandboxId, jobId, offset });
+      const more = await rcall(env, "status", { sandboxId: env.sandboxId ?? sandboxId, jobId, offset });
       pump(more.events ?? []);
       offset = more.next ?? offset;
       if ((more.events ?? []).length < 300) break;
