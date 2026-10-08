@@ -4,7 +4,18 @@
 import chromium from "@sparticuz/chromium";
 import { chromium as pw, type Page } from "playwright-core";
 
-export type BrowserSession = { url: string; cookies: any[] };
+export type BrowserStorageState = {
+  cookies: any[];
+  origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
+};
+
+export type BrowserSession = {
+  url: string;
+  cookies: any[];
+  /** Full Playwright storage state. Kept server-side when profile persistence is enabled. */
+  storageState?: BrowserStorageState;
+  savedAt?: number;
+};
 type Target = { label: string; tag?: string; nth?: number };
 export type BrowserOp =
   | { op: "click"; id: number }
@@ -104,8 +115,14 @@ export async function runBrowser(input: {
 
   const browser = await pw.launch({ args: chromium.args, executablePath: await chromium.executablePath(), headless: true });
   try {
-    const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, userAgent: UA });
-    if (input.session?.cookies?.length) await ctx.addCookies(input.session.cookies).catch(() => {});
+    const saved = input.session?.storageState;
+    const ctx = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      userAgent: UA,
+      ...(saved ? { storageState: saved } : {}),
+    });
+    // Backward compatibility for sessions created before full storageState support.
+    if (!saved && input.session?.cookies?.length) await ctx.addCookies(input.session.cookies).catch(() => {});
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
@@ -152,8 +169,20 @@ export async function runBrowser(input: {
     }
 
     const snap = await snapshot(page, log);
-    const cookies = await ctx.cookies();
-    return { snapshot: snap, session: { url: page.url(), cookies } };
+    const storageState = await ctx.storageState();
+    const cookies = storageState.cookies ?? (await ctx.cookies());
+    return {
+      snapshot: snap,
+      session: {
+        url: page.url(),
+        cookies,
+        storageState: {
+          cookies,
+          origins: storageState.origins ?? [],
+        },
+        savedAt: Date.now(),
+      },
+    };
   } finally {
     await browser.close().catch(() => {});
   }
