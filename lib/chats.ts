@@ -1,5 +1,5 @@
 import {
-  collection, addDoc, doc, getDocs, updateDoc, deleteDoc, query, orderBy, serverTimestamp, type Timestamp,
+  collection, addDoc, doc, getDoc, getDocs, updateDoc, deleteDoc, query, orderBy, serverTimestamp, type Timestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import type { AvatarColor } from "@/lib/bots";
@@ -16,6 +16,9 @@ export type Chat = {
   messages: ChatMessage[];
   pcSandboxId?: string | null;
   pcPaused?: boolean;
+  pcPersistence?: "lifecycle" | "autoPause" | "none";
+  pcLastSeenAt?: number;
+  pcRecoveryCount?: number;
   codeWs?: string | null;
   connectors?: Record<string, string>;
   createdAt?: Timestamp;
@@ -49,8 +52,21 @@ export async function updateChatModel(uid: string, chatId: string, provider: Pro
   await updateDoc(doc(db, "users", uid, "chats", chatId), { provider, model });
 }
 
-export async function updateChatPc(uid: string, chatId: string, pcSandboxId: string | null, pcPaused = false) {
-  await updateDoc(doc(db, "users", uid, "chats", chatId), { pcSandboxId, pcPaused });
+export async function updateChatPc(
+  uid: string,
+  chatId: string,
+  pcSandboxId: string | null,
+  pcPaused = false,
+  meta?: { persistence?: Chat["pcPersistence"]; recovery?: boolean },
+) {
+  const patch: Record<string, unknown> = { pcSandboxId, pcPaused, pcLastSeenAt: Date.now() };
+  if (meta?.persistence) patch.pcPersistence = meta.persistence;
+  if (meta?.recovery) {
+    const current = await getDoc(doc(db, "users", uid, "chats", chatId));
+    const row = current.exists() ? current.data() as { pcRecoveryCount?: number } : undefined;
+    patch.pcRecoveryCount = Number(row?.pcRecoveryCount ?? 0) + 1;
+  }
+  await updateDoc(doc(db, "users", uid, "chats", chatId), patch);
 }
 
 export async function updateChatCode(uid: string, chatId: string, codeWs: string | null) {
