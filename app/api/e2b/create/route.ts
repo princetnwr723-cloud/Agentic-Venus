@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createSandbox, loadSdk } from "@/lib/e2b-server";
+import { createSandbox, loadSdk, recoveryDownloadUrl, restoreComputerState } from "@/lib/e2b-server";
 import { readBody } from "@/lib/request";
 
 export const runtime = "nodejs";
@@ -19,12 +19,25 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { apiKey } = await readBody(req);
+    const body = await readBody(req);
+    const apiKey = String(body.apiKey || "");
     if (!apiKey) {
       return NextResponse.json({ error: "No E2B API key on file." }, { status: 400 });
     }
     const { sandboxId, persistence } = await createSandbox(apiKey);
-    return NextResponse.json({ sandboxId, persistence });
+    let restored = false;
+    const recoveryPath = typeof body.recoveryPath === "string" ? body.recoveryPath : "";
+    if (recoveryPath) {
+      const owner = typeof body.uid === "string" ? body.uid : "";
+      if (!owner || !recoveryPath.startsWith(owner.replace(/[^A-Za-z0-9_-]/g, "") + "/pc-recovery/")) {
+        return NextResponse.json({ error: "Invalid recovery path." }, { status: 400 });
+      }
+      const signed = await recoveryDownloadUrl(recoveryPath, 600);
+      const { connect } = await import("@/lib/e2b-server");
+      const sb = await connect(apiKey, sandboxId);
+      restored = await restoreComputerState(sb, signed).catch(() => false);
+    }
+    return NextResponse.json({ sandboxId, persistence, restored });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not create a computer.";
     return NextResponse.json({ error: message }, { status: 500 });
