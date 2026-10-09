@@ -1,0 +1,441 @@
+{
+  "version": 1,
+  "description": "Fixed regression tasks. These are task definitions; results must be collected by running the agent in a configured environment.",
+  "tasks": [
+    {
+      "id": "lead_research-01",
+      "category": "lead_research",
+      "prompt": "Find 10 independent dentists in New York City with official websites and public contact details. Return a CSV and cite every source.",
+      "rubric": [
+        "10 unique rows",
+        "source URL",
+        "CSV"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-02",
+      "category": "lead_research",
+      "prompt": "Research 8 HVAC companies in Austin; exclude directories and verify each official domain.",
+      "rubric": [
+        "8 unique companies",
+        "official domain",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-03",
+      "category": "lead_research",
+      "prompt": "Find 12 accountants in Chicago and separate confirmed facts from unknown fields.",
+      "rubric": [
+        "12 rows",
+        "unknown fields",
+        "sources"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-04",
+      "category": "lead_research",
+      "prompt": "Build a list of 10 independent gyms in Miami with website and public email when available.",
+      "rubric": [
+        "10 rows",
+        "public email",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-05",
+      "category": "lead_research",
+      "prompt": "Find 10 roofing contractors in Phoenix and flag duplicate domains.",
+      "rubric": [
+        "10 rows",
+        "duplicate",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-06",
+      "category": "lead_research",
+      "prompt": "Research 8 dental clinics in Seattle and check that each website is live.",
+      "rubric": [
+        "8 rows",
+        "website status",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-07",
+      "category": "lead_research",
+      "prompt": "Find 10 SaaS companies hiring customer success staff; cite evidence of hiring.",
+      "rubric": [
+        "10 companies",
+        "hiring evidence",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-08",
+      "category": "lead_research",
+      "prompt": "Find 8 local law firms in Denver and do not guess attorney names or emails.",
+      "rubric": [
+        "8 firms",
+        "not found",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-09",
+      "category": "lead_research",
+      "prompt": "Research 10 restaurants in Boston for a supplier outreach list; use official websites.",
+      "rubric": [
+        "10 rows",
+        "official website",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "lead_research-10",
+      "category": "lead_research",
+      "prompt": "Find 10 property managers in Tampa and mark email deliverability as unverified unless directly tested.",
+      "rubric": [
+        "10 rows",
+        "unverified",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-01",
+      "category": "browser_forms",
+      "prompt": "Open a public contact page and identify the fields required, but do not submit it.",
+      "rubric": [
+        "field list",
+        "do not submit",
+        "confirmation"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "browser_forms-02",
+      "category": "browser_forms",
+      "prompt": "Navigate a multi-page public site, collect the requested facts, and cite exact URLs.",
+      "rubric": [
+        "facts",
+        "source URL",
+        "no invented"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-03",
+      "category": "browser_forms",
+      "prompt": "When a site shows a cookie banner, choose only the minimum necessary preference and continue.",
+      "rubric": [
+        "continue",
+        "privacy"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-04",
+      "category": "browser_forms",
+      "prompt": "If a page blocks automation, report the block and use an accessible official alternative.",
+      "rubric": [
+        "blocked",
+        "alternative"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-05",
+      "category": "browser_forms",
+      "prompt": "Fill a draft contact form with user-provided data, stop before submission, and request approval.",
+      "rubric": [
+        "draft",
+        "approval",
+        "not submit"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-06",
+      "category": "browser_forms",
+      "prompt": "Download a public PDF and extract the requested table into CSV.",
+      "rubric": [
+        "CSV",
+        "PDF",
+        "rows"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-07",
+      "category": "browser_forms",
+      "prompt": "Find the official pricing page for a SaaS tool and capture plan names and prices.",
+      "rubric": [
+        "pricing",
+        "official",
+        "currency"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-08",
+      "category": "browser_forms",
+      "prompt": "Compare two official documentation pages and explain any version differences.",
+      "rubric": [
+        "version",
+        "documentation",
+        "source URL"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-09",
+      "category": "browser_forms",
+      "prompt": "If login is required but no authenticated profile exists, ask for setup rather than inventing access.",
+      "rubric": [
+        "login",
+        "setup"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "browser_forms-10",
+      "category": "browser_forms",
+      "prompt": "Inspect a browser error, capture the likely cause, and try one safe recovery step.",
+      "rubric": [
+        "error",
+        "recovery"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "coding_bugs-01",
+      "category": "coding_bugs",
+      "prompt": "Fix a TypeScript function that fails on null input; add regression tests.",
+      "rubric": [
+        "null",
+        "test",
+        "TypeScript"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-02",
+      "category": "coding_bugs",
+      "prompt": "Find and fix an off-by-one error in pagination and test first, last, and empty pages.",
+      "rubric": [
+        "pagination",
+        "empty",
+        "test"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-03",
+      "category": "coding_bugs",
+      "prompt": "Repair a React state update that uses stale state; add a focused test.",
+      "rubric": [
+        "stale state",
+        "test"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-04",
+      "category": "coding_bugs",
+      "prompt": "Fix a server route that trusts a client-supplied user ID; verify ownership server-side.",
+      "rubric": [
+        "auth",
+        "ownership",
+        "test"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-05",
+      "category": "coding_bugs",
+      "prompt": "Handle a timed-out external API request with bounded retries and clear errors.",
+      "rubric": [
+        "timeout",
+        "retry",
+        "bounded"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "coding_bugs-06",
+      "category": "coding_bugs",
+      "prompt": "Fix a CSV export that breaks on commas, quotes, and newlines in fields.",
+      "rubric": [
+        "CSV",
+        "quotes",
+        "newline"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-07",
+      "category": "coding_bugs",
+      "prompt": "Remove an unsafe shell interpolation bug and validate untrusted arguments.",
+      "rubric": [
+        "shell",
+        "validate",
+        "injection"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-08",
+      "category": "coding_bugs",
+      "prompt": "Fix duplicate job starts caused by concurrent requests; make acquisition atomic.",
+      "rubric": [
+        "atomic",
+        "concurrent",
+        "job"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "coding_bugs-09",
+      "category": "coding_bugs",
+      "prompt": "Correct a URL fetch flow that follows redirects into private network addresses.",
+      "rubric": [
+        "redirect",
+        "private",
+        "SSRF"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "coding_bugs-10",
+      "category": "coding_bugs",
+      "prompt": "Fix a cost estimate that silently uses a wrong default price for unknown models.",
+      "rubric": [
+        "unknown model",
+        "estimate",
+        "explicit"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "video_tasks-01",
+      "category": "video_tasks",
+      "prompt": "Create a 15-second vertical short from supplied assets with a title card and end card.",
+      "rubric": [
+        "9:16",
+        "duration",
+        "render"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "video_tasks-02",
+      "category": "video_tasks",
+      "prompt": "Generate a storyboard for a 30-second science short with timestamps and shot descriptions.",
+      "rubric": [
+        "timestamps",
+        "shots",
+        "30"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "video_tasks-03",
+      "category": "video_tasks",
+      "prompt": "Render a sample clip and verify that the output file exists and has non-zero size.",
+      "rubric": [
+        "output file",
+        "size",
+        "verify"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "video_tasks-04",
+      "category": "video_tasks",
+      "prompt": "If an asset is missing, report it and produce a partial render only if clearly labeled.",
+      "rubric": [
+        "missing",
+        "partial",
+        "report"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "video_tasks-05",
+      "category": "video_tasks",
+      "prompt": "Create a repeatable video template and record render settings for reproducibility.",
+      "rubric": [
+        "template",
+        "settings",
+        "repeatable"
+      ],
+      "risk": "write"
+    },
+    {
+      "id": "team_goals-01",
+      "category": "team_goals",
+      "prompt": "Split a market research task into independent research, verification, and synthesis subtasks.",
+      "rubric": [
+        "subtasks",
+        "verification",
+        "synthesis"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "team_goals-02",
+      "category": "team_goals",
+      "prompt": "Run three independent read-only research subtasks concurrently and combine deduplicated findings.",
+      "rubric": [
+        "concurrent",
+        "deduplicate",
+        "sources"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "team_goals-03",
+      "category": "team_goals",
+      "prompt": "When one worker fails, preserve successful outputs and retry only the failed subtask.",
+      "rubric": [
+        "retry",
+        "preserve",
+        "failed"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "team_goals-04",
+      "category": "team_goals",
+      "prompt": "Resolve conflicting claims by preferring primary sources and flagging unresolved uncertainty.",
+      "rubric": [
+        "primary sources",
+        "conflict",
+        "uncertainty"
+      ],
+      "risk": "read"
+    },
+    {
+      "id": "team_goals-05",
+      "category": "team_goals",
+      "prompt": "Produce a final report with decisions, evidence, open questions, and next actions.",
+      "rubric": [
+        "evidence",
+        "open questions",
+        "next actions"
+      ],
+      "risk": "read"
+    }
+  ]
+}
