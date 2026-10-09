@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "routines:run": "node scripts/routine-runner.mjs"
+    "routines:run": "node scripts/routine-runner.mjs",
+    "eval:check": "node scripts/eval-suite.mjs",
+    "test": "node --test scripts/tests/*.test.mjs"
   },
   "dependencies": {
     "next": "14.2.15",
