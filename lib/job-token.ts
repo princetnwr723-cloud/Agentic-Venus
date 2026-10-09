@@ -9,8 +9,15 @@ const secret = () => {
 const sign = (body: string) => createHmac("sha256", secret()).update(body).digest("base64url");
 
 /** A short-lived pass for ONE background job. The sandbox never sees the user's tokens: it calls the server with this. */
-export function signJob(uid: string, chatId: string, jobId: string, ttlMs = 6 * 3600_000): string {
-  const body = Buffer.from(JSON.stringify({ u: uid, c: chatId, j: jobId, e: Date.now() + ttlMs })).toString("base64url");
+const MAX_JOB_TTL_MS = 6 * 60 * 60_000;
+const validIdentity = (value: string) => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\r\n]/.test(value);
+
+export function signJob(uid: string, chatId: string, jobId: string, ttlMs = MAX_JOB_TTL_MS): string {
+  if (!validIdentity(uid) || !validIdentity(chatId) || !/^[a-z0-9]{4,24}$/.test(jobId)) {
+    throw new Error("Cannot issue a job token for an invalid identity or job id.");
+  }
+  const boundedTtl = Math.min(MAX_JOB_TTL_MS, Math.max(1_000, Number.isFinite(ttlMs) ? ttlMs : MAX_JOB_TTL_MS));
+  const body = Buffer.from(JSON.stringify({ u: uid, c: chatId, j: jobId, e: Date.now() + boundedTtl })).toString("base64url");
   return `job:${body}.${sign(body)}`;
 }
 
@@ -22,7 +29,8 @@ export function verifyJobToken(token: string): { uid: string; chatId: string; jo
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   try {
     const c = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    if (!c.u || !c.c || c.e < Date.now()) return null;
+    if (!validIdentity(c.u) || !validIdentity(c.c) || !/^[a-z0-9]{4,24}$/.test(String(c.j ?? ""))) return null;
+    if (!Number.isFinite(c.e) || c.e <= Date.now() || c.e > Date.now() + MAX_JOB_TTL_MS + 5_000) return null;
     return { uid: String(c.u), chatId: String(c.c), jobId: String(c.j) };
   } catch { return null; }
 }
