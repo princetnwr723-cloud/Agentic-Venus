@@ -111,9 +111,10 @@ export default function DashboardPage() {
   const busyChats = useRef<Set<string>>(new Set());
   const chatsRef = useRef<Chat[]>([]);
   const activeIdRef = useRef<string | null>(null);
-  const venusBusyRef = useRef(false);
-  const codeBusyRef = useRef(false);
-  const teamBusyRef = useRef(false);
+  // Locks are scoped per chat so one conversation cannot block unrelated work in another.
+  const venusBusyRef = useRef<Set<string>>(new Set());
+  const codeBusyRef = useRef<Set<string>>(new Set());
+  const teamBusyRef = useRef<Set<string>>(new Set());
   const brains = useRef<Record<string, Brain>>({});
   const toolCache = useRef<Record<string, { sig: string; specs: ToolSpec[] }>>({});
 
@@ -365,7 +366,7 @@ export default function DashboardPage() {
   /** The agent switches the computer off as soon as its work is finished (saves your E2B credits). */
   async function autoOff(chatId: string) {
     if (!user || !e2bKey || !sandboxRef.current[chatId]) return;
-    const busy = () => runningRef.current[chatId] || teamBusyRef.current;
+    const busy = () => runningRef.current[chatId] || teamBusyRef.current.has(chatId);
     if (busy() || sessionsRef.current[chatId]?.status === "paused") return;
     await new Promise((r) => setTimeout(r, 4000)); // let you see the final screen
     if (busy()) return;
@@ -546,8 +547,8 @@ export default function DashboardPage() {
     const out = (m: string) => { if (!opts.silent) say(chat.id, m); return m; };
     if (!e2bKey) return out("Venus Code needs an E2B key. Add it under API keys first.");
     if (!apiKeys[chat.provider]) return out("No API key is saved for this chat's model.");
-    if (codeBusyRef.current) return out("Venus Code is already working on something. Wait for it to finish, then ask again.");
-    codeBusyRef.current = true;
+    if (codeBusyRef.current.has(chat.id)) return out("Venus Code is already working on something in this chat. Wait for it to finish, then ask again.");
+    codeBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
     if (showWork) workStart(chat.id, "Venus Code ke liye apna computer chalu kar raha hoon…", "code");
@@ -578,7 +579,7 @@ export default function DashboardPage() {
     } catch (err) {
       return out(`⚠️ Venus Code failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
-      codeBusyRef.current = false; busyChats.current.delete(chat.id); setCodeRun(null);
+      codeBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setCodeRun(null);
       if (showWork) workEnd(chat.id, "code");
       if (sid) void releaseNow(e2bKey, sid); // work is over: its computer is switched off
     }
@@ -755,10 +756,10 @@ export default function DashboardPage() {
     const out = (m: string) => { if (!opts.silent) say(chat.id, m); return m; };
     if (!e2bKey) return out("Venus Pro needs an E2B key. Add it under API keys first.");
     if (cfg && !cfg.supabase) return out("Venus Pro needs Supabase for video storage. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel and redeploy.");
-    if (venusBusyRef.current) return out("Venus Pro is already making a video. Wait for it to finish, then ask again.");
+    if (venusBusyRef.current.has(chat.id)) return out("Venus Pro is already making a video in this chat. Wait for it to finish, then ask again.");
     if (!apiKeys[chat.provider]) return out("No API key is saved for this chat's model.");
 
-    venusBusyRef.current = true;
+    venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
     const opt = guessVenusOptions(brief);
@@ -801,7 +802,7 @@ export default function DashboardPage() {
     } catch (err) {
       return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
-      venusBusyRef.current = false; busyChats.current.delete(chat.id); setVenusRun(null);
+      venusBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setVenusRun(null);
       if (showWork) workEnd(chat.id, "venus");
     }
   }
@@ -875,8 +876,8 @@ export default function DashboardPage() {
 
   async function runTeam(chat: Chat, goal: string) {
     if (!user) return;
-    if (teamBusyRef.current) return say(chat.id, "The team is already working on a goal. Wait for the report, then ask again.");
-    teamBusyRef.current = true;
+    if (teamBusyRef.current.has(chat.id)) return say(chat.id, "The team is already working on a goal in this chat. Wait for the report, then ask again.");
+    teamBusyRef.current.add(chat.id);
     setTeamRun(goal.slice(0, 60));
     workStart(chat.id, "Team ko goal samjha raha hoon, kaam baant raha hoon…", "team");
     if (activeIdRef.current === chat.id) { setTeamOpen(true); setPcOpen(false); }
@@ -886,7 +887,7 @@ export default function DashboardPage() {
       say(chat.id, report);
     } catch (err) {
       say(chat.id, `⚠️ The team could not finish: ${err instanceof Error ? err.message : "unknown error"}`);
-    } finally { teamBusyRef.current = false; setTeamRun(null); workEnd(chat.id, "team"); void autoOff(chat.id); }
+    } finally { teamBusyRef.current.delete(chat.id); setTeamRun(null); workEnd(chat.id, "team"); void autoOff(chat.id); }
   }
 
   /** "Assemble a team" only prepares the roster. Nothing is started. */
