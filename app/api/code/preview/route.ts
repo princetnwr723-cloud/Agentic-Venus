@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { bundleHtml, serveStatus, startServe, stopServe } from "@/lib/preview-server";
 
 export const runtime = "nodejs";
@@ -34,6 +34,6 @@ export async function POST(req: Request) {
         return fail("Unknown action.", 400);
     }
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "Preview failed.");
+    return fail(err instanceof Error ? err.message : "Preview failed.", requestStatus(err));
   }
 }
