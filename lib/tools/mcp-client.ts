@@ -72,7 +72,7 @@ export async function mcpList(url: string, auth?: string): Promise<McpTool[]> {
   const call = await open(url, auth);
   const tools: McpTool[] = [];
   let cursor: string | undefined;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 100; i++) {
     const r = await call("tools/list", cursor ? { cursor } : {});
     tools.push(...((r?.tools ?? []) as McpTool[]));
     cursor = r?.nextCursor;
