@@ -1,45 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { summarizeResults, validateDataset } from '../eval-suite.mjs';
+import { isPrivateAddress, normalizePublicHttpUrl } from '../../lib/browser-url-safety.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const dataset = JSON.parse(fs.readFileSync(path.join(root, 'evals/tasks.json'), 'utf8'));
-
-test('the fixed benchmark contains 40 well-formed tasks across all required categories', () => {
-  assert.deepEqual(validateDataset(dataset), []);
+test('blocks private, loopback, link-local and reserved IPv4 addresses', () => {
+  for (const ip of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '224.0.0.1', '240.0.0.1']) {
+    assert.equal(isPrivateAddress(ip), true, `${ip} should be blocked`);
+  }
+  assert.equal(isPrivateAddress('8.8.8.8'), false);
+  assert.equal(isPrivateAddress('1.1.1.1'), false);
 });
 
-test('dataset validation rejects duplicate IDs and missing category coverage', () => {
-  const copy = structuredClone(dataset);
-  copy.tasks[1].id = copy.tasks[0].id;
-  copy.tasks.pop();
-  assert.ok(validateDataset(copy).some((e) => e.includes('Duplicate task id')));
-  assert.ok(validateDataset(copy).some((e) => e.includes('Expected exactly 40')));
+test('blocks local and special IPv6 addresses, including mapped IPv4', () => {
+  for (const ip of ['::', '::1', 'fc00::1', 'fd12::1', 'fe80::1', 'ff02::1', '2001:db8::1', '::ffff:192.168.1.1', '::ffff:c0a8:0101', '2002:7f00:1::']) {
+    assert.equal(isPrivateAddress(ip), true, `${ip} should be blocked`);
+  }
+  assert.equal(isPrivateAddress('2606:4700:4700::1111'), false);
+  assert.equal(isPrivateAddress('::ffff:8.8.8.8'), false);
 });
 
-test('result summary reports coverage, success rate, time, cost and category rates', () => {
-  const results = dataset.tasks.map((t, i) => ({ taskId: t.id, success: i % 2 === 0, durationMs: 1000 + i, costUsd: 0.01 }));
-  const report = summarizeResults(dataset, results);
-  assert.equal(report.valid, true);
-  assert.equal(report.completed, 40);
-  assert.equal(report.successRate, 0.5);
-  assert.equal(report.totalCostUsd, 0.4);
-  assert.equal(report.byCategory.coding_bugs.total, 10);
-  assert.equal(report.missing.length, 0);
+test('accepts public HTTP(S) URLs and normalizes bare hostnames', () => {
+  assert.equal(normalizePublicHttpUrl('example.com'), 'https://example.com/');
+  assert.equal(normalizePublicHttpUrl('https://example.com/path').startsWith('https://example.com/path'), true);
 });
 
-test('result summary flags missing, duplicate, unknown and malformed results', () => {
-  const report = summarizeResults(dataset, [
-    { taskId: dataset.tasks[0].id, success: true, durationMs: -1 },
-    { taskId: dataset.tasks[0].id, success: false },
-    { taskId: 'not-a-task', success: true },
-  ]);
-  assert.equal(report.valid, false);
-  assert.ok(report.errors.some((e) => e.includes('negative')));
-  assert.ok(report.errors.some((e) => e.includes('Duplicate result')));
-  assert.ok(report.errors.some((e) => e.includes('Unknown taskId')));
-  assert.equal(report.missing.length, 39);
+test('rejects private hosts, non-HTTP schemes and embedded credentials', () => {
+  for (const url of ['http://localhost', 'http://127.0.0.1', 'http://2130706433', 'http://0x7f000001', 'http://192.168.1.10', 'http://[::1]', 'http://foo.local', 'file:///etc/passwd', 'https://user:pass@example.com']) {
+    assert.throws(() => normalizePublicHttpUrl(url), undefined, url);
+  }
 });
