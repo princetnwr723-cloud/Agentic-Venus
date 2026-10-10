@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { createSignedDownload, removeObjects, supabaseConfigured } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -37,6 +37,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Media request failed." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Media request failed." }, { status: requestStatus(err) });
   }
 }
