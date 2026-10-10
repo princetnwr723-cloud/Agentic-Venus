@@ -5,8 +5,9 @@
 import { getAdminDb } from "@/lib/firebase-admin";
 import { docIdOf, loadKeys, seal, unseal, writeKey } from "@/lib/vault-crypto";
 
-const NAME_RE = /^[a-z0-9._:-]{1,90}$/;
-const PLACEHOLDER_RE = /^vault:([a-z0-9._:-]{1,90})(?:#([A-Za-z0-9]{0,8}))?$/;
+// "_" is allowed: connector names such as github_oauth or mcp:my_crm contain it.
+const NAME_RE = /^[a-z0-9._:_-]{1,90}$/;
+const PLACEHOLDER_RE = /^vault:([a-z0-9._:_-]{1,90})(?:#([A-Za-z0-9]{0,8}))?$/;
 
 const col = (uid: string) => getAdminDb().collection("users").doc(uid).collection("vault");
 
