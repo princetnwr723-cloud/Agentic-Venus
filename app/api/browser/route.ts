@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase-admin";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { resolveValue, vaultGet, vaultPut } from "@/lib/vault";
 import { runBrowser } from "@/lib/browser-server";
 
@@ -70,6 +70,6 @@ export async function POST(req: Request) {
     }
     return NextResponse.json(r);
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Browser failed." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Browser failed." }, { status: requestStatus(err) });
   }
 }
