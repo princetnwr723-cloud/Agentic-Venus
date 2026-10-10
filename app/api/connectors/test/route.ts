@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { assertPublicUrl, http } from "@/lib/tools/net";
 import { mcpList } from "@/lib/tools/mcp-client";
 import { unpack } from "@/lib/tools/catalog";
@@ -7,7 +7,7 @@ import { unpack } from "@/lib/tools/catalog";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-const bad = (error: string) => NextResponse.json({ ok: false, error });
+const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
 const ok = (label?: string) => NextResponse.json({ ok: true, label });
 
 export async function POST(req: Request) {
@@ -57,6 +57,6 @@ export async function POST(req: Request) {
     }
     return bad("Unknown connector.");
   } catch (err) {
-    return bad(err instanceof Error ? err.message : "Test failed.");
+    return bad(err instanceof Error ? err.message : "Test failed.", requestStatus(err));
   }
 }
