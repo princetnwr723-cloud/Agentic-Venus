@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createSandbox, loadSdk, recoveryDownloadUrl, restoreComputerState } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,7 +13,7 @@ export async function GET() {
     return NextResponse.json({ ok: true, sdk: "loaded", node: process.version });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, error: message, node: process.version }, { status: 500 });
+    return NextResponse.json({ ok: false, error: message, node: process.version }, { status: requestStatus(err) });
   }
 }
 
@@ -40,6 +40,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ sandboxId, persistence, restored });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not create a computer.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: requestStatus(err) });
   }
 }
