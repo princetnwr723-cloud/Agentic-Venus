@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect, exec } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
 import { webRead, webSearch } from "@/lib/web-tools-server";
 import { DIR, safeId, writeBinary } from "@/lib/venus-server";
@@ -140,6 +140,6 @@ export async function POST(req: Request) {
         return fail("Unknown action.", 400);
     }
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "Workspace request failed.");
+    return fail(err instanceof Error ? err.message : "Workspace request failed.", requestStatus(err));
   }
 }
