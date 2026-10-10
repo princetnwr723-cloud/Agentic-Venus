@@ -2,10 +2,11 @@ import { FREE_TOOLS, PLUGIN_TOOLS, type Def } from "./plugins";
 import { GITHUB_EXTRA } from "./github-extra";
 import { IDENTITY_TOOLS } from "./identity";
 import { VERIFY_TOOLS } from "./verify";
+import { VOICE_TOOLS } from "./voice";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { assertPublicUrl, cut, http } from "./net";
 import { safeId, unpack } from "./catalog";
-import { OAUTH_PROVIDERS } from "./oauth-catalog";
+import { OAUTH_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
 import { INJECTION_PATTERNS, wrapUntrusted } from "@/lib/shield";
 import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 
@@ -15,7 +16,7 @@ const ALL: Record<string, Def[]> = {
   github: [...(PLUGIN_TOOLS.github ?? []), ...GITHUB_EXTRA],
   identity: IDENTITY_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
@@ -84,6 +85,23 @@ const ask = (name: string, args: Record<string, unknown>, risk: Risk): ToolResul
   needsApproval: { summary: `${name}\n${JSON.stringify(args).slice(0, 400)}`, risk },
 });
 
+// ---- OAuth tokens: stored as {access, refresh, exp}. Old plain-string tokens still work. ----
+type OTok = { access: string; refresh?: string; exp?: number };
+const parseTok = (v: string): OTok => {
+  try { const j = JSON.parse(v); if (j && typeof j.access === "string") return j as OTok; } catch { /* plain token */ }
+  return { access: v };
+};
+async function refreshTok(p: OAuthProvider, t: OTok): Promise<OTok> {
+  const id = process.env[p.clientIdEnv], secret = process.env[p.clientSecretEnv];
+  if (!id || !secret || !t.refresh) throw new Error("no refresh token");
+  const r = await http(p.tokenUrl, {
+    method: "POST", headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t.refresh, client_id: id, client_secret: secret }).toString(),
+  }, 15_000);
+  if (r.status >= 400 || !r.json?.access_token) throw new Error("refresh failed");
+  return { access: String(r.json.access_token), refresh: r.json.refresh_token ? String(r.json.refresh_token) : t.refresh, exp: r.json.expires_in ? Date.now() + Number(r.json.expires_in) * 1000 : t.exp };
+}
+
 /**
  * The ONLY place tools run. A write action stops here until a human approved it.
  * approved=true is set by the UI after a click, never by the model.
@@ -101,7 +119,8 @@ export async function callTool(
 
   const free = ALL_FREE.find((t) => t.name === name);
   if (free) {
-    try { return good(await free.run(args, []), name, "read"); }
+    if (mustAsk(free.risk, false)) return ask(name, args, "write"); // e.g. voice.call: every phone call is approved by the user
+    try { return good(await free.run(args, [], opts.ctx), name, free.risk); }
     catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Tool failed." }; }
   }
 
@@ -131,25 +150,34 @@ export async function callTool(
   if (src.startsWith("oauth_")) {
     const providerId = src.slice("oauth_".length);
     const p = OAUTH_PROVIDERS.find((x) => safeId(x.id) === providerId);
-    const token = p ? c[`oauth:${p.id}`] : undefined;
-    if (!p || !token) return { ok:false, text:"That OAuth connector is not connected for this chat." };
+    const raw = p ? c[`oauth:${p.id}`] : undefined;
+    if (!p || !raw) return { ok: false, text: "That OAuth connector is not connected for this chat." };
     try {
       const method = String(args.method ?? "GET").toUpperCase();
-      if (!["GET","POST","PUT","PATCH","DELETE"].includes(method)) return {ok:false,text:"Unsupported HTTP method."};
+      if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return { ok: false, text: "Unsupported HTTP method." };
       const path = String(args.path ?? "");
-      if (!path.startsWith("/") || path.startsWith("//") || path.length > 1500) return {ok:false,text:'path must be a relative API path starting with "/".'};
+      if (!path.startsWith("/") || path.startsWith("//") || path.length > 1500) return { ok: false, text: 'path must be a relative API path starting with "/".' };
       const risk: Risk = method === "GET" ? "read" : "write";
       if (mustAsk(risk, isAuto(c, `oauth:${p.id}`))) return ask(name, args, risk);
+
+      let tok = parseTok(raw);
+      if (tok.refresh && tok.exp && tok.exp < Date.now() + 60_000) {
+        try {
+          tok = await refreshTok(p, tok);
+          if (opts.ctx) await opts.ctx.save(`oauth:${p.id}`, JSON.stringify(tok)); // keep the new token for next time
+        } catch { return { ok: false, text: `${p.label} login expired. Open Connectors and press Reconnect for ${p.label}.` }; }
+      }
       const url = new URL(path, p.apiBase.endsWith("/") ? p.apiBase : p.apiBase + "/");
-      if (url.protocol !== "https:" || url.hostname !== p.apiHost) return {ok:false,text:"Request blocked: URL is outside the provider's verified API host."};
-      const headers: Record<string,string> = { Accept:"application/json", Authorization:`Bearer ${token}` };
-      if (p.id === "github_oauth") { headers["X-GitHub-Api-Version"]="2022-11-28"; headers["User-Agent"]="AgenticVenus"; }
-      if (p.id === "notion_oauth") headers["Notion-Version"]="2022-06-28";
-      if (p.id === "twitch") headers["Client-Id"]=process.env.TWITCH_CLIENT_ID || "";
-      if (args.body !== undefined) headers["Content-Type"]="application/json";
-      const r = await http(url.toString(), {method,headers,...(args.body !== undefined && method !== "GET" ? {body:JSON.stringify(args.body)} : {})}, 20_000);
-      return good(`HTTP ${r.status}\n${r.text}`, name, risk, r.status < 400);
-    } catch (err) { return {ok:false,text:err instanceof Error ? err.message : "OAuth API request failed."}; }
+      if (url.protocol !== "https:" || url.hostname !== p.apiHost) return { ok: false, text: "Request blocked: URL is outside the provider's verified API host." };
+      const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${tok.access}` };
+      if (p.id === "github_oauth") { headers["X-GitHub-Api-Version"] = "2022-11-28"; headers["User-Agent"] = "AgenticVenus"; }
+      if (p.id === "notion_oauth") headers["Notion-Version"] = "2022-06-28";
+      if (p.id === "twitch") headers["Client-Id"] = process.env.TWITCH_CLIENT_ID || "";
+      if (args.body !== undefined) headers["Content-Type"] = "application/json";
+      const r = await http(url.toString(), { method, headers, ...(args.body !== undefined && method !== "GET" ? { body: JSON.stringify(args.body) } : {}) }, 20_000);
+      const expired = r.status === 401 ? `\n[${p.label} login is no longer valid: tell the user to press Reconnect for ${p.label} in Connectors.]` : "";
+      return good(`HTTP ${r.status}\n${r.text}${expired}`, name, risk, r.status < 400);
+    } catch (err) { return { ok: false, text: err instanceof Error ? err.message : "OAuth API request failed." }; }
   }
 
   if (src.startsWith("api_")) {
