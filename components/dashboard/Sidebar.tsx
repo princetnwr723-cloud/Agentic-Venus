@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Key, LogOut, Plus, Settings, Search } from "lucide-react";
+import { Key, LogOut, Plus, Settings, Search, AudioLines } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import type { Chat } from "@/lib/chats";
+import Link from "next/link";
 
 export default function Sidebar({
   chats,
@@ -99,6 +100,9 @@ export default function Sidebar({
               >
                 <Key size={15} /> API keys
               </button>
+              <Link href="/voice" onClick={() => setMenuOpen(false)} className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line">
+                <AudioLines size={15} /> Voice & Calling
+              </Link>
               <button
                 onClick={() => { setMenuOpen(false); onSignOut(); }}
                 className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
