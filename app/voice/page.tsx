@@ -7,12 +7,22 @@ import { useAuth } from "@/lib/auth-context";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 
 type Settings = {
-  openaiConnected: boolean; twilioConnected: boolean; fromNumber: string; llmProvider: ProviderId; llmModel: string;
+  openaiConnected: boolean; twilioConnected: boolean; ttsProvider: TtsProvider; ttsModel: string; ttsVoice: string; ttsConnected: Partial<Record<TtsProvider, boolean>>; fromNumber: string; llmProvider: ProviderId; llmModel: string;
   language: string; inboundEnabled: boolean; outboundEnabled: boolean; approvalRequired: boolean; dailyLimit: number;
 };
 type ProviderOption = { id: ProviderId; label: string; models: string[] };
+type TtsProvider = "openai" | "gemini" | "elevenlabs" | "azure" | "deepgram" | "cartesia" | "playht";
+const TTS_OPTIONS: Record<TtsProvider, { label: string; keyField: string; models: string[]; voices: string[] }> = {
+  openai: { label: "OpenAI", keyField: "openaiKey", models: ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"], voices: ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "marin", "cedar"] },
+  gemini: { label: "Google Gemini", keyField: "geminiKey", models: ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"], voices: ["Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"] },
+  elevenlabs: { label: "ElevenLabs", keyField: "elevenLabsKey", models: ["eleven_multilingual_v2", "eleven_turbo_v2_5", "eleven_flash_v2_5"], voices: ["Rachel", "Domi", "Bella", "Antoni", "Elli", "Josh", "Arnold", "Adam", "Sam"] },
+  azure: { label: "Azure Speech", keyField: "azureSpeechKey", models: ["neural"], voices: ["en-US-JennyNeural", "en-US-GuyNeural", "en-IN-NeerjaNeural", "hi-IN-SwaraNeural", "hi-IN-MadhurNeural"] },
+  deepgram: { label: "Deepgram", keyField: "deepgramKey", models: ["aura-2"], voices: ["aura-2-thalia-en", "aura-2-andromeda-en", "aura-2-helena-en", "aura-2-arcas-en", "aura-2-orpheus-en", "aura-2-amalthea-en"] },
+  cartesia: { label: "Cartesia", keyField: "cartesiaKey", models: ["sonic-3", "sonic-2"], voices: ["Katie", "Barbershop Man", "Reading Lady", "Newsman", "Friendly Sidekick"] },
+  playht: { label: "PlayHT", keyField: "playhtKey", models: ["PlayDialog", "Play3.0-mini"], voices: ["Jennifer", "Aria", "Atlas", "Mika", "Will"] },
+};
 type Call = { id: string; direction: string; to: string; from: string; status: string; createdAt: number; durationSeconds: number; provider: string; estimatedCost: number | null };
-const DEFAULTS: Settings = { openaiConnected: false, twilioConnected: false, fromNumber: "", llmProvider: "openai", llmModel: "gpt-4o-mini", language: "en-US", inboundEnabled: false, outboundEnabled: false, approvalRequired: true, dailyLimit: 50 };
+const DEFAULTS: Settings = { openaiConnected: false, twilioConnected: false, ttsProvider: "openai", ttsModel: "gpt-4o-mini-tts", ttsVoice: "alloy", ttsConnected: {}, fromNumber: "", llmProvider: "openai", llmModel: "gpt-4o-mini", language: "en-US", inboundEnabled: false, outboundEnabled: false, approvalRequired: true, dailyLimit: 50 };
 const inputClass = "w-full rounded-xl border border-line bg-bg px-3 py-2.5 text-sm text-ink outline-none transition focus:border-ink/40";
 const labelClass = "mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted";
 
@@ -22,6 +32,7 @@ export default function VoiceSettingsPage() {
   const [providers, setProviders] = useState<ProviderOption[]>(PROVIDERS as ProviderOption[]);
   const [inboundWebhookUrl, setInboundWebhookUrl] = useState("");
   const [openaiKey, setOpenaiKey] = useState("");
+  const [ttsKey, setTtsKey] = useState("");
   const [twilioSid, setTwilioSid] = useState("");
   const [twilioToken, setTwilioToken] = useState("");
   const [phone, setPhone] = useState("");
@@ -68,10 +79,12 @@ export default function VoiceSettingsPage() {
         approvalRequired: settings.approvalRequired, dailyLimit: Number(settings.dailyLimit),
       };
       if (openaiKey.trim()) patch.openaiKey = openaiKey.trim();
+      if (ttsKey.trim()) patch[TTS_OPTIONS[settings.ttsProvider].keyField] = ttsKey.trim();
+      patch.ttsProvider = settings.ttsProvider; patch.ttsModel = settings.ttsModel; patch.ttsVoice = settings.ttsVoice;
       if (twilioSid.trim()) patch.twilioSid = twilioSid.trim();
       if (twilioToken.trim()) patch.twilioToken = twilioToken.trim();
       await api("/api/voice/settings", { method: "POST", body: JSON.stringify(patch) });
-      setOpenaiKey(""); setTwilioSid(""); setTwilioToken("");
+      setOpenaiKey(""); setTtsKey(""); setTwilioSid(""); setTwilioToken("");
       await refresh(); setNotice({ kind: "ok", text: "Settings saved securely. Run connection tests before making calls." });
     } catch (e) { setNotice({ kind: "error", text: e instanceof Error ? e.message : "Could not save settings." }); }
     finally { setBusy(null); }
@@ -184,7 +197,21 @@ export default function VoiceSettingsPage() {
         </section>
 
         <section className="space-y-4 rounded-2xl border border-line bg-panel p-4 sm:p-5">
-          <div><h2 className="font-semibold">3. AI provider and call behavior</h2><p className="mt-1 text-sm text-muted">Phone conversations use your existing Agentic-Venus model-provider keys. All 11 configured providers are available for reasoning.</p></div>
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold">3. Voice provider, model and voice</h2><p className="mt-1 text-sm text-muted">Choose a speech-generation provider and save its own API key. Keys are encrypted server-side.</p></div><span className={`rounded-full px-2.5 py-1 text-xs ${settings.ttsConnected?.[settings.ttsProvider] ? "bg-emerald-500/10 text-emerald-700" : "bg-panel2 text-muted"}`}>{settings.ttsConnected?.[settings.ttsProvider] ? "Key saved" : "Key needed"}</span></div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div><label className={labelClass}>Voice provider</label><select className={inputClass} value={settings.ttsProvider} onChange={e => { const provider = e.target.value as TtsProvider; setSettings(s => ({ ...s, ttsProvider: provider, ttsModel: TTS_OPTIONS[provider].models[0], ttsVoice: TTS_OPTIONS[provider].voices[0] })); setTtsKey(""); }}>
+              {Object.entries(TTS_OPTIONS).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
+            </select></div>
+            <div><label className={labelClass}>Speech model</label><select className={inputClass} value={settings.ttsModel} onChange={e => setSettings(s => ({ ...s, ttsModel: e.target.value }))}>{TTS_OPTIONS[settings.ttsProvider].models.map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+            <div><label className={labelClass}>Voice</label><select className={inputClass} value={settings.ttsVoice} onChange={e => setSettings(s => ({ ...s, ttsVoice: e.target.value }))}>{TTS_OPTIONS[settings.ttsProvider].voices.map(v => <option key={v} value={v}>{v}</option>)}</select></div>
+          </div>
+          <div><label className={labelClass}>{TTS_OPTIONS[settings.ttsProvider].label} API key</label><input className={inputClass} type="password" autoComplete="new-password" value={ttsKey} onChange={e => setTtsKey(e.target.value)} placeholder={settings.ttsConnected?.[settings.ttsProvider] ? "Saved securely · enter to rotate key" : "Paste provider API key"}/><p className="mt-1.5 text-xs text-muted">Voice choices shown here are provider-specific presets. ElevenLabs custom voice IDs and some provider voices may need to be selected in that provider’s console. Provider support, regions and billing vary.</p></div>
+          <div className="flex flex-wrap gap-2"><button onClick={save} disabled={busy !== null || (!ttsKey.trim() && !settings.ttsConnected?.[settings.ttsProvider])} className="rounded-xl bg-ink px-3.5 py-2.5 text-sm font-medium text-bg disabled:opacity-40">Save voice setup</button><button onClick={() => test("tts")} disabled={busy !== null || !settings.ttsConnected?.[settings.ttsProvider]} className="inline-flex items-center gap-2 rounded-xl border border-line px-3.5 py-2.5 text-sm disabled:opacity-40">{busy === "test-tts" ? <LoaderCircle size={15} className="animate-spin"/> : <TestTube2 size={15}/>} Test voice key</button>{settings.ttsConnected?.[settings.ttsProvider] && settings.ttsProvider !== "openai" && <button onClick={() => api("/api/voice/settings", { method: "POST", body: JSON.stringify({ action: "disconnect", field: TTS_OPTIONS[settings.ttsProvider].keyField }) }).then(() => refresh()).then(() => setNotice({ kind: "ok", text: "Voice provider key disconnected." })).catch(e => setNotice({ kind: "error", text: e.message }))} disabled={busy !== null} className="inline-flex items-center gap-2 rounded-xl border border-line px-3 py-2.5 text-sm text-muted"><Unplug size={15}/> Disconnect key</button>}</div>
+          <p className="text-xs text-muted">Important: selecting a TTS provider changes the saved speech settings; the existing live browser speech-to-speech session still uses OpenAI Realtime. Phone-call playback needs the corresponding provider adapter to be wired into the call runtime.</p>
+        </section>
+
+        <section className="space-y-4 rounded-2xl border border-line bg-panel p-4 sm:p-5">
+          <div><h2 className="font-semibold">4. AI provider and call behavior</h2><p className="mt-1 text-sm text-muted">Phone conversations use your existing Agentic-Venus model-provider keys. All 11 configured providers are available for reasoning.</p></div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <div><label className={labelClass}>AI provider</label><div className="relative"><select className={`${inputClass} appearance-none pr-9`} value={settings.llmProvider} onChange={e => { const id = e.target.value as ProviderId; const p = providers.find(x => x.id === id); setSettings(s => ({ ...s, llmProvider: id, llmModel: p?.models?.[0] || "" })); }}><option value="" disabled>Select provider</option>{providers.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select><ChevronDown size={15} className="pointer-events-none absolute right-3 top-3 text-muted"/></div></div>
             <div><label className={labelClass}>Model ID</label><input className={inputClass} value={settings.llmModel} onChange={e => setSettings(s => ({ ...s, llmModel: e.target.value }))} placeholder={selected?.models?.[0] || "Model ID"}/></div>
@@ -202,7 +229,7 @@ export default function VoiceSettingsPage() {
         </section>
 
         <section className="space-y-4 rounded-2xl border border-line bg-panel p-4 sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">4. Call activity</h2><p className="mt-1 text-sm text-muted">Today: {todayCount} call(s) · Limit: {settings.dailyLimit}/day</p></div><div className="flex gap-2"><button onClick={() => refresh().catch(e => setNotice({ kind: "error", text: e.message }))} className="inline-flex items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm"><RefreshCw size={14}/> Refresh</button><button onClick={startCall} disabled={busy !== null || !settings.outboundEnabled || !settings.twilioConnected} className="inline-flex items-center gap-2 rounded-xl bg-ink px-3.5 py-2.5 text-sm font-medium text-bg disabled:opacity-40">{busy === "call" ? <LoaderCircle size={15} className="animate-spin"/> : <PhoneCall size={15}/>} Start phone call</button></div></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">5. Call activity</h2><p className="mt-1 text-sm text-muted">Today: {todayCount} call(s) · Limit: {settings.dailyLimit}/day</p></div><div className="flex gap-2"><button onClick={() => refresh().catch(e => setNotice({ kind: "error", text: e.message }))} className="inline-flex items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm"><RefreshCw size={14}/> Refresh</button><button onClick={startCall} disabled={busy !== null || !settings.outboundEnabled || !settings.twilioConnected} className="inline-flex items-center gap-2 rounded-xl bg-ink px-3.5 py-2.5 text-sm font-medium text-bg disabled:opacity-40">{busy === "call" ? <LoaderCircle size={15} className="animate-spin"/> : <PhoneCall size={15}/>} Start phone call</button></div></div>
           {calls.length === 0 ? <div className="rounded-xl border border-dashed border-line px-4 py-8 text-center"><Phone size={22} className="mx-auto text-muted"/><p className="mt-2 text-sm font-medium">No calls yet</p><p className="mt-1 text-xs text-muted">Test both connections, enable calls and place your first approved test call.</p></div> : <div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left text-sm"><thead><tr className="border-b border-line text-xs text-muted"><th className="py-2 pr-3 font-medium">Direction / number</th><th className="py-2 pr-3 font-medium">Status</th><th className="py-2 pr-3 font-medium">Duration</th><th className="py-2 pr-3 font-medium">AI provider</th><th className="py-2 font-medium">Started</th></tr></thead><tbody>{calls.map(c => <tr key={c.id} className="border-b border-line/70 last:border-0"><td className="py-3 pr-3"><span className="block text-xs capitalize text-muted">{c.direction}</span><span>{c.direction === "inbound" ? c.from : c.to}</span></td><td className={`py-3 pr-3 capitalize ${statusTone(c.status)}`}>{c.status}</td><td className="py-3 pr-3">{fmtDuration(c.durationSeconds || 0)}</td><td className="py-3 pr-3">{c.provider || "—"}</td><td className="py-3">{fmtDate(c.createdAt)}</td></tr>)}</tbody></table></div>}
           <p className="text-xs text-muted">Call costs are not estimated here because carrier rates and AI token usage vary. Use the provider&apos;s billing console for final charges.</p>
         </section>
