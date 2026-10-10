@@ -26,7 +26,20 @@ export async function POST(req: Request) {
       await userRef.collection("voiceCalls").doc(callSid).set({ direction: "inbound", from, to, providerCallId: callSid, status: "in-progress", createdAt: Date.now(), updatedAt: Date.now(), provider: settings.llmProvider ?? "openai", model: settings.llmModel ?? "", history: [] }, { merge: true });
       await audit(claims.uid, { kind: "voice_inbound_call", text: `Inbound call ${from}` });
     } else {
-      const snap = await userRef.collection("voiceCalls").doc(claims.callId).get();
+      
+   const callId = claims.callId;
+
+   if (typeof callId !== "string" || callId.trim().length === 0) {
+     return new Response("Invalid or missing call ID", {
+       status: 400,
+      });
+     }
+
+   const snap = await userRef
+     .collection("voiceCalls")
+     .doc(callId)
+     .get();
+
       if (!snap.exists || snap.data()?.providerCallId && snap.data()?.providerCallId !== callSid) return twimlResponse("<?xml version=\"1.0\"?><Response><Say>Call session was not found.</Say><Hangup/></Response>", 404);
       await snap.ref.set({ status: "in-progress", answeredAt: Date.now(), updatedAt: Date.now() }, { merge: true });
     }
