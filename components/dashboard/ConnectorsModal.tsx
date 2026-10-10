@@ -3,15 +3,18 @@
 import { useState } from "react";
 import { ExternalLink, X } from "lucide-react";
 import { FREE_PACK, PLUGINS, safeId } from "@/lib/tools/catalog";
+import { OAUTH_PROVIDERS } from "@/lib/tools/oauth-catalog";
 
 type TestResult = { ok: boolean; label?: string; error?: string };
 
 export default function ConnectorsModal({
-  open, onClose, chatName, connectors, onTest, onSave,
+  open, onClose, chatName, chatId, connectors, onTest, onSave, getToken,
 }: {
   open: boolean;
   onClose: () => void;
   chatName: string;
+  chatId: string;
+  getToken: () => Promise<string>;
   connectors: Record<string, string>;
   onTest: (kind: string, token: string) => Promise<TestResult>;
   onSave: (kind: string, token: string) => Promise<void>;
@@ -27,6 +30,17 @@ export default function ConnectorsModal({
 
   const box = "w-full rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold";
   const say = (id: string, m: string) => setMsg((x) => ({ ...x, [id]: m }));
+
+  async function startOAuth(provider: string) {
+    setBusy(provider); say(provider, "");
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/connectors/oauth/start", { method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${token}`}, body:JSON.stringify({ provider, chatId }) });
+      const data = await res.json();
+      if (!res.ok || !data.url) throw new Error(data.error || "Could not start OAuth.");
+      window.location.assign(data.url);
+    } catch (e) { say(provider, e instanceof Error ? e.message : "OAuth could not start."); setBusy(null); }
+  }
 
   async function connect(kind: string, token: string, id = kind) {
     setBusy(id);
@@ -83,6 +97,22 @@ export default function ConnectorsModal({
               <div className="flex items-center justify-between"><span className="text-sm text-ink">{FREE_PACK.label}</span><span className="text-[11px] text-avatar-teal">Always on</span></div>
               <p className="mt-1 text-[11px] text-muted">{FREE_PACK.note}</p>
               <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-faint">{FREE_PACK.tools.join(" · ")}</p>
+            </div>
+
+            <div className="rounded-lg border border-line p-3">
+              <div className="mb-1 flex items-center justify-between"><span className="text-sm font-medium text-ink">OAuth apps</span><span className="text-[10px] text-muted">Official authorization</span></div>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">Connect without pasting your password or access token. Each provider requires its own app credentials configured by the site owner.</p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {OAUTH_PROVIDERS.map((p) => {
+                  const on = Boolean(connectors[`oauth:${p.id}`]);
+                  return <div key={p.id} className="rounded-md border border-line p-2">
+                    <div className="flex items-center justify-between gap-2"><span className="text-xs text-ink">{p.label}</span>{on ? <span className="text-[10px] text-avatar-teal">Connected</span> : <button disabled={busy===p.id} onClick={() => void startOAuth(p.id)} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-bg disabled:opacity-50">{busy===p.id ? "Opening…" : "Connect"}</button>}</div>
+                    <p className="mt-1 text-[10px] leading-relaxed text-muted">{p.note}</p>
+                    {on && <button onClick={() => onSave(`oauth:${p.id}`, "")} className="mt-1 text-[10px] text-red-400">Disconnect</button>}
+                    {msg[p.id] && <p className="mt-1 text-[10px] text-red-400">{msg[p.id]}</p>}
+                  </div>;
+                })}
+              </div>
             </div>
 
             {PLUGINS.map((p) => {
