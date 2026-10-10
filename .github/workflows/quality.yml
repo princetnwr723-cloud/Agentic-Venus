@@ -8,14 +8,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Node 22 runs the unit tests directly on the .ts files (built-in type stripping).
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Validate fixed agent evaluation suite
         run: npm run eval:check
       - name: Run deterministic tests
         run: npm test
-      - name: TypeScript check
+      - name: Install dependencies
         run: |
-          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
-          npx tsc --noEmit
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund
+          else
+            echo "::warning::package-lock.json is missing. Commit it so builds are reproducible."
+            npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+          fi
+      - name: TypeScript check
+        run: npx tsc --noEmit
