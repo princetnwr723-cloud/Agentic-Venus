@@ -1,8 +1,12 @@
 import { getAdminDb } from "@/lib/firebase-admin";
 import { getResolvedVoiceSecrets, verifyVoiceToken, verifyTwilioSignature, voiceSafeError } from "@/lib/voice-server";
+import { finalizeCall } from "@/lib/voice-calls";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
+const DONE = ["completed", "busy", "failed", "no-answer", "canceled"];
+
 export async function POST(req: Request) {
   const token = new URL(req.url).searchParams.get("token") || "";
   const claims = verifyVoiceToken(token);
@@ -18,7 +22,10 @@ export async function POST(req: Request) {
     const snap = await ref.get();
     if (!snap.exists || (snap.data()?.providerCallId && callSid && snap.data()?.providerCallId !== callSid)) return new Response("Not found", { status: 404 });
     await ref.set({ status, durationSeconds: duration, updatedAt: Date.now(), ...(status === "completed" ? { completedAt: Date.now() } : {}) }, { merge: true });
-    if (["completed", "busy", "failed", "no-answer", "canceled"].includes(status)) await audit(claims.uid, { kind: "voice_call_status", text: `Call ${claims.callId}: ${status}, ${duration}s` });
+    if (DONE.includes(status)) {
+      await audit(claims.uid, { kind: "voice_call_status", text: `Call ${claims.callId}: ${status}, ${duration}s` });
+      await finalizeCall(claims.uid, claims.callId); // summary + follow-ups go into the chat
+    }
     return new Response("ok", { status: 200 });
   } catch (e) { return new Response(voiceSafeError(e), { status: 500 }); }
 }
