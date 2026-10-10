@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
-import { ExternalLink, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, Search, X } from "lucide-react";
 import { FREE_PACK, PLUGINS, safeId } from "@/lib/tools/catalog";
 import { OAUTH_PROVIDERS } from "@/lib/tools/oauth-catalog";
 
 type TestResult = { ok: boolean; label?: string; error?: string };
+type Hit = { name: string; title: string; description: string; url: string; needsToken: boolean; source: string };
 
 export default function ConnectorsModal({
   open, onClose, chatName, chatId, connectors, onTest, onSave, getToken,
@@ -25,6 +26,25 @@ export default function ConnectorsModal({
   const [msg, setMsg] = useState<Record<string, string>>({});
   const [ctype, setCtype] = useState<"mcp" | "api">("mcp");
   const [f, setF] = useState({ name: "", url: "", auth: "", desc: "", header: "Authorization", value: "" });
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<Hit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [toks, setToks] = useState<Record<string, string>>({});
+
+  // MCP search: type a tool's name, a Connect button appears.
+  useEffect(() => {
+    if (!open || tab !== "custom" || ctype !== "mcp" || q.trim().length < 2) { setHits([]); return; }
+    const h = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const r = await fetch("/api/connectors/mcp-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q }) });
+        const d = await r.json();
+        setHits(Array.isArray(d.results) ? d.results : []);
+      } catch { setHits([]); }
+      setSearching(false);
+    }, 400);
+    return () => clearTimeout(h);
+  }, [q, tab, ctype, open]);
 
   if (!open) return null;
 
@@ -35,7 +55,7 @@ export default function ConnectorsModal({
     setBusy(provider); say(provider, "");
     try {
       const token = await getToken();
-      const res = await fetch("/api/connectors/oauth/start", { method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${token}`}, body:JSON.stringify({ provider, chatId }) });
+      const res = await fetch("/api/connectors/oauth/start", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ provider, chatId }) });
       const data = await res.json();
       if (!res.ok || !data.url) throw new Error(data.error || "Could not start OAuth.");
       window.location.assign(data.url);
@@ -49,7 +69,7 @@ export default function ConnectorsModal({
     try { r = await onTest(kind, token); } catch { r = { ok: false, error: "Could not check it." }; }
     if (r.ok) {
       await onSave(kind, token);
-      say(id, r.label ? `Connected · ${r.label}` : "Connected");
+      say(id, r.label ? `Connected · ${r.label}. The agent can use it now.` : "Connected. The agent can use it now.");
     } else say(id, r.error || "Not accepted.");
     setBusy(null);
     return r.ok;
@@ -89,28 +109,38 @@ export default function ConnectorsModal({
             <button key={k} onClick={() => setTab(k)} className={`flex-1 rounded-full px-3 py-1.5 ${tab === k ? "bg-white font-medium text-bg" : "text-muted"}`}>{l}</button>
           ))}
         </div>
-        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Tokens are stored encrypted. Anything that sends or changes something outside asks for your approval first.</p>
+        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Tokens are stored encrypted. Once connected, the agent automatically knows its tools and when to use them. Anything that sends or changes something outside asks for your approval first.</p>
 
         {tab === "plugins" ? (
           <div className="space-y-3">
             <div className="rounded-lg border border-line p-3">
               <div className="flex items-center justify-between"><span className="text-sm text-ink">{FREE_PACK.label}</span><span className="text-[11px] text-avatar-teal">Always on</span></div>
               <p className="mt-1 text-[11px] text-muted">{FREE_PACK.note}</p>
-              <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-faint">{FREE_PACK.tools.join(" · ")}</p>
+              <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-faint">{[...FREE_PACK.tools, "voice.call", "voice.calls"].join(" · ")}</p>
             </div>
 
             <div className="rounded-lg border border-line p-3">
               <div className="mb-1 flex items-center justify-between"><span className="text-sm font-medium text-ink">OAuth apps</span><span className="text-[10px] text-muted">Official authorization</span></div>
-              <p className="mb-3 text-[11px] leading-relaxed text-muted">Connect without pasting your password or access token. Each provider requires its own app credentials configured by the site owner.</p>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">Connect without pasting your password or token. Each provider needs its app credentials set by the site owner in Vercel.</p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {OAUTH_PROVIDERS.map((p) => {
                   const on = Boolean(connectors[`oauth:${p.id}`]);
-                  return <div key={p.id} className="rounded-md border border-line p-2">
-                    <div className="flex items-center justify-between gap-2"><span className="text-xs text-ink">{p.label}</span>{on ? <span className="text-[10px] text-avatar-teal">Connected</span> : <button disabled={busy===p.id} onClick={() => void startOAuth(p.id)} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-bg disabled:opacity-50">{busy===p.id ? "Opening…" : "Connect"}</button>}</div>
-                    <p className="mt-1 text-[10px] leading-relaxed text-muted">{p.note}</p>
-                    {on && <button onClick={() => onSave(`oauth:${p.id}`, "")} className="mt-1 text-[10px] text-red-400">Disconnect</button>}
-                    {msg[p.id] && <p className="mt-1 text-[10px] text-red-400">{msg[p.id]}</p>}
-                  </div>;
+                  return (
+                    <div key={p.id} className="rounded-md border border-line p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-ink">{p.label}</span>
+                        {on ? <span className="text-[10px] text-avatar-teal">Connected</span> : <button disabled={busy === p.id} onClick={() => void startOAuth(p.id)} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-bg disabled:opacity-50">{busy === p.id ? "Opening…" : "Connect"}</button>}
+                      </div>
+                      <p className="mt-1 text-[10px] leading-relaxed text-muted">{p.note}</p>
+                      {on && (
+                        <div className="mt-1 flex gap-3">
+                          <button disabled={busy === p.id} onClick={() => void startOAuth(p.id)} className="text-[10px] text-gold underline">Reconnect</button>
+                          <button onClick={() => onSave(`oauth:${p.id}`, "")} className="text-[10px] text-red-400">Disconnect</button>
+                        </div>
+                      )}
+                      {msg[p.id] && <p className="mt-1 text-[10px] text-red-400">{msg[p.id]}</p>}
+                    </div>
+                  );
                 })}
               </div>
             </div>
@@ -155,7 +185,7 @@ export default function ConnectorsModal({
             })}
 
             <div className="rounded-lg border border-dashed border-line p-3 text-[11px] leading-relaxed text-muted">
-              Need <b className="text-ink">Gmail, Calendar, Slack (full), Notion (full)</b> or anything else? Add that service&apos;s MCP server in the <b className="text-ink">Custom</b> tab — the agent gets all its tools.
+              Need <b className="text-ink">Gmail, Calendar, Stripe, Linear</b> or any other service? Open the <b className="text-ink">Custom</b> tab and just type its name — a Connect button appears.
             </div>
           </div>
         ) : (
@@ -177,9 +207,37 @@ export default function ConnectorsModal({
                   <button key={t} onClick={() => setCtype(t)} className={`rounded-full border px-3 py-1 text-xs ${ctype === t ? "border-white bg-white text-bg" : "border-line text-muted"}`}>{t === "mcp" ? "MCP server" : "REST API + key"}</button>
                 ))}
               </div>
+
+              {ctype === "mcp" && (
+                <div className="mb-3">
+                  <div className="flex items-center gap-2 rounded-md border border-line bg-bg px-3 py-2">
+                    <Search size={14} className="text-faint" />
+                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a tool: github, stripe, linear, notion, slack…" className="w-full bg-transparent text-xs text-ink placeholder:text-faint focus:outline-none" />
+                  </div>
+                  {searching && <p className="mt-2 text-[11px] text-muted">Searching…</p>}
+                  {!searching && q.trim().length >= 2 && hits.length === 0 && <p className="mt-2 text-[11px] text-muted">Nothing found for “{q}”. If you know the server URL, add it below.</p>}
+                  <div className="mt-2 space-y-2">
+                    {hits.map((h) => {
+                      const kind = `mcp:${safeId(h.name)}`;
+                      const on = Boolean(connectors[kind]);
+                      return (
+                        <div key={h.url} className="rounded-md border border-line p-2.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0"><p className="truncate text-xs font-medium text-ink">{h.title}{h.source === "popular" && <span className="ml-1.5 text-[10px] text-gold">popular</span>}</p><p className="mt-0.5 text-[11px] leading-relaxed text-muted">{h.description}</p></div>
+                            {on ? <span className="shrink-0 text-[11px] text-avatar-teal">Connected</span> : <button disabled={busy === h.url} onClick={() => void connect(kind, JSON.stringify({ url: h.url, auth: toks[h.url]?.trim() || undefined }), h.url)} className="shrink-0 rounded-md bg-white px-2.5 py-1 text-[11px] font-medium text-bg disabled:opacity-50">{busy === h.url ? "Checking…" : "Connect"}</button>}
+                          </div>
+                          {!on && h.needsToken && <input type="password" placeholder="Token / API key for this service" value={toks[h.url] ?? ""} onChange={(e) => setToks((t) => ({ ...t, [h.url]: e.target.value }))} className={`${box} mt-2`} />}
+                          {msg[h.url] && <p className="mt-1.5 text-[11px] text-muted">{msg[h.url]}</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <p className="mb-2 text-[11px] leading-relaxed text-muted">
                 {ctype === "mcp"
-                  ? "Paste a remote MCP server URL (Streamable HTTP). Its tools show up for the agent automatically. Auth: a token, or a header like “X-Api-Key: abc”."
+                  ? "Or paste a remote MCP server URL (Streamable HTTP). Its tools show up for the agent automatically. Auth: a token, or a header like “X-Api-Key: abc”."
                   : "Give a base URL and an API key. The agent gets one request tool limited to that host: GET is free, POST/PUT/PATCH/DELETE ask for approval."}
               </p>
               <div className="space-y-2">
