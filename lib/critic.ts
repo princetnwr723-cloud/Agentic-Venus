@@ -4,6 +4,7 @@ export type Verdict = { verdict: "pass" | "partial" | "fail"; reason: string };
  * A second agent (ideally a different model) checks the result against the goal.
  * For verified lists the check is DETERMINISTIC first: the summary carries "VERIFIED: X of N requested"
  * (written by code, not by the model), so a short list can never pass as a full one.
+ * Fail-closed: only an explicit "pass" from the reviewer counts as a pass. Anything unclear is "partial".
  */
 export async function verifyResult(
   llm: (system: string, prompt: string) => Promise<string>,
@@ -36,7 +37,7 @@ ${a.evidence.length ? a.evidence.join("\n---\n").slice(0, 3500) : "(none)"}`
     const j = /\{[\s\S]*\}/.exec(raw);
     if (!j) return { verdict: "partial", reason: "Verifier gave no usable answer; the result was not marked as fully verified." };
     const p = JSON.parse(j[0]) as { verdict?: string; reason?: string };
-    const verdict = p.verdict === "fail" || p.verdict === "partial" ? p.verdict : "pass";
+    const verdict: Verdict["verdict"] = p.verdict === "pass" || p.verdict === "fail" ? p.verdict : "partial";
     return { verdict, reason: String(p.reason ?? "").slice(0, 240) || "No reason given." };
   } catch {
     return { verdict: "partial", reason: "Verifier unavailable; the result was not marked as fully verified." };
