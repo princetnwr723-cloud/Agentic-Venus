@@ -4,6 +4,7 @@ import { verifyUser } from "@/lib/server-auth";
 const secret = () => {
   const s = process.env.ROUTINE_RUNNER_SECRET;
   if (!s) throw new Error("ROUTINE_RUNNER_SECRET is not set on the server.");
+  if (s.length < 32) throw new Error("ROUTINE_RUNNER_SECRET must be at least 32 characters long.");
   return s;
 };
 const sign = (body: string) => createHmac("sha256", secret()).update(body).digest("base64url");
@@ -22,9 +23,11 @@ export function signJob(uid: string, chatId: string, jobId: string, ttlMs = MAX_
 }
 
 export function verifyJobToken(token: string): { uid: string; chatId: string; jobId: string } | null {
-  if (!token.startsWith("job:")) return null;
-  const [body, sig] = token.slice(4).split(".");
-  if (!body || !sig) return null;
+  if (typeof token !== "string" || token.length > 2048 || !token.startsWith("job:")) return null;
+  const parts = token.slice(4).split(".");
+  if (parts.length !== 2) return null;
+  const [body, sig] = parts;
+  if (!body || !sig || !/^[A-Za-z0-9_-]+$/.test(body) || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return null;
   const a = Buffer.from(sig), b = Buffer.from(sign(body));
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   try {
