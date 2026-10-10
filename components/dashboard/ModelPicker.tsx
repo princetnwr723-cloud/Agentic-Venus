@@ -22,10 +22,12 @@ export default function ModelPicker({
   const [models, setModels] = useState<string[]>(providerMeta(provider).models);
   const [loading, setLoading] = useState(false);
   const [customDraft, setCustomDraft] = useState("");
+  const [keyError, setKeyError] = useState("");
 
   const key = apiKeys[provider];
 
   useEffect(() => {
+    setKeyError("");
     if (!key) {
       setModels(providerMeta(provider).models);
       return;
@@ -44,9 +46,19 @@ export default function ModelPicker({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider, apiKey: key }),
     })
-      .then((res) => res.json())
-      .then((data: { models?: Array<{ id: string }> | null }) => {
+      .then((res) => res.json().catch(() => ({})))
+      .then((data: { models?: Array<{ id: string }> | null; error?: string }) => {
         if (cancelled) return;
+        if (data.error) {
+          // Do not cache a failure, and tell the user why the list is short.
+          setKeyError(
+            /decrypt|server key/i.test(data.error)
+              ? "Saved key could not be read. Re-enter it in API keys to see all models."
+              : `Could not load the model list: ${data.error}`
+          );
+          setModels(providerMeta(provider).models);
+          return;
+        }
         const list =
           data.models && data.models.length > 0
             ? data.models.map((m) => m.id)
@@ -55,7 +67,10 @@ export default function ModelPicker({
         setModels(list);
       })
       .catch(() => {
-        if (!cancelled) setModels(providerMeta(provider).models);
+        if (!cancelled) {
+          setKeyError("Could not reach the server to load models.");
+          setModels(providerMeta(provider).models);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -129,6 +144,8 @@ export default function ModelPicker({
           className="w-44 rounded-md border border-line bg-panel2 px-2 py-1 text-xs text-ink placeholder:text-faint"
         />
       )}
+
+      {keyError && <p className="w-full text-[11px] text-red-300">{keyError}</p>}
     </div>
   );
 }
