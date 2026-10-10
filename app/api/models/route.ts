@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchModels, NO_LISTING } from "@/lib/model-catalog-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import type { ProviderId } from "@/lib/providers";
 
 export async function POST(req: Request) {
@@ -17,6 +17,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ models });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not list models.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: requestStatus(err) });
   }
 }
