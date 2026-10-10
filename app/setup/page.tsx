@@ -14,9 +14,11 @@ export default function SetupPage() {
   return (
     <div className="min-h-screen bg-bg px-6 py-10 text-ink">
       <div className="mx-auto max-w-xl space-y-4">
-        <h1 className="text-xl font-semibold">Encryption key (optional)</h1>
+        <h1 className="text-xl font-semibold">Encryption key</h1>
         <p className="text-sm leading-relaxed text-muted">
-          The app already encrypts your secrets with a key derived from <b className="text-ink">ROUTINE_RUNNER_SECRET</b>, so you do not need this. If you want a dedicated key, generate one here. It is created in your browser and is never sent anywhere.
+          Your saved secrets (API keys, logins, cards) are encrypted with a key. In production this must be a dedicated <b className="text-ink">VAULT_KEY</b>,
+          so it is not the same secret that protects your cron endpoints (<b className="text-ink">ROUTINE_RUNNER_SECRET</b>). The key below is created in your
+          browser and is never sent anywhere.
         </p>
         <button onClick={gen} className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-bg">Generate a key</button>
         {key && (
@@ -27,6 +29,7 @@ export default function SetupPage() {
               <li>Vercel → your project → Settings → Environment Variables.</li>
               <li>Name <b className="text-ink">VAULT_KEY</b>, paste the value, select all environments, Save.</li>
               <li>Deployments → latest → Redeploy.</li>
+              <li>Secrets saved earlier still open, and are re-encrypted with the new key the first time they are used.</li>
               <li>Keep a copy somewhere safe. If you lose it you must re-enter your saved secrets.</li>
             </ol>
           </>
