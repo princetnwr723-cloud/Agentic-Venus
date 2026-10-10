@@ -5,6 +5,7 @@ import { VERIFY_TOOLS } from "./verify";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { assertPublicUrl, cut, http } from "./net";
 import { safeId, unpack } from "./catalog";
+import { OAUTH_PROVIDERS } from "./oauth-catalog";
 import { INJECTION_PATTERNS, wrapUntrusted } from "@/lib/shield";
 import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 
@@ -55,6 +56,9 @@ export async function buildCatalog(c: Conn): Promise<{ specs: ToolSpec[]; errors
       specs.push({ name: `mcp_${safeId(e.id)}.${t.name}`, description: safeDesc(t.description), params: paramSummary(t), risk: mcpRisk(t), source: `mcp:${e.id}` });
     }
   });
+  for (const p of OAUTH_PROVIDERS) {
+    if (c[`oauth:${p.id}`]) specs.push({ name: `oauth_${safeId(p.id)}.request`, source: `oauth:${p.id}`, risk: "read", description: `${p.label} API request limited to ${p.apiHost}. GET is read-only; other methods require approval.`, params: "method:GET|POST|PUT|PATCH|DELETE, path:string, body?:object" });
+  }
   for (const e of apiEntries(c)) {
     specs.push({
       name: `api_${safeId(e.id)}.request`, source: `api:${e.id}`, risk: "read",
@@ -122,6 +126,30 @@ export async function callTool(
       const r = await mcpCall(e.url, e.auth, tool, args);
       return good(r.text, name, risk, !r.isError);
     } catch (err) { return { ok: false, text: err instanceof Error ? err.message : "MCP call failed." }; }
+  }
+
+  if (src.startsWith("oauth_")) {
+    const providerId = src.slice("oauth_".length);
+    const p = OAUTH_PROVIDERS.find((x) => safeId(x.id) === providerId);
+    const token = p ? c[`oauth:${p.id}`] : undefined;
+    if (!p || !token) return { ok:false, text:"That OAuth connector is not connected for this chat." };
+    try {
+      const method = String(args.method ?? "GET").toUpperCase();
+      if (!["GET","POST","PUT","PATCH","DELETE"].includes(method)) return {ok:false,text:"Unsupported HTTP method."};
+      const path = String(args.path ?? "");
+      if (!path.startsWith("/") || path.startsWith("//") || path.length > 1500) return {ok:false,text:'path must be a relative API path starting with "/".'};
+      const risk: Risk = method === "GET" ? "read" : "write";
+      if (mustAsk(risk, isAuto(c, `oauth:${p.id}`))) return ask(name, args, risk);
+      const url = new URL(path, p.apiBase.endsWith("/") ? p.apiBase : p.apiBase + "/");
+      if (url.protocol !== "https:" || url.hostname !== p.apiHost) return {ok:false,text:"Request blocked: URL is outside the provider's verified API host."};
+      const headers: Record<string,string> = { Accept:"application/json", Authorization:`Bearer ${token}` };
+      if (p.id === "github_oauth") { headers["X-GitHub-Api-Version"]="2022-11-28"; headers["User-Agent"]="AgenticVenus"; }
+      if (p.id === "notion_oauth") headers["Notion-Version"]="2022-06-28";
+      if (p.id === "twitch") headers["Client-Id"]=process.env.TWITCH_CLIENT_ID || "";
+      if (args.body !== undefined) headers["Content-Type"]="application/json";
+      const r = await http(url.toString(), {method,headers,...(args.body !== undefined && method !== "GET" ? {body:JSON.stringify(args.body)} : {})}, 20_000);
+      return good(`HTTP ${r.status}\n${r.text}`, name, risk, r.status < 400);
+    } catch (err) { return {ok:false,text:err instanceof Error ? err.message : "OAuth API request failed."}; }
   }
 
   if (src.startsWith("api_")) {
