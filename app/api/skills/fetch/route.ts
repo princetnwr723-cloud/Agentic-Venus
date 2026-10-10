@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { safeFetch } from "@/lib/tools/net";
 
 export const runtime = "nodejs";
@@ -26,6 +26,6 @@ export async function POST(req: Request) {
     if (!res.ok) return NextResponse.json({ error: `The link answered HTTP ${res.status}.` }, { status: 400 });
     return NextResponse.json({ text: (await res.text()).slice(0, 60_000) });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Could not fetch the link." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Could not fetch the link." }, { status: requestStatus(err) });
   }
 }
