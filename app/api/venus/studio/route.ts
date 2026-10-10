@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect, createSandbox, exec } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { createSignedUpload } from "@/lib/supabase-server";
 import { DIR, jobStatus, prepareProject, safeId, setupStudio, startJob, studioState, writeBinary } from "@/lib/venus-server";
 import { sanitizeStoryboard } from "@/lib/venus-schema";
@@ -192,6 +192,6 @@ head -c 300 /tmp/up.out`,
         return fail("Unknown action.", 400);
     }
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "Studio request failed.");
+    return fail(err instanceof Error ? err.message : "Studio request failed.", requestStatus(err));
   }
 }
