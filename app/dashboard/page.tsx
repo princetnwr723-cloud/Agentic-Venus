@@ -1236,7 +1236,7 @@ export default function DashboardPage() {
         <RoutinesPanel open={routinesOpen} onClose={() => { setRoutinesOpen(false); setRoutinePrefill(null); }} chatName={activeChat.agentName} routines={routines} prefillInstructions={routinePrefill} busyId={runningRoutineId} onCreate={handleCreateRoutine} onToggle={handleToggleRoutine} onDelete={handleDeleteRoutine} onRunNow={handleRunRoutineNow} />
       )}
       {activeChat && (
-        <ConnectorsModal open={connectorsOpen} onClose={() => setConnectorsOpen(false)} chatName={activeChat.agentName} connectors={activeChat.connectors ?? {}} onTest={testConnector} onSave={saveConnector} />
+        <ConnectorsModal open={connectorsOpen} onClose={() => setConnectorsOpen(false)} chatName={activeChat.agentName} chatId={activeChat.id} getToken={() => user!.getIdToken()} connectors={activeChat.connectors ?? {}} onTest={testConnector} onSave={saveConnector} />
       )}
       {activeChat && (
         <IdentityPanel
