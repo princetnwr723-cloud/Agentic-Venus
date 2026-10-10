@@ -3,9 +3,9 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { readBody, requestStatus } from "@/lib/request";
 import { audit } from "@/lib/audit";
 import { identityLog } from "@/lib/identity-log";
-import { resolveDeep, vaultPut } from "@/lib/vault";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
-import type { ToolCtx } from "@/lib/tools/types";
+import { makeCtx, resolveConnectorsSafe } from "@/lib/tools/connectors";
+import { safeId } from "@/lib/tools/catalog";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -32,6 +32,12 @@ async function logIdentityTool(uid: string, chatId: string, name: string, text: 
   }
 }
 
+/** Which saved connector does a tool name belong to? (github.x -> github, oauth_google.request -> oauth:google ...) */
+function brokenOwner(name: string, broken: string[]): string | undefined {
+  const src = name.split(".")[0];
+  return broken.find((k) => k === src || ("mcp_" + safeId(k.slice(4))) === src || ("oauth_" + safeId(k.slice(6))) === src || ("api_" + safeId(k.slice(4))) === src);
+}
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req, { allowJob: true });
@@ -39,22 +45,24 @@ export async function POST(req: Request) {
     const chatId = String(body.chatId || "");
     if (!chatId) return NextResponse.json({ ok: false, text: "chatId is missing." }, { status: 400 });
 
-    // Connectors are ALWAYS read from the server's copy (the client cannot inject its own), then decrypted here.
+    // Connectors are ALWAYS read from the server's copy (the client cannot inject its own).
+    // Each one is opened separately: a connector whose secret can no longer be read is reported, it does not break the others.
     const chatRef = getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
     const stored = clean(((await chatRef.get()).data() as { connectors?: unknown } | undefined)?.connectors);
-    const connectors = (await resolveDeep(uid, { connectors: stored })).connectors;
+    const { connectors, broken } = await resolveConnectorsSafe(uid, stored);
 
-    if (body.action === "list") return NextResponse.json(await buildCatalog(connectors));
+    if (body.action === "list") {
+      const cat = await buildCatalog(connectors);
+      return NextResponse.json({ ...cat, errors: [...cat.errors, ...broken.map((k) => `${k} — saved login can't be read (server key changed). Reconnect it in Connectors.`)], broken });
+    }
 
     if (body.action === "call") {
-      const ctx: ToolCtx = {
-        uid, chatId,
-        save: async (key, value) => {
-          const ph = await vaultPut(uid, `conn.${chatId.toLowerCase()}.${key.toLowerCase().replace(/[^a-z0-9:]+/g, "_")}`, value);
-          await chatRef.update({ [`connectors.${key}`]: ph });
-        },
-      };
       const name = String(body.name || "");
+      const owner = brokenOwner(name, broken);
+      if (owner) {
+        return NextResponse.json({ ok: false, text: `The saved login for "${owner}" can't be read any more (the server's encryption key changed). Tell the user: open Connectors and press Reconnect for it.` });
+      }
+      const ctx = makeCtx(uid, chatId);
       const r = await callTool(connectors, name, body.args, body.approved === true, { force: body.force === true, ctx });
       if (r.ok && r.risk === "write") {
         await audit(uid, { kind: "tool_write", chatId, text: `${name} ${JSON.stringify(body.args ?? {}).slice(0, 220)} approved=${body.approved === true} tainted=${body.force === true}` });
