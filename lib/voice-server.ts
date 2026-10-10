@@ -6,6 +6,15 @@ import { PROVIDERS, type ProviderId } from "@/lib/providers";
 
 export type VoiceSettings = {
   openaiKey?: string;
+  geminiKey?: string;
+  elevenLabsKey?: string;
+  azureSpeechKey?: string;
+  deepgramKey?: string;
+  cartesiaKey?: string;
+  playhtKey?: string;
+  ttsProvider?: "openai" | "gemini" | "elevenlabs" | "azure" | "deepgram" | "cartesia" | "playht";
+  ttsModel?: string;
+  ttsVoice?: string;
   twilioSid?: string;
   twilioToken?: string;
   fromNumber?: string;
@@ -34,6 +43,18 @@ export async function saveVoiceSettings(uid: string, patch: Partial<VoiceSetting
   const current = ((snap.data()?.voiceSettings ?? {}) as VoiceSettings);
   const next: VoiceSettings = { ...current };
   if (typeof patch.openaiKey === "string" && patch.openaiKey.trim()) next.openaiKey = await vaultPut(uid, "voice.openai", patch.openaiKey.trim(), true);
+  const ttsSecrets = [
+    ["geminiKey", "voice.gemini"], ["elevenLabsKey", "voice.elevenlabs"],
+    ["azureSpeechKey", "voice.azure"], ["deepgramKey", "voice.deepgram"],
+    ["cartesiaKey", "voice.cartesia"], ["playhtKey", "voice.playht"],
+  ] as const;
+  for (const [field, vaultName] of ttsSecrets) {
+    const value = patch[field];
+    if (typeof value === "string" && value.trim()) (next as Record<string, unknown>)[field] = await vaultPut(uid, vaultName, value.trim(), true);
+  }
+  if (patch.ttsProvider && ["openai", "gemini", "elevenlabs", "azure", "deepgram", "cartesia", "playht"].includes(patch.ttsProvider)) next.ttsProvider = patch.ttsProvider;
+  if (typeof patch.ttsModel === "string" && patch.ttsModel.trim().length <= 120) next.ttsModel = patch.ttsModel.trim();
+  if (typeof patch.ttsVoice === "string" && patch.ttsVoice.trim().length <= 160) next.ttsVoice = patch.ttsVoice.trim();
   if (typeof patch.twilioSid === "string" && patch.twilioSid.trim()) next.twilioSid = await vaultPut(uid, "voice.twilio.sid", patch.twilioSid.trim(), true);
   if (typeof patch.twilioToken === "string" && patch.twilioToken.trim()) next.twilioToken = await vaultPut(uid, "voice.twilio.token", patch.twilioToken.trim(), true);
   if (typeof patch.fromNumber === "string") next.fromNumber = patch.fromNumber.trim();
@@ -48,8 +69,9 @@ export async function saveVoiceSettings(uid: string, patch: Partial<VoiceSetting
   return next;
 }
 
-export async function clearVoiceSecret(uid: string, field: "openaiKey" | "twilioSid" | "twilioToken") {
-  const name = field === "openaiKey" ? "voice.openai" : field === "twilioSid" ? "voice.twilio.sid" : "voice.twilio.token";
+export async function clearVoiceSecret(uid: string, field: "openaiKey" | "geminiKey" | "elevenLabsKey" | "azureSpeechKey" | "deepgramKey" | "cartesiaKey" | "playhtKey" | "twilioSid" | "twilioToken") {
+  const names: Record<typeof field, string> = { openaiKey: "voice.openai", geminiKey: "voice.gemini", elevenLabsKey: "voice.elevenlabs", azureSpeechKey: "voice.azure", deepgramKey: "voice.deepgram", cartesiaKey: "voice.cartesia", playhtKey: "voice.playht", twilioSid: "voice.twilio.sid", twilioToken: "voice.twilio.token" };
+  const name = names[field];
   await vaultDelete(uid, name);
   const ref = settingsRef(uid);
   const snap = await ref.get();
@@ -67,6 +89,12 @@ export async function getResolvedVoiceSecrets(uid: string) {
   return {
     settings,
     openaiKey: settings.openaiKey ? await resolveValue(uid, settings.openaiKey) : null,
+    geminiKey: settings.geminiKey ? await resolveValue(uid, settings.geminiKey) : null,
+    elevenLabsKey: settings.elevenLabsKey ? await resolveValue(uid, settings.elevenLabsKey) : null,
+    azureSpeechKey: settings.azureSpeechKey ? await resolveValue(uid, settings.azureSpeechKey) : null,
+    deepgramKey: settings.deepgramKey ? await resolveValue(uid, settings.deepgramKey) : null,
+    cartesiaKey: settings.cartesiaKey ? await resolveValue(uid, settings.cartesiaKey) : null,
+    playhtKey: settings.playhtKey ? await resolveValue(uid, settings.playhtKey) : null,
     twilioSid: settings.twilioSid ? await resolveValue(uid, settings.twilioSid) : null,
     twilioToken: settings.twilioToken ? await resolveValue(uid, settings.twilioToken) : null,
     providerKey,
