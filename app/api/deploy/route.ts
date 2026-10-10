@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect, exec } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { q, wsRoot } from "@/lib/code-server";
 
 export const runtime = "nodejs";
@@ -65,6 +65,6 @@ done`;
     const host = dep.alias?.[0] || dep.url;
     return NextResponse.json({ url: `https://${host}`, state: dep.readyState || "QUEUED", files: files.length });
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "Deploy failed.");
+    return fail(err instanceof Error ? err.message : "Deploy failed.", requestStatus(err));
   }
 }
