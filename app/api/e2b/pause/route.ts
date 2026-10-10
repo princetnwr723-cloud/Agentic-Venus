@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { pauseSandbox } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -15,6 +15,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not pause the computer.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: requestStatus(err) });
   }
 }
