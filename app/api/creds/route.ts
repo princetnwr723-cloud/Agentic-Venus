@@ -3,6 +3,7 @@ import { authFromRequest } from "@/lib/job-token";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { resolveValue } from "@/lib/vault";
 import { audit } from "@/lib/audit";
+import { readBody, requestStatus } from "@/lib/request";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -12,7 +13,7 @@ const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 // The agent types the saved login into the page it is working on (on the visible screen). The AI model never sees it.
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await readBody(req, { allowJob: true, maxBytes: 16 * 1024 });
     const auth = await authFromRequest(req, body.uid);
     if (!auth.job) return NextResponse.json({ error: "Only the running task can use saved logins." }, { status: 403 });
     const n = norm(String(body.site || ""));
@@ -27,6 +28,6 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: "No saved login for that site." }, { status: 404 });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Failed." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Failed." }, { status: requestStatus(err) });
   }
 }
