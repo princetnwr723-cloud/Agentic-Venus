@@ -6,41 +6,33 @@ import path from 'node:path';
 const root = process.cwd();
 const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 
-test('voice feature exposes authenticated settings, realtime, call and webhook routes', () => {
+test('voice feature exposes authenticated settings, call and webhook routes', () => {
   for (const p of [
-    'app/api/voice/settings/route.ts',
-    'app/api/voice/test/route.ts',
-    'app/api/voice/realtime/route.ts',
-    'app/api/voice/calls/route.ts',
-    'app/api/voice/twiml/route.ts',
-    'app/api/voice/turn/route.ts',
-    'app/api/voice/status/route.ts',
-    'app/voice/page.tsx',
+    'app/api/voice/settings/route.ts', 'app/api/voice/test/route.ts', 'app/api/voice/realtime/route.ts',
+    'app/api/voice/calls/route.ts', 'app/api/voice/twiml/route.ts', 'app/api/voice/turn/route.ts',
+    'app/api/voice/status/route.ts', 'app/api/voice/tts/route.ts', 'app/voice/page.tsx', 'lib/voice-calls.ts',
   ]) assert.ok(fs.existsSync(path.join(root, p)), `missing ${p}`);
+  assert.ok(!fs.existsSync(path.join(root, 'app/api/voice/settings/rouete.ts')), 'delete the misspelled rouete.ts');
 });
 
-test('phone-call reasoning is routed through the existing 11-provider catalog', () => {
-  const providers = read('lib/providers.ts');
+test('phone-call reasoning uses the chat agent (its model, memory and tools)', () => {
   const turn = read('app/api/voice/turn/route.ts');
-  for (const id of ['anthropic','openai','gemini','grok','openrouter','mistral','cohere','perplexity','groq','deepseek','apinex']) {
-    assert.ok(providers.includes(`"${id}"`), `provider missing: ${id}`);
-  }
+  const calls = read('lib/voice-calls.ts');
+  assert.match(turn, /loadAgent\(/);
   assert.match(turn, /callProvider\(/);
-  assert.match(turn, /settings\.llmProvider/);
+  assert.match(turn, /callTool\(/);
+  assert.match(calls, /connectors/);
 });
 
-test('Realtime sessions use a server-created short-lived client secret, not a browser permanent key', () => {
-  const route = read('app/api/voice/realtime/route.ts');
-  const page = read('app/voice/page.tsx');
-  assert.match(route, /realtime\/client_secrets/);
-  assert.match(route, /expires_after/);
-  assert.match(page, /api\/voice\/realtime/);
-  assert.match(page, /api\.openai\.com\/v1\/realtime\/calls/);
+test('Twilio webhooks are signature-checked', () => {
+  for (const p of ['app/api/voice/twiml/route.ts', 'app/api/voice/turn/route.ts', 'app/api/voice/status/route.ts']) {
+    assert.match(read(p), /verifyTwilioSignature\(/, p);
+  }
 });
 
 test('settings responses expose connection status but not raw credentials', () => {
   const route = read('app/api/voice/settings/route.ts');
   assert.match(route, /openaiConnected/);
   assert.match(route, /twilioConnected/);
-  assert.doesNotMatch(route, /return NextResponse\.json\(\{[^}]*openaiKey:/s);
+  assert.doesNotMatch(route, /twilioToken:\s*s\.twilioToken/);
 });
