@@ -2,7 +2,10 @@
 // The agent sees a NUMBERED list of the page's buttons/links/inputs and acts by number.
 // NEW: ops can also target an element by its visible LABEL (used by recorded recipes).
 import chromium from "@sparticuz/chromium";
-import { chromium as pw, type Page } from "playwright-core";
+import { chromium as pw, type Page, type Route } from "playwright-core";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { isPrivateAddress, normalizePublicHttpUrl } from "@/lib/browser-url-safety.mjs";
 
 export type BrowserStorageState = {
   cookies: any[];
@@ -33,18 +36,27 @@ type Item = { id: number; tag: string; type: string; label: string; href: string
 const UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase();
-  return (
-    h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || h.startsWith("[") ||
-    /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)
-  );
+function normalizeUrl(input: string): string {
+  return normalizePublicHttpUrl(input);
 }
 
-function normalizeUrl(input: string): string {
-  const u = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
-  if (!/^https?:$/.test(u.protocol) || isPrivateHost(u.hostname)) throw new Error("Only public http(s) pages can be opened.");
-  return u.toString();
+/** Block private-network requests after redirects as well as at the initial URL. */
+async function isSafeNetworkUrl(raw: string, cache: Map<string, Promise<boolean>>): Promise<boolean> {
+  let url: URL;
+  try { url = new URL(raw); } catch { return false; }
+  if (!["http:", "https:"].includes(url.protocol)) return false;
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") ||
+      host.endsWith(".internal") || host.endsWith(".test") || host.endsWith(".invalid") ||
+      host.endsWith(".example")) return false;
+  if (isIP(host)) return !isPrivateAddress(host);
+  const cached = cache.get(host);
+  if (cached) return cached;
+  const pending: Promise<boolean> = lookup(host, { all: true, verbatim: true }).then((rows: Array<{ address: string }>) =>
+    rows.length > 0 && rows.every((row) => !isPrivateAddress(row.address))
+  ).catch(() => false);
+  cache.set(host, pending);
+  return pending;
 }
 
 async function tagAll(page: Page): Promise<{ text: string; items: Item[] }> {
@@ -125,13 +137,24 @@ export async function runBrowser(input: {
     if (!saved && input.session?.cookies?.length) await ctx.addCookies(input.session.cookies).catch(() => {});
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
+    const dnsSafetyCache = new Map<string, Promise<boolean>>();
+    await page.route("**/*", async (route: Route) => {
+      const safe = await isSafeNetworkUrl(route.request().url(), dnsSafetyCache);
+      if (!safe) {
+        await route.abort("blockedbyclient").catch(() => {});
+        return;
+      }
+      await route.continue().catch(() => {});
+    });
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
     await page.waitForTimeout(800);
-    const items = (await tagAll(page)).items; // numbers the elements the agent saw last time
+    let items = (await tagAll(page)).items;
 
     const log: string[] = [];
     for (const op of (input.ops ?? []).slice(0, 12)) {
       try {
+        // Refresh labels and IDs because a prior action may have changed the DOM.
+        items = (await tagAll(page)).items;
         const before = page.url();
         if (op.op === "click" || op.op === "click_label") {
           const id = op.op === "click" ? op.id : resolveLabel(items, op);
