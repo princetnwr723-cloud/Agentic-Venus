@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -33,7 +33,10 @@ TASK: ${task.slice(0, 1500)}`,
       .map((s: any) => ({ title: String(s?.title ?? "Step").slice(0, 80), goal: String(s?.goal ?? "").slice(0, 400), tool: String(s?.tool ?? "") }))
       .filter((s: { goal: string }) => s.goal);
     return NextResponse.json({ subtasks: subtasks.length ? subtasks : [{ title: "Do the task", goal: task, tool: "" }] });
-  } catch {
-    return NextResponse.json({ subtasks: [] });
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Planning failed.", subtasks: [] },
+      { status: requestStatus(e) }
+    );
   }
 }
