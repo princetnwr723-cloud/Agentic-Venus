@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { directorPrompt, editPrompt, reviewPrompt, sceneCodePrompt } from "@/lib/venus-prompts";
 import { checkCode, sanitizeScene, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
@@ -90,6 +90,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ error: "Unknown request." }, { status: 400 });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "AI request failed." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "AI request failed." }, { status: requestStatus(err) });
   }
 }
