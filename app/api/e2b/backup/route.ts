@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { backupComputerState } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -18,6 +18,6 @@ export async function POST(req: Request) {
     const path = await backupComputerState(apiKey, sandboxId, uid, chatId);
     return NextResponse.json({ ok: true, path, savedAt: Date.now() });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Computer backup failed." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Computer backup failed." }, { status: requestStatus(err) });
   }
 }
