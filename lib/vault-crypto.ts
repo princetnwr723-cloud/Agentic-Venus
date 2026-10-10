@@ -5,6 +5,8 @@ import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } f
 export type Sealed = { iv: string; ct: string; tag: string };
 export type KeyEnv = {
   VAULT_KEY?: string;
+  /** Previous VAULT_KEY value(s), comma separated. Only used to OPEN old secrets (they are re-encrypted with VAULT_KEY on first read). */
+  VAULT_KEY_OLD?: string;
   ROUTINE_RUNNER_SECRET?: string;
   NODE_ENV?: string;
   ALLOW_DERIVED_VAULT_KEY?: string;
@@ -13,24 +15,41 @@ export type KeyEnv = {
 export type KeyRing = {
   /** Key used for new secrets. */
   primary: Buffer;
-  /** Every key that may open old secrets: [VAULT_KEY?, derived-from-ROUTINE_RUNNER_SECRET?]. */
+  /** Every key that may open old secrets: [VAULT_KEY?, ...VAULT_KEY_OLD, derived-from-ROUTINE_RUNNER_SECRET?]. */
   all: Buffer[];
   /** True when there is NO dedicated VAULT_KEY and the key is derived from ROUTINE_RUNNER_SECRET. */
   derivedOnly: boolean;
 };
 
+function parseKey(raw: string, label: string): Buffer {
+  const k = Buffer.from(raw.trim(), "base64");
+  if (k.length !== 32) {
+    throw new Error(`${label} must be a base64 string of exactly 32 bytes. Open /setup in the app to generate a valid one.`);
+  }
+  return k;
+}
+
 export function loadKeys(env: KeyEnv = process.env as KeyEnv): KeyRing {
   const all: Buffer[] = [];
   let dedicated = false;
+
   const raw = env.VAULT_KEY?.trim();
   if (raw) {
-    const k = Buffer.from(raw, "base64");
-    if (k.length !== 32) throw new Error("VAULT_KEY must be a base64 string of exactly 32 bytes. Open /setup in the app to generate a valid one.");
-    all.push(k);
+    all.push(parseKey(raw, "VAULT_KEY"));
     dedicated = true;
   }
+
+  // Older VAULT_KEY values: they can only open secrets, never write new ones.
+  for (const part of (env.VAULT_KEY_OLD ?? "").split(",")) {
+    const p = part.trim();
+    if (!p) continue;
+    const k = parseKey(p, "VAULT_KEY_OLD");
+    if (!all.some((x) => x.equals(k))) all.push(k);
+  }
+
   const s = env.ROUTINE_RUNNER_SECRET;
   if (s) all.push(Buffer.from(hkdfSync("sha256", s, "agenticvenus-vault-salt", "agenticvenus-vault-v1", 32)));
+
   if (!all.length) throw new Error("No encryption key is available. Set VAULT_KEY (generate one at /setup).");
   return { primary: all[0], all, derivedOnly: !dedicated };
 }
