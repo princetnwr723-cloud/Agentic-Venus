@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getScreenUrl } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 
 export const maxDuration = 60;
 export const runtime = "nodejs";
@@ -15,6 +15,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ url });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not open the computer's screen.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: requestStatus(err) });
   }
 }
