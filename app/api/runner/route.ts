@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connect } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { createSignedDownload } from "@/lib/supabase-server";
 import { BusyError, runnerStatus, startRunnerJob, stopRunner } from "@/lib/runner-server";
 import { answerPcJob, startPcJob } from "@/lib/pc-runner-server";
@@ -85,6 +85,6 @@ export async function POST(req: Request) {
         return fail("Unknown action.", 400);
     }
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "Runner request failed.");
+    return fail(err instanceof Error ? err.message : "Runner request failed.", requestStatus(err));
   }
 }
