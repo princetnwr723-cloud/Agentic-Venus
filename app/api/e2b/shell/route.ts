@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { shellStart } from "@/lib/e2b-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -12,6 +12,6 @@ export async function POST(req: Request) {
     const r = await shellStart(String(e2bKey), String(sandboxId), String(command));
     return NextResponse.json({ done: r.done, exitCode: r.exitCode, output: r.output });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Shell failed." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Shell failed." }, { status: requestStatus(err) });
   }
 }
