@@ -3,9 +3,22 @@ import { resolveDeep } from "@/lib/vault";
 
 const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
+export class RequestError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "RequestError";
+  }
+}
+
+export function requestStatus(error: unknown, fallback = 500): number {
+  if (error instanceof RequestError) return error.status;
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status <= 599 ? status : fallback;
+}
+
 async function readBoundedText(req: Request, maxBytes: number): Promise<string> {
   const declared = Number(req.headers.get("content-length") || 0);
-  if (declared > maxBytes) throw new Error(`Request body is too large (maximum ${maxBytes} bytes).`);
+  if (declared > maxBytes) throw new RequestError(`Request body is too large (maximum ${maxBytes} bytes).`, 413);
   if (!req.body) return "";
 
   const reader = req.body.getReader();
@@ -18,7 +31,7 @@ async function readBoundedText(req: Request, maxBytes: number): Promise<string> 
       total += value.byteLength;
       if (total > maxBytes) {
         await reader.cancel().catch(() => undefined);
-        throw new Error(`Request body is too large (maximum ${maxBytes} bytes).`);
+        throw new RequestError(`Request body is too large (maximum ${maxBytes} bytes).`, 413);
       }
       chunks.push(value);
     }
@@ -28,7 +41,11 @@ async function readBoundedText(req: Request, maxBytes: number): Promise<string> 
   const merged = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder("utf-8", { fatal: true }).decode(merged);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(merged);
+  } catch {
+    throw new RequestError("Request body must be valid UTF-8 JSON.", 400);
+  }
 }
 
 /**
@@ -42,14 +59,21 @@ export async function readBody(req: Request, opts: { allowJob?: boolean; maxByte
   let raw: unknown = {};
   if (rawText.trim()) {
     try { raw = JSON.parse(rawText); }
-    catch { throw new Error("Request body must contain valid JSON."); }
+    catch { throw new RequestError("Request body must contain valid JSON.", 400); }
   }
   if (raw !== null && (typeof raw !== "object" || Array.isArray(raw))) {
-    throw new Error("Request body must be a JSON object.");
+    throw new RequestError("Request body must be a JSON object.", 400);
   }
   const input = (raw ?? {}) as Record<string, unknown>;
-  const auth = await authFromRequest(req, input.uid);
-  if (auth.job && !opts.allowJob) throw new Error("Background-job tokens are not accepted on this endpoint.");
+  let auth: Awaited<ReturnType<typeof authFromRequest>>;
+  try {
+    auth = await authFromRequest(req, input.uid);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Authentication failed.";
+    const status = /not configured/i.test(message) ? 503 : 401;
+    throw new RequestError(message, status);
+  }
+  if (auth.job && !opts.allowJob) throw new RequestError("Background-job tokens are not accepted on this endpoint.", 403);
   const body = await resolveDeep(auth.uid, input) as Record<string, any>;
   body.uid = auth.uid;
   if (auth.job && auth.chatId) body.chatId = auth.chatId;
