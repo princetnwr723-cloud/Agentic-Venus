@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { callWithFallback, type ChatMsg, type Fallback } from "@/lib/ai-providers-server";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -24,6 +24,6 @@ export async function POST(req: Request) {
     const { reply, used } = await callWithFallback({ provider, apiKey, model, messages: full }, fallbacks);
     return NextResponse.json({ reply, used });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Something went wrong." }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Something went wrong." }, { status: requestStatus(err) });
   }
 }
