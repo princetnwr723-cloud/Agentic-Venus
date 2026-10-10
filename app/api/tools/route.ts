@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase-admin";
-import { readBody } from "@/lib/request";
+import { readBody, requestStatus } from "@/lib/request";
 import { audit } from "@/lib/audit";
 import { identityLog } from "@/lib/identity-log";
 import { resolveDeep, vaultPut } from "@/lib/vault";
@@ -64,6 +64,6 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   } catch (err) {
-    return NextResponse.json({ ok: false, text: err instanceof Error ? err.message : "Tool request failed." }, { status: 500 });
+    return NextResponse.json({ ok: false, text: err instanceof Error ? err.message : "Tool request failed." }, { status: requestStatus(err) });
   }
 }
