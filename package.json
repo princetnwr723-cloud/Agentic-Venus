@@ -1,6 +1,6 @@
 {
   "name": "agenticvenus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,6 +9,7 @@
     "lint": "next lint",
     "routines:run": "node scripts/routine-runner.mjs",
     "eval:check": "node scripts/eval-suite.mjs",
+    "eval:run": "node scripts/eval-run.mjs",
     "test": "node --test scripts/tests/*.test.mjs",
     "check": "npm run eval:check && npm test"
   },
