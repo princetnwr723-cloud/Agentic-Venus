@@ -4,11 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
 import { signOut } from "firebase/auth";
-import { FieldPath, deleteField, doc, getDoc, updateDoc } from "firebase/firestore";
+import { FieldPath, deleteField, doc, getDoc, onSnapshot, updateDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { useKeys, type SavedLogin } from "@/lib/keys-context";
-import { listChats, createChat, updateChatMessages, updateChatModel, updateChatPc, type Chat, type ChatMessage } from "@/lib/chats";
+import { listChats, createChat, appendChatMessages, updateChatModel, updateChatPc, type Chat, type ChatMessage } from "@/lib/chats";
 import { listCustomAgents, createCustomAgent, type CustomAgent } from "@/lib/agents";
 import { listRoutinesForChat, createRoutine, setRoutineEnabled, deleteRoutine, recordManualRun, type Routine } from "@/lib/routines";
 import { setModelPref } from "@/lib/model-pref";
@@ -143,6 +143,22 @@ export default function DashboardPage() {
 
   useEffect(() => { chatsRef.current = chats; for (const c of chats) if (!(c.id in sandboxRef.current)) sandboxRef.current[c.id] = c.pcSandboxId ?? null; }, [chats]);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+
+  // Messages posted by the server (agent updates, mission reports, call summaries) appear live and are never overwritten.
+  useEffect(() => {
+    if (!user || !activeId) return;
+    return onSnapshot(doc(db, "users", user.uid, "chats", activeId), (s) => {
+      const d = s.data() as { messages?: ChatMessage[] } | undefined;
+      if (!d?.messages || s.metadata.hasPendingWrites) return;
+      const cur = chatsRef.current.find((c) => c.id === activeId);
+      if (cur && d.messages.length > cur.messages.length) {
+        chatsRef.current = chatsRef.current.map((c) => (c.id === activeId ? { ...c, messages: d.messages as ChatMessage[] } : c));
+        patchChat(activeId, { messages: d.messages });
+      }
+    }, () => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, activeId]);
+
   useEffect(() => { if (!authLoading && !user) router.replace("/"); }, [authLoading, user, router]);
   useEffect(() => { fetch("/api/venus/media").then((r) => r.json()).then(setCfg).catch(() => {}); }, []);
 
@@ -193,7 +209,7 @@ export default function DashboardPage() {
     const next = [...base, ...msgs];
     chatsRef.current = chatsRef.current.map((c) => (c.id === chatId ? { ...c, messages: next } : c));
     patchChat(chatId, { messages: next });
-    updateChatMessages(user.uid, chatId, next).catch(() => {});
+    appendChatMessages(user.uid, chatId, msgs).catch(() => {});
   }
   const say = (chatId: string, content: string) => appendMessages(chatId, [{ role: "assistant", content, at: Date.now() }]);
 
