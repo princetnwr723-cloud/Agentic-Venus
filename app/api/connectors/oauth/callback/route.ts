@@ -3,8 +3,11 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { vaultPut } from "@/lib/vault";
 import { getOAuthProvider } from "@/lib/tools/oauth-catalog";
+import { identifyAccount } from "@/lib/tools/oauth-identify";
+import { syncConnectorAnnouncements } from "@/lib/connector-announce";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 function secret() { const v = process.env.ROUTINE_RUNNER_SECRET; if (!v || v.length < 32) throw new Error("OAuth callback is not configured securely."); return v; }
 function fail(req: Request, message: string) {
   const u = new URL("/dashboard", req.url);
@@ -26,7 +29,7 @@ export async function GET(req: Request) {
     const expected = createHmac("sha256", secret()).update(payload).digest();
     const actual = Buffer.from(sig, "base64url");
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return fail(req, "OAuth state signature is invalid.");
-    const d = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { uid: string; chatId: string; provider: string; exp: number; nonce: string };
+    const d = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { uid: string; chatId: string; provider: string; h?: string; exp: number; nonce: string };
     if (!d.uid || !d.chatId || !d.nonce || !Number.isFinite(d.exp) || d.exp < Date.now()) return fail(req, "OAuth state expired. Start connection again.");
     const provider = getOAuthProvider(d.provider);
     if (!provider) return fail(req, "Unknown OAuth provider.");
@@ -54,18 +57,24 @@ export async function GET(req: Request) {
     const t = (await response.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; expires_in?: number };
     if (!response.ok || !t.access_token) return fail(req, `Token exchange failed for ${provider.label}. Check the app credentials, redirect URI and provider-specific OAuth requirements.`);
 
+    // Which account did the person really sign in with? A different one than asked for is never saved.
+    const account = await identifyAccount(provider.id, t.access_token);
+    if (d.h && account && account.toLowerCase() !== d.h.toLowerCase()) {
+      return fail(req, `You signed in as ${account}, but you asked for ${d.h}. Nothing was saved. Try again and pick the right account.`);
+    }
+
     const chatRef = db.collection("users").doc(d.uid).collection("chats").doc(d.chatId);
     const chat = await chatRef.get();
     if (!chat.exists) return fail(req, "Target chat no longer exists.");
 
-    // Save access + refresh token + expiry: the agent renews the login by itself, so it does not die after an hour.
     const stored = JSON.stringify({ access: t.access_token, refresh: t.refresh_token, exp: t.expires_in ? Date.now() + Number(t.expires_in) * 1000 : undefined });
-    const name = `conn.${d.chatId.toLowerCase()}.oauth:${provider.id}`;
-    const placeholder = await vaultPut(d.uid, name, stored);
+    const placeholder = await vaultPut(d.uid, `conn.${d.chatId.toLowerCase()}.oauth:${provider.id}`, stored);
     await chatRef.update({
       [`connectors.oauth:${provider.id}`]: placeholder,
-      [`connectorStatus.${provider.id}`]: { status: "connected", connectedAt: Date.now(), scopes: provider.scopes, refreshable: Boolean(t.refresh_token) },
+      [`connectorStatus.${provider.id}`]: { status: "connected", connectedAt: Date.now(), scopes: provider.scopes, refreshable: Boolean(t.refresh_token), account },
     });
+    await syncConnectorAnnouncements(d.uid, d.chatId, { added: [`oauth:${provider.id}`] }).catch(() => {}); // posts "Agent updated" in the chat
+
     const done = new URL("/dashboard", req.url);
     done.searchParams.set("connector_oauth", "success");
     done.searchParams.set("provider", provider.id);
