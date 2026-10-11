@@ -78,14 +78,10 @@ export async function findChat(uid: string, id: string, match: (cred: string[]) 
   return null;
 }
 
-/** Role and memory of one chat, as plain text for prompts. */
-export async function brainText(uid: string, chatId: string): Promise<{ role: string; mem: string }> {
-  const snap = await getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId).collection("brain").doc("memories").get();
-  const items = ((snap.data() as { items?: Array<{ text: string; kind?: string }> } | undefined)?.items ?? []);
-  return {
-    role: items.find((i) => i.kind === "role")?.text ?? "",
-    mem: items.filter((i) => i.kind !== "role").slice(-15).map((i) => `- ${i.text}`).join("\n"),
-  };
+/** Role + memories + the skills that fit this request (memory and skills now reach chat apps, calls and missions). */
+export async function brainText(uid: string, chatId: string, query = ""): Promise<{ role: string; mem: string }> {
+  const { brainContext } = await import("@/lib/learning");
+  return brainContext(uid, chatId, query);
 }
 
 // ---------------- senders ----------------
