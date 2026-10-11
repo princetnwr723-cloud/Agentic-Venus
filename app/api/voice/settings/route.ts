@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { authFromRequest } from "@/lib/job-token";
+import { signChannelToken } from "@/lib/channels";
 import { audit } from "@/lib/audit";
 import { clearVoiceSecret, getVoiceSettings, saveVoiceSettings, signVoiceToken, appBaseUrl, voiceSafeError, TTS_PROVIDERS, type SecretField, type TtsProvider, type VoiceSettings } from "@/lib/voice-server";
 import { defaultChatId } from "@/lib/voice-calls";
@@ -76,7 +77,7 @@ export async function POST(req: Request) {
       let webhook = false;
       if (pick) {
         patch.fromNumber = pick.phone_number;
-        const form = new URLSearchParams({ VoiceUrl: inboundUrl(uid, req), VoiceMethod: "POST" });
+        const form = new URLSearchParams({VoiceUrl: inboundUrl(uid, req), VoiceMethod: "POST",SmsUrl: `${appBaseUrl(req)}/api/channels/twilio?token=${encodeURIComponent(signChannelToken(uid, "twilio"))}`, SmsMethod: "POST",});
         const up = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers/${pick.sid}.json`, {
           method: "POST", headers: { Authorization: basic, "Content-Type": "application/x-www-form-urlencoded" }, body: form, signal: AbortSignal.timeout(12000),
         });
