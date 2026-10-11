@@ -1,5 +1,5 @@
 import {
-  collection, addDoc, doc, getDoc, getDocs, updateDoc, deleteDoc, query, orderBy, serverTimestamp, type Timestamp,
+  collection, addDoc, doc, getDoc, getDocs, updateDoc, deleteDoc, query, orderBy, serverTimestamp, arrayUnion, type Timestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import type { AvatarColor } from "@/lib/bots";
@@ -83,4 +83,9 @@ export async function updateChatConnectors(uid: string, chatId: string, connecto
 
 export async function deleteChat(uid: string, chatId: string) {
   await deleteDoc(doc(db, "users", uid, "chats", chatId));
+}
+
+/** Adds messages without overwriting what the server (missions, calls, connector updates) posted meanwhile. */
+export async function appendChatMessages(uid: string, chatId: string, msgs: ChatMessage[]) {
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { messages: arrayUnion(...msgs) });
 }
