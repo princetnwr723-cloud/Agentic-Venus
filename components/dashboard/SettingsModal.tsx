@@ -4,6 +4,7 @@ import { useState } from "react";
 import { X, ExternalLink } from "lucide-react";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { useKeys } from "@/lib/keys-context";
+import VaultHealth from "@/components/dashboard/VaultHealth";
 
 function mask(key?: string | null) {
   if (!key) return null;
@@ -59,6 +60,7 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
         <p className="mb-5 text-xs leading-relaxed text-muted">
           Add at least one AI provider to start chatting. Keys are encrypted on the server — your browser only keeps a masked reference, so a key can&apos;t be read back, only replaced.
         </p>
+        <VaultHealth />
         {error && <p className="mb-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{error}</p>}
 
         <div className="space-y-3">
