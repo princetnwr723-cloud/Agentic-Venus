@@ -1,7 +1,6 @@
 // Server-only. Secrets are encrypted with AES-256-GCM. The ciphertext is bound to (uid, name),
 // so it can't be swapped between users or slots. The browser only ever holds "vault:..." placeholders.
-// Key: VAULT_KEY (required in production). Secrets saved earlier with a key derived from ROUTINE_RUNNER_SECRET
-// still open, and are re-encrypted with VAULT_KEY the first time they are read.
+// Key: VAULT_KEY (required in production). Keep old values in VAULT_KEY_OLD so old secrets keep opening.
 import { getAdminDb } from "@/lib/firebase-admin";
 import { docIdOf, loadKeys, seal, unseal, writeKey } from "@/lib/vault-crypto";
 
@@ -11,8 +10,16 @@ const PLACEHOLDER_RE = /^vault:([a-z0-9._:_-]{1,90})(?:#([A-Za-z0-9]{0,8}))?$/;
 
 const col = (uid: string) => getAdminDb().collection("users").doc(uid).collection("vault");
 
-// A plain boolean on purpose: as a type guard TypeScript narrows the negated branch to `never`.
 export const isPlaceholder = (v: unknown): boolean => typeof v === "string" && PLACEHOLDER_RE.test(v);
+export const placeholderName = (v: unknown): string | null => (typeof v === "string" ? PLACEHOLDER_RE.exec(v)?.[1] ?? null : null);
+
+/** The secret exists but the current server keys cannot open it. The message says WHICH one. */
+export class VaultUnreadable extends Error {
+  constructor(public secretName: string) {
+    super(`The saved secret "${secretName}" can't be opened because the server's encryption key changed. Re-enter it (API keys or Connectors).`);
+    this.name = "VaultUnreadable";
+  }
+}
 
 async function store(uid: string, name: string, value: string) {
   const s = seal(value, uid, name, writeKey());
@@ -32,10 +39,19 @@ export async function vaultGet(uid: string, name: string): Promise<string | null
   if (!snap.exists) return null;
   const d = snap.data() as { iv: string; ct: string; tag: string };
   const ring = loadKeys();
-  const { plain, keyIndex } = unseal(d, uid, name, ring.all);
-  // Opened with the old derived key while a dedicated VAULT_KEY exists: upgrade it quietly.
-  if (keyIndex > 0 && !ring.derivedOnly) await store(uid, name, plain).catch(() => {});
-  return plain;
+  let opened: { plain: string; keyIndex: number };
+  try { opened = unseal(d, uid, name, ring.all); } catch { throw new VaultUnreadable(name); }
+  // Opened with an older key while a dedicated VAULT_KEY exists: upgrade it quietly.
+  if (opened.keyIndex > 0 && !ring.derivedOnly) await store(uid, name, opened.plain).catch(() => {});
+  return opened.plain;
+}
+
+/** Health check: can this secret be opened right now? (no side effects) */
+export async function vaultCheck(uid: string, name: string): Promise<"ok" | "missing" | "unreadable"> {
+  const snap = await col(uid).doc(docIdOf(uid, name)).get();
+  if (!snap.exists) return "missing";
+  try { unseal(snap.data() as { iv: string; ct: string; tag: string }, uid, name, loadKeys().all); return "ok"; }
+  catch { return "unreadable"; }
 }
 
 export async function vaultDelete(uid: string, name: string) {
