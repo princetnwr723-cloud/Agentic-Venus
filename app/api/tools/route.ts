@@ -50,9 +50,10 @@ export async function POST(req: Request) {
     const chatRef = getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
     const stored = clean(((await chatRef.get()).data() as { connectors?: unknown } | undefined)?.connectors);
     const { connectors, broken } = await resolveConnectorsSafe(uid, stored);
+    const ctx = makeCtx(uid, chatId);
 
     if (body.action === "list") {
-      const cat = await buildCatalog(connectors);
+      const cat = await buildCatalog(connectors, ctx);
       return NextResponse.json({ ...cat, errors: [...cat.errors, ...broken.map((k) => `${k} — saved login can't be read (server key changed). Reconnect it in Connectors.`)], broken });
     }
 
@@ -62,7 +63,6 @@ export async function POST(req: Request) {
       if (owner) {
         return NextResponse.json({ ok: false, text: `The saved login for "${owner}" can't be read any more (the server's encryption key changed). Tell the user: open Connectors and press Reconnect for it.` });
       }
-      const ctx = makeCtx(uid, chatId);
       const r = await callTool(connectors, name, body.args, body.approved === true, { force: body.force === true, ctx });
       if (r.ok && r.risk === "write") {
         await audit(uid, { kind: "tool_write", chatId, text: `${name} ${JSON.stringify(body.args ?? {}).slice(0, 220)} approved=${body.approved === true} tainted=${body.force === true}` });
