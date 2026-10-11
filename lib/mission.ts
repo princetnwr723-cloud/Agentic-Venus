@@ -8,6 +8,7 @@ import { makeCtx } from "@/lib/tools/connectors";
 import { extractToolCalls, toolPrompt } from "@/lib/tools/prompt";
 import { brainText, notifyOwner } from "@/lib/channels";
 import { audit } from "@/lib/audit";
+import { learnFromRun } from "@/lib/learning";
 import type { ToolSpec } from "@/lib/tools/types";
 
 export type MissionStatus = "running" | "waiting_call" | "needs_approval" | "done" | "error" | "stopped";
@@ -89,6 +90,9 @@ async function finish(uid: string, m: Mission, status: "done" | "error" | "stopp
   const msg = `${head}: ${clip(m.goal, 140)}\n\n${clip(text, 3500)}`;
   await postToChat(uid, m.chatId, msg).catch(() => {});
   await notifyOwner(uid, m.chatId, msg, m.notify).catch(() => {});
+  if (!m.tainted && m.steps >= 4 && status !== "stopped") {
+    void learnFromRun(uid, m.chatId, { task: m.goal, outcome: text, steps: m.log.map((l) => l.text).join("\n"), verdict: status === "done" ? "pass" : "fail" });
+  }
 }
 
 /** Runs one slice (about 40 seconds) of a mission. The next slice is started automatically. */
@@ -113,7 +117,7 @@ export async function advance(uid: string, id: string, budgetMs = 40_000) {
     const agent = await loadAgent(uid, m.chatId);
     const ctx = makeCtx(uid, m.chatId);
     const specs = (await buildCatalog(agent.connectors, ctx)).specs.filter((s) => !s.name.startsWith("mission.") && !s.name.startsWith("identity."));
-    const bt = await brainText(uid, m.chatId);
+    const bt = await brainText(uid, m.chatId, m.goal);
 
     while (Date.now() - t0 < budgetMs && m.status === "running" && m.steps < m.maxSteps) {
       const live = (await ref.get()).get("status");
