@@ -3,6 +3,7 @@ import { exec } from "@/lib/e2b-server";
 import { writeFiles, type Sb } from "@/lib/venus-server";
 import { BusyError, RDIR, runnerStatus } from "@/lib/runner-server";
 import { PC_RUNNER_SOURCE, PC_RUNNER_VERSION } from "@/lib/pc-runner-script";
+import { PC_TOOLBELT_PROMPT } from "@/lib/pc-toolbelt";
 import { signJob } from "@/lib/job-token";
 
 const wsId = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "");
@@ -46,7 +47,7 @@ export async function startPcJob(
   await writeFiles(sb, {
     [`${dir}/job.json`]: JSON.stringify({
       jobId, instruction: o.task.slice(0, 9000), provider: o.provider, model: o.model, appUrl: o.appUrl,
-      token: signJob(o.uid, o.chatId, jobId), context: (o.context ?? "").slice(0, 6000),
+      token: signJob(o.uid, o.chatId, jobId), context: (PC_TOOLBELT_PROMPT + "\n\n" + (o.context ?? "")).slice(0, 9000),
       maxSteps: Math.min(200, Math.max(10, o.maxSteps ?? 90)), proof: o.proof !== false,
       session: o.session ?? null, healSnapshot: o.healSnapshot?.slice(0, 6000), startUrl: o.startUrl,
       contract: cleanContract(o.contract),
