@@ -59,6 +59,7 @@ export function toolPrompt(specs: ToolSpec[]): string {
     `phone a person → voice.call (approved first; you talk live and the summary comes back); ` +
     `tell the owner something → notify.send; ` +
     `the owner's own mail/calendar/sheets/files/CRM → the connected service above; ` +
+    `remember a lasting fact or preference → memory.save; something from earlier → recall.search; a procedure you just worked out that will repeat → skill.save (improve it later with the same name); ` +
     `anything a connected service can answer is checked with that tool, not guessed.`;
   return head + lines.join("\n") + (more > 0 ? `\n(+${more} more tools not shown)` : "") + when;
 }
