@@ -5,12 +5,15 @@ export type PluginMeta = {
 };
 
 export const FREE_PACK = {
-  label: "Free pack",
-  note: "Always on. No key, no account. Includes the verifiers that check leads, facts and links before the agent delivers them.",
-  tools: ["web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read", "verify.leads", "verify.facts", "verify.urls"],
+  label: "Built in",
+  note: "Always on. No key needed. Web, weather, wiki, currency, RSS, the verifiers (leads, facts, links), phone calls (voice.call), missions (long background jobs) and notify.send (message the owner).",
+  tools: [
+    "web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read",
+    "verify.leads", "verify.facts", "verify.urls", "voice.call ✎", "voice.calls", "mission.start ✎", "mission.status", "notify.send",
+  ],
 };
 
-// Only the tools people need most. Everything else: add an MCP server in the Custom tab.
+// Only the tools people need most. Everything else: add an MCP server in the Custom tab (search by name).
 export const PLUGINS: PluginMeta[] = [
   {
     id: "github", label: "GitHub",
@@ -26,22 +29,49 @@ export const PLUGINS: PluginMeta[] = [
     ],
   },
   {
-    id: "notion", label: "Notion",
-    note: "Search and create pages. Make a free internal integration, then share your pages with it.",
+    id: "notion", label: "Notion (token)",
+    note: "Search and create pages. Make a free internal integration, then share your pages with it. For full access use the Notion MCP server (Custom tab).",
     keysUrl: "https://www.notion.so/profile/integrations",
     fields: [{ key: "token", placeholder: "secret_… / ntn_…", secret: true }],
     tools: [{ name: "notion.search", risk: "read" }, { name: "notion.create_page", risk: "write" }],
   },
   {
-    id: "telegram", label: "Telegram",
-    note: "The agent messages YOU (reports, alerts). Free bot from @BotFather; get your chat id from @userinfobot.",
+    id: "telegram", label: "Telegram (chat with your agent)",
+    note: "Talk to this agent from Telegram AND get its reports there. Make a free bot with @BotFather, get your chat id from @userinfobot. Only your chat id can command it.",
     keysUrl: "https://t.me/BotFather",
-    fields: [{ key: "token", placeholder: "123456:ABC… (bot token)", secret: true }, { key: "chat", placeholder: "your chat id" }],
+    fields: [{ key: "token", placeholder: "123456:ABC… (bot token)", secret: true }, { key: "chat", placeholder: "your chat id (numbers)" }],
     tools: [{ name: "telegram.send", risk: "write" }],
   },
   {
+    id: "whatsapp", label: "WhatsApp (via Twilio)",
+    note: "Chat with your agent on WhatsApp and get reports there. Uses the Twilio account from the Voice page. Only your number can command it. Start with the free Twilio WhatsApp sandbox (+14155238886).",
+    keysUrl: "https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn",
+    fields: [{ key: "owner", placeholder: "YOUR WhatsApp number, e.g. +919876543210" }, { key: "from", placeholder: "Twilio WhatsApp number, e.g. +14155238886 (sandbox)" }],
+    tools: [{ name: "whatsapp.send", risk: "write" }],
+  },
+  {
+    id: "sms", label: "SMS (via Twilio)",
+    note: "Text your agent and get reports by SMS. Uses the Twilio account from the Voice page. Only your number can command it.",
+    fields: [{ key: "owner", placeholder: "YOUR mobile number, e.g. +919876543210" }, { key: "from", placeholder: "Your Twilio number, e.g. +12025550123" }],
+    tools: [{ name: "sms.send", risk: "write" }],
+  },
+  {
+    id: "slackbot", label: "Slack (chat with your agent)",
+    note: "DM your agent in Slack. Create a Slack app (bot scopes chat:write, im:history, im:read; subscribe to message.im), install it, then paste the bot token, the signing secret and your own member ID.",
+    keysUrl: "https://api.slack.com/apps",
+    fields: [{ key: "bot", placeholder: "Bot token xoxb-…", secret: true }, { key: "signing", placeholder: "Signing secret", secret: true }, { key: "owner", placeholder: "Your Slack member ID (U0123…)" }],
+    tools: [{ name: "slackbot.send", risk: "write" }],
+  },
+  {
+    id: "email", label: "Email (Resend)",
+    note: "The agent can email you its reports and send emails. Free key at resend.com. 'From' can be onboarding@resend.dev while testing (then it can only email your own address).",
+    keysUrl: "https://resend.com/api-keys",
+    fields: [{ key: "key", placeholder: "re_… (Resend API key)", secret: true }, { key: "from", placeholder: "Agent <onboarding@resend.dev>" }, { key: "to", placeholder: "Your email (reports go here)" }],
+    tools: [{ name: "email.send", risk: "write" }],
+  },
+  {
     id: "webhook", label: "Slack / Discord webhook",
-    note: "Post to a channel with a free incoming-webhook URL.",
+    note: "Post a message to a channel with a free incoming-webhook URL.",
     fields: [{ key: "url", placeholder: "https://hooks.slack.com/… or https://discord.com/api/webhooks/…", secret: true }],
     tools: [{ name: "webhook.send", risk: "write" }],
   },
