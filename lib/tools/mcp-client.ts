@@ -6,12 +6,18 @@ export type McpTool = {
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 };
 
+/** The server answered 401: it wants a sign-in (OAuth). `resourceMetadata` is the URL it points to, if any. */
+export class McpAuthError extends Error {
+  constructor(message: string, public resourceMetadata?: string) { super(message); this.name = "McpAuthError"; }
+}
+
 function authHeaders(auth?: string): Record<string, string> {
   const a = (auth ?? "").trim();
   if (!a) return {};
+  if (/^bearer\s/i.test(a)) return { Authorization: a };
   const m = /^([A-Za-z0-9-]+):\s*(.+)$/.exec(a); // "X-Api-Key: abc" style
   if (m) return { [m[1]]: m[2] };
-  return { Authorization: /^bearer\s/i.test(a) ? a : `Bearer ${a}` };
+  return { Authorization: `Bearer ${a}` };
 }
 
 // Every hop goes through safeFetch: the host is resolved and checked, redirects can't lead into a private network.
@@ -22,6 +28,10 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
     body: JSON.stringify(body),
   }, 25_000);
   const text = await res.text();
+  if (res.status === 401) {
+    const rm = /resource_metadata="([^"]+)"/i.exec(res.headers.get("www-authenticate") ?? "")?.[1];
+    throw new McpAuthError("MCP server answered 401: sign-in required.", rm);
+  }
   if (!res.ok && res.status !== 202) throw new Error(`MCP server answered ${res.status}: ${text.slice(0, 200)}`);
   return { sid: res.headers.get("mcp-session-id") ?? session ?? undefined, ct: res.headers.get("content-type") ?? "", text };
 }
@@ -51,7 +61,7 @@ async function open(url: string, auth?: string) {
   });
   const r = parseRpc(init.ct, init.text, 1);
   if (!r || r.error) throw new Error(`MCP initialize failed: ${r?.error?.message ?? "no answer (this must be a Streamable-HTTP MCP URL)"}`);
-  await post(url, headers, { jsonrpc: "2.0", method: "notifications/initialized" }, init.sid).catch(() => {});
+  await post(url, headers, { jsonrpc: "2.0", method: "notifications/initialized" }, init.sid).catch((e) => { if (e instanceof McpAuthError) throw e; });
   let n = 1;
   return async (method: string, params?: unknown) => {
     const id = ++n;
