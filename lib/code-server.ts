@@ -1,6 +1,7 @@
 // Server-only. Venus Code tools run inside the CHAT'S COMPUTER (its E2B desktop sandbox) — no separate server.
 import { connect, exec, openUrl } from "@/lib/e2b-server";
 import { startJob, writeBinary } from "@/lib/venus-server";
+import { PC_SETUP_VERSION, pcSetupScript } from "@/lib/pc-toolbelt";
 import type { ToolCall } from "@/lib/code-prompts";
 
 export type Sb = Awaited<ReturnType<typeof connect>>;
@@ -30,27 +31,9 @@ export function resolvePath(ws: string, p: string): string {
 
 export type ToolResult = { text: string; mutated?: boolean; image?: { mediaType: string; data: string } };
 
-const CODE_VERSION = "3";
-export const CODE_SETUP_SCRIPT = `set -e
-export DEBIAN_FRONTEND=noninteractive
-echo 'DPkg::Lock::Timeout "900";' | sudo tee /etc/apt/apt.conf.d/99locktimeout >/dev/null
-echo "== [1/3] system packages"
-sudo apt-get update -y || true
-sudo apt-get install -y git ripgrep zip unzip jq build-essential python3-pip curl ca-certificates
-echo "== [2/3] Node.js"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-  sudo apt-get install -y nodejs
-fi
-node -v
-echo "== [3/3] folders"
-mkdir -p "$HOME/.npm-global" /home/user/work ${ASSETS}
-npm config set prefix "$HOME/.npm-global"
-grep -q npm-global ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
-echo ${CODE_VERSION} > /home/user/.code-version
-touch /home/user/.code-ready
-echo "CODE TOOLS READY"
-`;
+// One shared setup for every computer: the full toolbelt (Office, Python libs, ffmpeg, ...). Bumping the version re-runs it on old computers.
+const CODE_VERSION = PC_SETUP_VERSION;
+export const CODE_SETUP_SCRIPT = pcSetupScript(ASSETS);
 
 export async function codeState(sb: Sb): Promise<{ state: "none" | "installing" | "ready" | "failed"; log: string }> {
   const r = await exec(
