@@ -3,9 +3,10 @@
 // gets numbered elements), a real terminal window, real mouse/keyboard. The user watches it in the panel.
 // v4: contract + verification engine. A list is only delivered when it is INDEPENDENTLY verified.
 // v5: vPassword (logins, 2FA, cards, saved sessions the model never sees), shell/proc guard, token kept in memory only.
+// v7: stronger browser automation (select/check/hover/upload/tabs/downloads, cookie banners, dialogs, smarter click/type).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const PC_RUNNER_VERSION = "6";
+export const PC_RUNNER_VERSION = "7";
 
 export const PC_RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -262,11 +263,12 @@ async function ensureBrowser() {
   browser = await pw.chromium.connectOverCDP("http://127.0.0.1:9222");
   return browser;
 }
+let activeTab = -1;
 async function getPage() {
   const b = await ensureBrowser();
   const ctx = b.contexts()[0] || (await b.newContext());
   const pages = ctx.pages().filter((p) => p.url().indexOf("devtools://") !== 0);
-  const page = pages[pages.length - 1] || (await ctx.newPage());
+  const page = (activeTab >= 0 && activeTab < pages.length ? pages[activeTab] : pages[pages.length - 1]) || (await ctx.newPage());
   page.setDefaultTimeout(8000);
   await page.bringToFront().catch(() => {});
   return page;
@@ -274,10 +276,10 @@ async function getPage() {
 async function tagAll(page) {
   const items = await page.evaluate(function () {
     document.querySelectorAll("[data-av]").forEach(function (e) { e.removeAttribute("data-av"); });
-    var sel = 'a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link],[role=tab],[onclick]';
+    var sel = 'a[href],button,input:not([type=hidden]),textarea,select,summary,[contenteditable=true],[role=button],[role=link],[role=tab],[role=menuitem],[role=option],[role=checkbox],[role=radio],[role=switch],[onclick]';
     var out = [], n = 0, els = Array.from(document.querySelectorAll(sel));
     for (var k = 0; k < els.length; k++) {
-      if (n >= 70) break;
+      if (n >= 100) break;
       var el = els[k], r = el.getBoundingClientRect(), st = getComputedStyle(el);
       if (r.width < 2 || r.height < 2 || st.visibility === "hidden" || st.display === "none") continue;
       el.setAttribute("data-av", String(n));
@@ -325,62 +327,193 @@ async function noteIdentity(text, url) {
   await api("/api/identity", {action: "log", kind: "used", site: site || "unknown", text: "The agent typed its own email address here."});
 }
 let credSite = "";
+const wired = new WeakSet();
+let dlSet = false;
+async function wirePage(page) {
+  if (!wired.has(page)) {
+    wired.add(page);
+    page.on("dialog", (d) => { d.accept().catch(() => {}); });
+  }
+  if (!dlSet && browser) {
+    dlSet = true;
+    try {
+      fs.mkdirSync("/home/user/Downloads", {recursive: true});
+      const s = await browser.newBrowserCDPSession();
+      await s.send("Browser.setDownloadBehavior", {behavior: "allow", downloadPath: "/home/user/Downloads"});
+    } catch (e) {}
+  }
+}
+async function settle(page) {
+  await page.waitForLoadState("domcontentloaded", {timeout: 6000}).catch(() => {});
+  await page.waitForLoadState("networkidle", {timeout: 2500}).catch(() => {});
+}
+async function dismissBanners(page) {
+  try {
+    await page.evaluate(function () {
+      var re = /^(accept all|accept all cookies|accept cookies|accept|i agree|agree|allow all|allow all cookies|got it|ok|okay|agree and continue)$/i;
+      var ctxRe = /cookie|consent|gdpr|privacy|onetrust|cmp/i;
+      var btns = Array.from(document.querySelectorAll("button,a[role=button],[role=button]"));
+      for (var i = 0; i < btns.length; i++) {
+        var b = btns[i], t = (b.innerText || "").replace(/\s+/g, " ").trim();
+        if (!re.test(t)) continue;
+        var p = b, hit = false;
+        for (var k = 0; k < 6 && p; k++) {
+          var cls = p.className && p.className.toString ? p.className.toString() : "";
+          if (ctxRe.test((p.id || "") + " " + cls)) { hit = true; break; }
+          p = p.parentElement;
+        }
+        if (hit) { b.click(); return true; }
+      }
+      return false;
+    });
+  } catch (e) {}
+}
+async function smartClick(loc) {
+  try { await loc.click({timeout: 5000}); return; } catch (e1) {}
+  try { await loc.scrollIntoViewIfNeeded({timeout: 2000}); await loc.click({timeout: 4000, force: true}); return; } catch (e2) {}
+  await loc.evaluate(function (el) { el.click(); });
+}
+async function smartType(loc, page, text) {
+  try { await loc.fill(text, {timeout: 5000}); return; } catch (e1) {}
+  await loc.click({timeout: 4000, force: true});
+  await page.keyboard.press("Control+A");
+  await page.keyboard.type(text, {delay: 15});
+}
+function listPages(page) {
+  return page.context().pages().filter((p) => p.url().indexOf("devtools://") !== 0);
+}
+function tabsLine(page) {
+  try {
+    const pages = listPages(page);
+    if (pages.length < 2) return "";
+    return "TABS: " + pages.map((p, i) => i + (p === page ? "*" : "") + " " + p.url().slice(0, 60)).join(" | ");
+  } catch (e) { return ""; }
+}
 async function browse(a, ops) {
-  const page = await getPage();
+  let page = await getPage();
+  await wirePage(page);
   if (a.url) {
     const u = /^https?:\/\//i.test(String(a.url)) ? String(a.url) : "https://" + a.url;
     await restoreSession(page.context(), u);
     await page.goto(u, {waitUntil: "domcontentloaded", timeout: 25000});
-    await page.waitForTimeout(900);
+    await settle(page);
+    await dismissBanners(page);
   }
-  const items = (await tagAll(page)).items;
+  let items = (await tagAll(page)).items;
   const log = [];
-  for (const op of ops.slice(0, 12)) {
+  for (const op of ops.slice(0, 14)) {
     try {
       const before = page.url();
       const mark = async (loc) => { await loc.evaluate(function (e) { e.style.outline = "3px solid #E7B24D"; }).catch(() => {}); };
-      const pick = (o) => (o.op.slice(-6) === "_label" ? resolveLabel(items, o) : o.id);
-      if (op.op === "click" || op.op === "click_label") {
-        const loc = page.locator('[data-av="' + Number(pick(op)) + '"]').first();
-        await mark(loc); await page.waitForTimeout(250);
-        await loc.click({timeout: 6000});
-        log.push(op.op === "click" ? "clicked [" + op.id + "]" : 'clicked "' + op.label + '"');
-        await page.waitForTimeout(1200);
+      const pick = (o) => (String(o.op).slice(-6) === "_label" ? resolveLabel(items, o) : o.id);
+      const el = () => page.locator('[data-av="' + Number(pick(op)) + '"]').first();
+      const kind = String(op.op);
+      if (kind === "click" || kind === "click_label") {
+        const l = el();
+        await mark(l); await page.waitForTimeout(200);
+        await smartClick(l);
+        log.push(kind === "click" ? "clicked [" + op.id + "]" : 'clicked "' + op.label + '"');
+        await settle(page);
         if (page.url() !== before) { log.push("page changed - remaining actions skipped, look at the new page below"); break; }
-      } else if (op.op === "type" || op.op === "type_label") {
-        const loc = page.locator('[data-av="' + Number(pick(op)) + '"]').first();
-        await mark(loc);
-        await loc.fill(String(op.text || ""), {timeout: 6000});
-        log.push(op.op === "type" ? "typed into [" + op.id + "]" : 'typed into "' + op.label + '"');
+      } else if (kind === "type" || kind === "type_label") {
+        const l = el();
+        await mark(l);
+        await smartType(l, page, String(op.text || ""));
+        log.push(kind === "type" ? "typed into [" + op.id + "]" : 'typed into "' + op.label + '"');
         await noteIdentity(op.text, page.url());
-      } else if (op.op === "secret" || op.op === "secret_label") {
+      } else if (kind === "secret" || kind === "secret_label") {
         let host = ""; try { host = new URL(page.url()).hostname; } catch (e) {}
         const c = await getCreds(credSite || host);
         if (!c) throw new Error("no saved login - use need_login first");
-        const loc = page.locator('[data-av="' + Number(pick(op)) + '"]').first();
-        await mark(loc);
-        await maskEl(loc);
-        await loc.fill(op.field === "password" ? c.password : c.email, {timeout: 6000});
+        const l = el();
+        await mark(l);
+        await maskEl(l);
+        await l.fill(op.field === "password" ? c.password : c.email, {timeout: 6000});
         log.push("filled " + op.field + " (hidden)");
-      } else if (op.op === "press") {
+      } else if (kind === "select") {
+        const l = el();
+        await l.selectOption({label: String(op.value)}, {timeout: 5000}).catch(async () => { await l.selectOption(String(op.value), {timeout: 5000}); });
+        log.push("selected " + String(op.value).slice(0, 40) + " in [" + op.id + "]");
+      } else if (kind === "check") {
+        const l = el();
+        await l.setChecked(op.checked !== false, {timeout: 5000}).catch(async () => { await smartClick(l); });
+        log.push("set checkbox [" + op.id + "]");
+      } else if (kind === "hover") {
+        await el().hover({timeout: 5000});
+        log.push("hovered [" + op.id + "]");
+        await page.waitForTimeout(500);
+      } else if (kind === "scroll_to") {
+        await el().scrollIntoViewIfNeeded({timeout: 5000});
+        log.push("scrolled to [" + op.id + "]");
+      } else if (kind === "upload") {
+        let p = String(op.path || "");
+        if (p.indexOf("~/") === 0) p = "/home/user/" + p.slice(2);
+        if (p.indexOf("/home/user/") !== 0 || p.indexOf("/home/user/runner") === 0 || !fs.existsSync(p)) throw new Error("file not found under /home/user: " + p);
+        await el().setInputFiles(p);
+        log.push("uploaded " + path.basename(p));
+      } else if (kind === "type_focus") {
+        await page.keyboard.type(String(op.text || ""), {delay: 15});
+        log.push("typed into the focused field");
+      } else if (kind === "back") {
+        await page.goBack({timeout: 8000}).catch(() => {});
+        await settle(page);
+        log.push("went back - look at the page below");
+        break;
+      } else if (kind === "wait_text") {
+        await page.getByText(String(op.text || "")).first().waitFor({timeout: Math.min(Math.max(Number(op.ms) || 8000, 1000), 20000)});
+        log.push('saw text "' + String(op.text).slice(0, 40) + '"');
+      } else if (kind === "newtab") {
+        const np = await page.context().newPage();
+        await wirePage(np);
+        activeTab = -1;
+        if (op.url) {
+          const nu = /^https?:\/\//i.test(String(op.url)) ? String(op.url) : "https://" + op.url;
+          await np.goto(nu, {waitUntil: "domcontentloaded", timeout: 25000});
+          await settle(np);
+          await dismissBanners(np);
+        }
+        page = np;
+        items = (await tagAll(page)).items;
+        log.push("opened a new tab");
+      } else if (kind === "tab") {
+        const pages = listPages(page);
+        const i = Number(op.index);
+        if (!pages[i]) throw new Error("no tab " + i);
+        activeTab = i;
+        page = pages[i];
+        await page.bringToFront().catch(() => {});
+        items = (await tagAll(page)).items;
+        log.push("switched to tab " + i);
+      } else if (kind === "closetab") {
+        await page.close().catch(() => {});
+        activeTab = -1;
+        page = await getPage();
+        items = (await tagAll(page)).items;
+        log.push("closed the tab");
+      } else if (kind === "press") {
         await page.keyboard.press(String(op.key || "Enter"));
         log.push("pressed " + op.key);
-        await page.waitForTimeout(1200);
+        await page.waitForTimeout(1000);
+        await settle(page);
         if (page.url() !== before) { log.push("page changed - remaining actions skipped"); break; }
-      } else if (op.op === "scroll") {
+      } else if (kind === "scroll") {
         await page.mouse.wheel(0, op.dir === "up" ? -700 : 700);
         log.push("scrolled " + (op.dir === "up" ? "up" : "down"));
         await page.waitForTimeout(400);
-      } else if (op.op === "wait") {
+      } else if (kind === "wait") {
         await page.waitForTimeout(Math.min(Math.max(Number(op.ms) || 1000, 200), 4000));
         log.push("waited");
+      } else {
+        log.push("unknown op " + kind);
       }
     } catch (e) {
-      log.push("FAILED " + op.op + ": " + String(e && e.message ? e.message : e).split("\n")[0].slice(0, 120));
+      log.push("FAILED " + op.op + ": " + String(e && e.message ? e.message : e).split("\n")[0].slice(0, 140));
       break;
     }
   }
-  return snapshot(page, log);
+  const snap = await snapshot(page, log);
+  const tl = tabsLine(page);
+  return tl ? snap + "\n" + tl : snap;
 }
 async function pageText(a) {
   const page = await getPage();
