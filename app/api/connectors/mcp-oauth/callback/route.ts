@@ -4,6 +4,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { resolveValue, vaultPut } from "@/lib/vault";
 import { appBaseUrl } from "@/lib/voice-server";
 import { exchangeCode } from "@/lib/tools/mcp-oauth";
+import { syncConnectorAnnouncements } from "@/lib/connector-announce";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -51,6 +52,7 @@ export async function GET(req: Request) {
     const kind = `mcp:${s.name}`;
     const placeholder = await vaultPut(uid, `conn.${s.chatId.toLowerCase()}.${kind}`, JSON.stringify({ url: s.url, oauth }));
     await chatRef.update({ [`connectors.${kind}`]: placeholder });
+    await syncConnectorAnnouncements(uid, s.chatId, { added: [kind] }).catch(() => {});
     return back(req, true, `${s.name} connected.`, { provider: s.name, chatId: s.chatId });
   } catch (e) {
     return back(req, false, e instanceof Error ? e.message : "Sign-in failed.");
