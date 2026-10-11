@@ -1,10 +1,11 @@
 import { getAdminDb } from "@/lib/firebase-admin";
 import { getResolvedVoiceSecrets, verifyVoiceToken, verifyTwilioSignature, voiceSafeError } from "@/lib/voice-server";
 import { finalizeCall } from "@/lib/voice-calls";
+import { resumeMissionForCall } from "@/lib/mission";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 const DONE = ["completed", "busy", "failed", "no-answer", "canceled"];
 
 export async function POST(req: Request) {
@@ -24,7 +25,8 @@ export async function POST(req: Request) {
     await ref.set({ status, durationSeconds: duration, updatedAt: Date.now(), ...(status === "completed" ? { completedAt: Date.now() } : {}) }, { merge: true });
     if (DONE.includes(status)) {
       await audit(claims.uid, { kind: "voice_call_status", text: `Call ${claims.callId}: ${status}, ${duration}s` });
-      await finalizeCall(claims.uid, claims.callId); // summary + follow-ups go into the chat
+      await finalizeCall(claims.uid, claims.callId);               // summary + follow-ups go into the chat
+      await resumeMissionForCall(claims.uid, claims.callId);       // a mission waiting for this call continues with the next one
     }
     return new Response("ok", { status: 200 });
   } catch (e) { return new Response(voiceSafeError(e), { status: 500 }); }
