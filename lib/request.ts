@@ -53,6 +53,8 @@ async function readBoundedText(req: Request, maxBytes: number): Promise<string> 
  * - Enforces a hard body-size limit before parsing.
  * - Rejects malformed JSON and non-object payloads.
  * - Forces uid to the verified identity and resolves vault references server-side.
+ * - FALLBACK provider keys are resolved one by one: a fallback key that can no longer be opened is dropped,
+ *   it never breaks the whole request (the main key still fails loudly, with its name).
  */
 export async function readBody(req: Request, opts: { allowJob?: boolean; maxBytes?: number } = {}): Promise<any> {
   const rawText = await readBoundedText(req, opts.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
@@ -74,7 +76,18 @@ export async function readBody(req: Request, opts: { allowJob?: boolean; maxByte
     throw new RequestError(message, status);
   }
   if (auth.job && !opts.allowJob) throw new RequestError("Background-job tokens are not accepted on this endpoint.", 403);
-  const body = await resolveDeep(auth.uid, input) as Record<string, any>;
+
+  const fallbacks = Array.isArray(input.fallbacks) ? (input.fallbacks as unknown[]) : null;
+  const rest: Record<string, unknown> = { ...input };
+  if (fallbacks) delete rest.fallbacks;
+  const body = (await resolveDeep(auth.uid, rest)) as Record<string, any>;
+  if (fallbacks) {
+    const usable: unknown[] = [];
+    for (const f of fallbacks.slice(0, 3)) {
+      try { usable.push(await resolveDeep(auth.uid, f)); } catch { /* unreadable fallback key: skipped */ }
+    }
+    body.fallbacks = usable;
+  }
   body.uid = auth.uid;
   if (auth.job && auth.chatId) body.chatId = auth.chatId;
   return body;
