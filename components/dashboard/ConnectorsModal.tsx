@@ -30,6 +30,19 @@ export default function ConnectorsModal({
   const [hits, setHits] = useState<Hit[]>([]);
   const [searching, setSearching] = useState(false);
   const [toks, setToks] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState<{ broken: string[]; accounts: Record<string, string> }>({ broken: [], accounts: {} });
+  const [hint, setHint] = useState("");
+
+  async function callStatus(sync: boolean) {
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/connectors/status", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ chatId, sync }) });
+      const d = await res.json();
+      if (res.ok) setStatus({ broken: d.broken ?? [], accounts: d.accounts ?? {} });
+    } catch { /* the window still works without it */ }
+  }
+  useEffect(() => { if (open) void callStatus(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [open, chatId, connectors]);
+  const close = () => { void callStatus(true); onClose(); }; // posts "Agent updated" in the chat if something changed
 
   // MCP search: type a tool's name, a Connect button appears.
   useEffect(() => {
@@ -60,7 +73,7 @@ export default function ConnectorsModal({
   async function startOAuth(provider: string) {
     setBusy(provider); say(provider, "");
     try {
-      const { res, data } = await authedPost("/api/connectors/oauth/start", { provider, chatId });
+      const { res, data } = await authedPost("/api/connectors/oauth/start", { provider, chatId, hint: hint.trim() || undefined });
       if (!res.ok || !data.url) throw new Error(data.error || "Could not start OAuth.");
       window.location.assign(data.url);
     } catch (e) { say(provider, e instanceof Error ? e.message : "OAuth could not start."); setBusy(null); }
@@ -83,6 +96,7 @@ export default function ConnectorsModal({
     try { r = await onTest(kind, token); } catch { r = { ok: false, error: "Could not check it." }; }
     if (r.ok) {
       await onSave(kind, token);
+      await callStatus(true);
       say(id, r.label ? `Connected · ${r.label}` : "Connected. The agent can use it now.");
     } else if (r.needsOAuth && kind.startsWith("mcp:")) {
       let url = "";
@@ -118,11 +132,11 @@ export default function ConnectorsModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4" onClick={close}>
       <div className="max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-xl2 border border-line bg-panel p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-medium text-ink">Connectors · {chatName}</h2>
-          <button onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
+          <button onClick={close} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
         <div className="mb-4 flex rounded-full border border-line bg-panel2 p-1 text-xs">
           {([["plugins", "Plugins & chat apps"], ["custom", "Custom · MCP / API"]] as const).map(([k, l]) => (
@@ -142,6 +156,8 @@ export default function ConnectorsModal({
             <div className="rounded-lg border border-line p-3">
               <div className="mb-1 flex items-center justify-between"><span className="text-sm font-medium text-ink">OAuth apps</span><span className="text-[10px] text-muted">Official authorization</span></div>
               <p className="mb-3 text-[11px] leading-relaxed text-muted">Connect without pasting your password or token. Each provider needs its app credentials set by the site owner in Vercel. After scopes change, press Reconnect.</p>
+              <input className={box + " mb-2"} placeholder="Account to use, e.g. you@gmail.com (optional but recommended)" value={hint} onChange={(e) => setHint(e.target.value)} />
+              {status.broken.length > 0 && <p className="mb-2 rounded-md border border-red-900/60 bg-red-950/30 p-2 text-[11px] text-red-200">These connections can&apos;t be opened any more: <b>{status.broken.join(", ")}</b>. Press Reconnect, or Disconnect and connect again.</p>}
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {OAUTH_PROVIDERS.map((p) => {
                   const on = Boolean(connectors[`oauth:${p.id}`]);
@@ -149,7 +165,7 @@ export default function ConnectorsModal({
                     <div key={p.id} className="rounded-md border border-line p-2">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs text-ink">{p.label}</span>
-                        {on ? <span className="text-[10px] text-avatar-teal">Connected</span> : <button disabled={busy === p.id} onClick={() => void startOAuth(p.id)} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-bg disabled:opacity-50">{busy === p.id ? "Opening…" : "Connect"}</button>}
+                        {on ? <span className="text-[10px] text-avatar-teal">{status.broken.includes(`oauth:${p.id}`) ? "Needs reconnect" : `Connected${status.accounts[p.id] ? " as " + status.accounts[p.id] : ""}`}</span> : <button disabled={busy === p.id} onClick={() => void startOAuth(p.id)} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-bg disabled:opacity-50">{busy === p.id ? "Opening…" : "Connect"}</button>}
                       </div>
                       <p className="mt-1 text-[10px] leading-relaxed text-muted">{p.note}</p>
                       {on && (
