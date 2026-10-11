@@ -52,12 +52,9 @@ export async function defaultChatId(uid: string): Promise<string> {
   return q.docs[0]?.id ?? "";
 }
 
-async function brain(uid: string, chatId: string) {
-  const snap = await userRef(uid).collection("chats").doc(chatId).collection("brain").doc("memories").get();
-  const items = ((snap.data() as { items?: Array<{ text: string; kind?: string }> } | undefined)?.items ?? []);
-  const role = items.find((i) => i.kind === "role")?.text ?? "";
-  const mem = items.filter((i) => i.kind !== "role").slice(-15).map((i) => `- ${i.text}`).join("\n");
-  return { role, mem };
+async function brain(uid: string, chatId: string, query = "") {
+  const { brainContext } = await import("@/lib/learning");
+  return brainContext(uid, chatId, query);
 }
 
 export type CallDoc = {
@@ -68,7 +65,7 @@ export type CallDoc = {
 };
 
 export async function voicePrompt(uid: string, agent: Agent, call: CallDoc, s: VoiceSettings): Promise<string> {
-  const { role, mem } = await brain(uid, agent.chatId);
+  const { role, mem } = await brain(uid, agent.chatId, call.goal || "");
   const lang = s.language ?? "en-US";
   return [
     `You are ${agent.name}, an AI teammate, now on a live PHONE CALL. You are speaking, not writing.`,
@@ -187,9 +184,19 @@ export async function openingLine(uid: string, callId: string): Promise<string> 
   return text;
 }
 
+/** Turns "98765 43210", "09876543210" or "0091..." into +91... (a 10-digit number gets the default country code). */
+export function normalizePhone(raw: string, defaultCode = "91"): string {
+  let s = raw.trim().replace(/[\s().-]/g, "");
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  if (s.startsWith("+")) return s;
+  if (/^0\d{10}$/.test(s)) return "+" + defaultCode + s.slice(1);
+  if (/^\d{10}$/.test(s)) return "+" + defaultCode + s;
+  return "+" + s;
+}
+
 export async function placeOutboundCall(uid: string, p: { to: string; goal?: string; context?: string; chatId?: string; approved: boolean; req?: Request }) {
-  const to = String(p.to || "").trim();
-  if (!/^\+[1-9]\d{5,14}$/.test(to)) throw new VoiceError("Number international format me do, jaise +919876543210.");
+  const to = normalizePhone(String(p.to || ""));
+  if (!/^\+[1-9]\d{5,14}$/.test(to)) throw new VoiceError("That number looks wrong. Use international format, e.g. +919876543210 (a 10-digit Indian number also works).");
   const sec = await getResolvedVoiceSecrets(uid);
   const st = sec.settings;
   if (!st.outboundEnabled) throw new VoiceError("Outgoing calls band hain. Voice page par Twilio connect karo.");
