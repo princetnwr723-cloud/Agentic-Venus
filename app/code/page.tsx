@@ -38,6 +38,7 @@ function DiffBox({ lines }: { lines: NonNullable<CodeProject["log"][number]["lin
 }
 
 type Live = { state: "idle" | "starting" | "ready" | "failed"; url: string | null; log: string };
+type Tab = "preview" | "files" | "terminal" | "checkpoints" | "repo";
 
 export default function CodePage() {
   const { user, loading } = useAuth();
@@ -46,7 +47,7 @@ export default function CodePage() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
   const [proj, setProj] = useState<CodeProject | null>(null);
-  const [tab, setTab] = useState<"preview" | "files" | "terminal" | "checkpoints">("preview");
+  const [tab, setTab] = useState<Tab>("preview");
   const [tree, setTree] = useState<string[]>([]);
   const [file, setFile] = useState<{ path: string; content: string } | null>(null);
   const [checks, setChecks] = useState<Array<{ sha: string; when: string; msg: string }>>([]);
@@ -58,6 +59,12 @@ export default function CodePage() {
   const [zipUrl, setZipUrl] = useState("");
   const [err, setErr] = useState("");
   const [full, setFull] = useState(false);
+  const [repoIn, setRepoIn] = useState("");
+  const [repoBranch, setRepoBranch] = useState("");
+  const [pushMsg, setPushMsg] = useState("");
+  const [pushDirect, setPushDirect] = useState(false);
+  const [repoBusy, setRepoBusy] = useState<string | null>(null);
+  const [repoOut, setRepoOut] = useState<{ ok: boolean; text: string; links?: Array<{ label: string; href: string }> } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
 
@@ -65,6 +72,7 @@ export default function CodePage() {
   // The dashboard runs code on the chat's computer; older chats may have a separate "code" computer.
   const sandboxId =
     (chat as unknown as { computers?: Record<string, string> } | null)?.computers?.code ?? chat?.pcSandboxId ?? null;
+  const repo = chat?.repo ?? null;
 
   useEffect(() => { if (!loading && !user) router.replace("/"); }, [loading, user, router]);
   useEffect(() => {
@@ -76,7 +84,7 @@ export default function CodePage() {
     });
   }, [user]);
 
-  // keep the chat's computer id fresh (it is created after this page may have loaded)
+  // keep the chat's computer id (and cloned repo) fresh: they are created after this page may have loaded
   useEffect(() => {
     if (!user || !chatId) return;
     return onSnapshot(doc(db, "users", user.uid, "chats", chatId), (s) => {
@@ -88,7 +96,7 @@ export default function CodePage() {
 
   useEffect(() => {
     if (!user || !chatId) return;
-    setProj(null); setTree([]); setFile(null); setChecks([]); setPage(null); setEntry(""); setZipUrl("");
+    setProj(null); setTree([]); setFile(null); setChecks([]); setPage(null); setEntry(""); setZipUrl(""); setRepoOut(null);
     setLive({ state: "idle", url: null, log: "" });
     return watchCodeProject(user.uid, chatId, setProj);
   }, [user, chatId]);
@@ -207,6 +215,46 @@ export default function CodePage() {
     setZipUrl((await wsCall(e, "backup", { sandboxId, ws: chatId })).url);
   }
 
+  // ---- GitHub repository: clone into this workspace, push all changes back ----
+  async function repoCall(action: "clone" | "push" | "status", extra: Record<string, unknown>) {
+    const res = await fetch("/api/code/repo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ws: chatId, ...extra }) });
+    const text = await res.text();
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = { error: `Server returned ${res.status}` }; }
+    if (!res.ok) throw new Error(data?.error || "Repository request failed.");
+    return data;
+  }
+  async function doClone() {
+    if (!repoIn.trim() || repoBusy) return;
+    setRepoBusy("clone"); setRepoOut(null);
+    try {
+      const d = await repoCall("clone", { repo: repoIn.trim(), branch: repoBranch.trim() || undefined });
+      setRepoOut({ ok: true, text: `Cloned ${d.repo} (branch ${d.branch}, ${d.files} files). The files are in this workspace now.${d.backup ? `\nThe old workspace was kept at ${d.backup}.` : ""}` });
+      setTab("files");
+      setTimeout(() => { void refreshSide(); void refreshPreview(); }, 1500);
+    } catch (x) { setRepoOut({ ok: false, text: x instanceof Error ? x.message : "Clone failed." }); }
+    setRepoBusy(null);
+  }
+  async function doPush() {
+    if (repoBusy) return;
+    setRepoBusy("push"); setRepoOut(null);
+    try {
+      const d = await repoCall("push", { message: pushMsg.trim() || undefined, direct: pushDirect, branch: repoBranch.trim() || undefined });
+      setRepoOut({ ok: true, text: d.note, links: [{ label: "Open the branch on GitHub", href: d.url }, ...(d.compareUrl ? [{ label: "Open a pull request", href: d.compareUrl }] : [])] });
+      void refreshSide();
+    } catch (x) { setRepoOut({ ok: false, text: x instanceof Error ? x.message : "Push failed." }); }
+    setRepoBusy(null);
+  }
+  async function doStatus() {
+    if (repoBusy) return;
+    setRepoBusy("status"); setRepoOut(null);
+    try {
+      const d = await repoCall("status", {});
+      setRepoOut({ ok: true, text: d.cloned ? `${d.repo} · branch ${d.branch} · ${d.files} files · ${d.dirty} changed file(s) not pushed yet${d.last ? `\nLast commit: ${d.last}` : ""}${d.changes ? `\n\n${d.changes}` : ""}` : `No repository is cloned in this workspace.${d.note ? " " + d.note : ""}` });
+    } catch (x) { setRepoOut({ ok: false, text: x instanceof Error ? x.message : "Status failed." }); }
+    setRepoBusy(null);
+  }
+
   if (!user) return <div className="flex h-screen items-center justify-center bg-bg text-sm text-muted">Loading…</div>;
 
   const log = proj?.log ?? [];
@@ -214,6 +262,7 @@ export default function CodePage() {
   const term = log.filter((e) => e.kind === "term");
   const devW = device === "mobile" ? 390 : device === "tablet" ? 768 : undefined;
   const frameCls = `mx-auto rounded-md border border-line bg-white ${full ? "h-[calc(100vh-24px)]" : "h-full min-h-[420px]"}`;
+  const inp = "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold focus:outline-none";
 
   return (
     <div className="flex h-screen bg-bg">
@@ -228,6 +277,7 @@ export default function CodePage() {
             <span className="min-w-0 truncate text-sm text-ink">{chat.agentName}</span>
           </div>
         )}
+        {repo && <p className="px-4 pb-2 text-[11px] text-avatar-teal">Repo: {repo.owner}/{repo.name} · {repo.branch}</p>}
         <p className="px-4 text-[11px] leading-relaxed text-faint">Only this chat&apos;s codespace. Ask for code in the chat — this page shows the work live. The agent runs inside the computer, so it keeps working even if you close this tab.</p>
       </aside>
 
@@ -256,7 +306,7 @@ export default function CodePage() {
                     </div>
                     <div className="space-y-2 text-xs md:border-l md:border-line md:pl-4">
                       <p className="font-semibold text-gold">How to use</p>
-                      <p className="text-muted">Just ask in the chat — for example <b className="text-ink">build me a landing page</b>. The agent decides itself when coding is needed.</p>
+                      <p className="text-muted">Just ask in the chat — for example <b className="text-ink">build me a landing page</b>, or <b className="text-ink">/clone owner/name</b> to bring a GitHub repo here and <b className="text-ink">push all changes</b> when you are done.</p>
                       <p className="border-t border-line pt-2 font-semibold text-gold">Recent activity</p>
                       <p className="whitespace-pre-wrap text-muted">{proj?.ctx ? proj.ctx.trim().split("\n").slice(-3).join("\n") : "No recent activity"}</p>
                     </div>
@@ -284,12 +334,12 @@ export default function CodePage() {
 
             <aside className="flex w-[46%] min-w-[340px] flex-col p-3">
               <div className="flex gap-1 pb-2">
-                {(["preview", "files", "terminal", "checkpoints"] as const).map((t) => <button key={t} onClick={() => setTab(t)} className={`rounded-md px-3 py-1 text-xs capitalize ${tab === t ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{t}</button>)}
+                {(["preview", "files", "terminal", "checkpoints", "repo"] as const).map((t) => <button key={t} onClick={() => setTab(t)} className={`rounded-md px-3 py-1 text-xs capitalize ${tab === t ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{t}</button>)}
                 <button onClick={() => { refreshSide(); if (mode === "static") refreshPreview(); }} className="ml-auto text-muted hover:text-ink"><RefreshCw size={13} /></button>
               </div>
               <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-panel">
-                {!e2bKey && <p className="p-4 text-xs text-muted">Add your E2B key under API keys in the dashboard to see the computer.</p>}
-                {e2bKey && !sandboxId && <p className="p-4 text-xs text-muted">This chat has no computer yet. It starts automatically the first time you ask for code in the chat.</p>}
+                {tab !== "repo" && !e2bKey && <p className="p-4 text-xs text-muted">Add your E2B key under API keys in the dashboard to see the computer.</p>}
+                {tab !== "repo" && e2bKey && !sandboxId && <p className="p-4 text-xs text-muted">This chat has no computer yet. It starts automatically the first time you ask for code in the chat, or when you clone a repo (Repo tab).</p>}
                 {sandboxId && tab === "preview" && (
                   <div className="flex h-full flex-col">
                     <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs">
@@ -356,6 +406,36 @@ export default function CodePage() {
                         <button onClick={() => restore(c.sha)} title="Restore" className="text-muted hover:text-ink"><RotateCcw size={13} /></button>
                       </div>
                     ))}
+                  </div>
+                )}
+                {tab === "repo" && (
+                  <div className="h-full space-y-3 overflow-y-auto p-3 text-xs">
+                    <p className={repo ? "text-avatar-teal" : "text-muted"}>{repo ? `Cloned here: ${repo.owner}/${repo.name} · branch ${repo.branch}` : "No repository is cloned in this workspace yet."}</p>
+
+                    <div className="space-y-2 rounded-lg border border-line p-3">
+                      <p className="font-medium text-ink">Clone a GitHub repository</p>
+                      <input className={inp} placeholder="owner/name or https://github.com/owner/name" value={repoIn} onChange={(e) => setRepoIn(e.target.value)} />
+                      <input className={inp} placeholder="Branch (optional)" value={repoBranch} onChange={(e) => setRepoBranch(e.target.value)} />
+                      <button onClick={doClone} disabled={!repoIn.trim() || repoBusy !== null} className="rounded-md bg-white px-3 py-1.5 font-medium text-bg disabled:opacity-40">{repoBusy === "clone" ? "Cloning…" : "Clone into this workspace"}</button>
+                      <p className="text-[11px] leading-relaxed text-faint">Private repos use the GitHub token from Connectors. An older workspace is kept as a backup folder. The files show up under Files, and the agent can work on them.</p>
+                    </div>
+
+                    <div className="space-y-2 rounded-lg border border-line p-3">
+                      <p className="font-medium text-ink">Push all changes</p>
+                      <input className={inp} placeholder="Commit message (optional)" value={pushMsg} onChange={(e) => setPushMsg(e.target.value)} />
+                      <label className="flex items-center gap-2 text-muted"><input type="checkbox" checked={pushDirect} onChange={(e) => setPushDirect(e.target.checked)} /> Push straight to the current branch (even main). Default: a new branch venus/changes-…</label>
+                      <div className="flex gap-2">
+                        <button onClick={doPush} disabled={!repo || repoBusy !== null} className="rounded-md bg-white px-3 py-1.5 font-medium text-bg disabled:opacity-40">{repoBusy === "push" ? "Pushing…" : "Push all changes"}</button>
+                        <button onClick={doStatus} disabled={!repo || repoBusy !== null} className="rounded-md border border-line px-3 py-1.5 text-ink hover:bg-panel2 disabled:opacity-40">{repoBusy === "status" ? "Checking…" : "Status"}</button>
+                      </div>
+                    </div>
+
+                    {repoOut && (
+                      <div className={`rounded-lg border p-3 ${repoOut.ok ? "border-avatar-teal/40 text-ink" : "border-red-900/60 bg-red-950/30 text-red-200"}`}>
+                        <p className="whitespace-pre-wrap break-words">{repoOut.text}</p>
+                        {repoOut.links?.map((l) => <a key={l.href} href={l.href} target="_blank" rel="noreferrer" className="mt-1 block text-gold underline">{l.label}</a>)}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
