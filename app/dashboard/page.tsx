@@ -28,6 +28,8 @@ import { verifyResult } from "@/lib/critic";
 import { understand, type Understanding } from "@/lib/intent";
 import { describeStep, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
 import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOutcome, type PcPending } from "@/lib/pc-agent";
+import { SUGGEST_PROMPT, splitSuggestions, withNext } from "@/lib/suggest";
+import { repoFileIntent, repoIntent, type RepoIntent } from "@/lib/repo-intent";
 import type { ToolSpec } from "@/lib/tools/types";
 import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
 import {
@@ -212,6 +214,24 @@ export default function DashboardPage() {
     appendChatMessages(user.uid, chatId, msgs).catch(() => {});
   }
   const say = (chatId: string, content: string) => appendMessages(chatId, [{ role: "assistant", content, at: Date.now() }]);
+
+  // ---- Two tappable next steps under every agent reply ----
+  async function suggestNext(chat: Chat, text: string): Promise<string[]> {
+    try {
+      const raw = await Promise.race([
+        callLLM(chat, "", `Here is what an AI agent just told its owner:\n\n${text.slice(0, 1500)}\n\nWrite exactly two SHORT follow-up commands (max 8 words each) the owner could tap next, as direct commands in the owner's language. Reply with JSON only: {"next":["...","..."]}`, [], "report"),
+        new Promise<string>((_, rej) => setTimeout(() => rej(new Error("slow")), 7000)),
+      ]);
+      const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+      const j = JSON.parse(raw.slice(a, b + 1)) as { next?: unknown };
+      return (Array.isArray(j.next) ? j.next : []).map((x) => String(x).replace(/[|[\]]/g, " ").trim().slice(0, 80)).filter((x) => x.length >= 3).slice(0, 2);
+    } catch { return []; }
+  }
+  /** Posts a reply with its next-step buttons. `fixed` = suggestions we already know; otherwise a fast model writes them. */
+  async function sayNext(chat: Chat, text: string, fixed?: string[]) {
+    const next = fixed && fixed.length ? fixed : await suggestNext(chat, text);
+    say(chat.id, withNext(text, next));
+  }
 
   function patchSession(chatId: string, patch: Partial<PcSession> | ((s: PcSession) => Partial<PcSession>)) {
     const cur = sessionsRef.current[chatId] ?? EMPTY_SESSION;
@@ -590,7 +610,9 @@ export default function DashboardPage() {
         { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, provider: chat.provider, model: chat.model, chatId: chat.id, sandboxId: sid },
         hooks, project, instruction, { brain: brainOf(chat.id), persona: opts.persona }
       );
-      if (!opts.silent) say(chat.id, res.ok ? `✅ Venus Code finished.\n\n${res.summary}\n\n[Open the Code page](/code?chat=${chat.id})` : `⚠️ Venus Code stopped: ${res.summary}\n\n[Open the Code page](/code?chat=${chat.id})`);
+      if (!opts.silent) {
+        await sayNext(chat, res.ok ? `✅ Venus Code finished.\n\n${res.summary}\n\n[Open the Code page](/code?chat=${chat.id})` : `⚠️ Venus Code stopped: ${res.summary}\n\n[Open the Code page](/code?chat=${chat.id})`);
+      }
       return res.summary;
     } catch (err) {
       return out(`⚠️ Venus Code failed: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -710,9 +732,10 @@ export default function DashboardPage() {
 
     if (!opts?.quiet) {
       const at = Date.now();
+      const shown = withNext(finalText || "Finished.", await suggestNext(chat, finalText || "Finished."));
       appendMessages(chatId, logTask
-        ? [{ role: "user", content: `🖥️ Task on the computer: ${task}`, at }, { role: "assistant", content: finalText || "Finished.", at }]
-        : [{ role: "assistant", content: finalText || "Finished.", at }]);
+        ? [{ role: "user", content: `🖥️ Task on the computer: ${task}`, at }, { role: "assistant", content: shown, at }]
+        : [{ role: "assistant", content: shown, at }]);
     }
     // Quiet/background/team tasks also get the same persistence + credit-saving lifecycle.
     // Team execution keeps teamBusyRef true, so the computer is not paused between dependent steps.
@@ -765,6 +788,58 @@ export default function DashboardPage() {
     } finally { workEnd(chat.id, "recipe"); }
   }
 
+  // ---- GitHub repository: clone into Venus Code's workspace, push all changes back (direct commands, no model needed) ----
+
+  async function runRepoCommand(chat: Chat, cmd: RepoIntent) {
+    if (!user) return;
+    if (codeBusyRef.current.has(chat.id)) return say(chat.id, "Venus Code is working in this chat right now. Wait for it to finish, then try again.");
+    if (!e2bKey) return say(chat.id, "A cloned repository lives on your coding computer. Add your E2B key under API keys first.");
+    workStart(chat.id, cmd.kind === "clone" ? `Cloning ${cmd.repo}…` : "Pushing all changes to GitHub…", "repo");
+    try {
+      const res = await fetch("/api/code/repo", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cmd.kind === "clone"
+          ? { action: "clone", ws: chat.id, repo: cmd.repo, branch: cmd.branch }
+          : { action: "push", ws: chat.id, branch: cmd.branch, message: cmd.message, direct: cmd.direct }),
+      });
+      const d = await readJson(res);
+      if (!res.ok) throw new Error(d?.error || "The repository command failed.");
+      if (cmd.kind === "clone") {
+        patchChat(chat.id, { repo: { owner: d.owner, name: d.name, branch: d.branch, at: Date.now() } });
+        const msg =
+          `✅ **${d.mode === "update" ? "Updated" : "Cloned"} ${d.repo}** (branch \`${d.branch}\`, ${d.files} files) in this chat's Venus Code workspace.\n\n` +
+          `[Open it in Venus Code](/code?chat=${chat.id}) — the files are there now.${d.backup ? `\n\nYour previous workspace was kept as a backup folder: \`${d.backup}\`.` : ""}\n\n` +
+          `Tell me what to change (for example \`/code fix the failing tests\`), or just ask me to add or edit a file. When you are done, say **push all changes**.`;
+        await sayNext(chat, msg, ["/code Read the repo and explain how it is structured and how to run it", "Run the tests and fix any failures"]);
+        if (cmd.then) void runCodeFor(chat, cmd.then);
+      } else {
+        const msg = `✅ ${d.note}\n\n- [View the branch on GitHub](${d.url})${d.compareUrl ? `\n- [Open a pull request](${d.compareUrl})` : ""}`;
+        await sayNext(chat, msg, d.compareUrl ? ["Open a pull request for this branch", "Summarize what I changed in three lines"] : ["Summarize what I changed in three lines", "Show me the repo status"]);
+      }
+    } catch (err) {
+      say(chat.id, `⚠️ ${err instanceof Error ? err.message : "The repository command failed."}`);
+    } finally { workEnd(chat.id, "repo"); }
+  }
+
+  /**
+   * "Add this file to my repo" is NOT a coding task: it never starts Venus Code or the computer.
+   * Repo cloned in the workspace → repo.write_file + repo.push. Not cloned → github.put_files straight through the GitHub API.
+   */
+  async function repoHint(chat: Chat): Promise<string> {
+    let repo = "";
+    try {
+      const r = await readJson(await fetch("/api/code/repo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "info", ws: chat.id }) }));
+      if (r?.repo?.owner) repo = `${r.repo.owner}/${r.repo.name}`;
+    } catch { /* no info: treated as not cloned */ }
+    const live = chatsRef.current.find((c) => c.id === chat.id) ?? chat;
+    const hasGithub = Boolean(live.connectors?.github || live.connectors?.["oauth:github_oauth"]);
+    const noGithub = hasGithub ? "" : " GitHub is NOT connected for this chat: tell the owner to open Connectors → GitHub and paste a token with write access, then try again.";
+    if (repo) {
+      return `\n\nREPO TASK: the repository ${repo} is already cloned in the owner's workspace. Make the file change with repo.write_file (one call per file) and then repo.push. Do NOT start Venus Code and do NOT open the computer. If the owner means a DIFFERENT repository, use github.put_files for that one instead.${noGithub}`;
+    }
+    return `\n\nREPO TASK: no repository is cloned in the workspace. Make the file change DIRECTLY through the GitHub API with github.put_files (all files in ONE call). Do NOT start Venus Code, do NOT open the computer. If the owner did not name the repository (owner/name), ask which one.${noGithub}`;
+  }
+
   // ---- Venus Pro: its OWN computer (unless it needs assets the computer agent downloaded) ----
 
   async function startVenus(chat: Chat, brief: string, opts: { silent?: boolean } = {}): Promise<string> {
@@ -812,7 +887,9 @@ export default function DashboardPage() {
       }, project, "studio");
       if (final.status === "done" && final.finalPath) {
         const url = await signedUrl(env, final.finalPath, "venus-video.mp4").catch(() => "");
-        return out(`✅ Your video is ready: **${final.title}**.\n\n- [Open and edit it in Venus Pro](/venus?project=${final.id})${url ? `\n- [Download the video](${url})` : ""}`);
+        const msg = `✅ Your video is ready: **${final.title}**.\n\n- [Open and edit it in Venus Pro](/venus?project=${final.id})${url ? `\n- [Download the video](${url})` : ""}`;
+        if (!opts.silent) await sayNext(chat, msg, ["Make a shorter vertical version of it", "Write a caption and hashtags for this video"]);
+        return msg;
       }
       return out(`⚠️ The video could not be finished: ${final.error ?? "unknown error"}\n\n[Open it in Venus Pro](/venus?project=${final.id}) to retry from the failed step.`);
     } catch (err) {
@@ -873,7 +950,9 @@ export default function DashboardPage() {
       const res = await fetch("/api/deploy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ e2bKey, sandboxId: sid, ws: chat.id, vercelToken: token, name: name?.trim() || undefined }) });
       const data = await readJson(res);
       if (!res.ok) return out(`⚠️ Deploy failed: ${data?.error ?? "unknown error"}`);
-      return out(`✅ Live: [${data.url}](${data.url})${data.state && data.state !== "READY" ? `\n\nVercel is still finishing the build (${data.state}) — the link works in a minute.` : ""}`);
+      const msg = `✅ Live: [${data.url}](${data.url})${data.state && data.state !== "READY" ? `\n\nVercel is still finishing the build (${data.state}) — the link works in a minute.` : ""}`;
+      await sayNext(chat, msg);
+      return msg;
     } catch (err) {
       return out(`⚠️ Deploy failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally { workEnd(chat.id, "deploy"); if (sid) void releaseNow(e2bKey, sid); }
@@ -900,7 +979,7 @@ export default function DashboardPage() {
     say(chat.id, "👥 Chief is assembling a team for this. Open the **Team** panel (people icon) to watch who does what — I'll post one final report here.");
     try {
       const report = await runTeamGoal({ uid: user.uid, chatId: chat.id, goal, ctx: brainPrompt(brainOf(chat.id), goal, { noSkills: true }), host: teamHost(chat) });
-      say(chat.id, report);
+      await sayNext(chat, report);
     } catch (err) {
       say(chat.id, `⚠️ The team could not finish: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally { teamBusyRef.current.delete(chat.id); setTeamRun(null); workEnd(chat.id, "team"); void autoOff(chat.id); }
@@ -1020,9 +1099,13 @@ export default function DashboardPage() {
 
   // ---- Chat ----
 
-  async function handleSend(e: React.FormEvent) {
+  function handleSend(e: React.FormEvent) {
     e.preventDefault();
-    const text = draft.trim();
+    void submitText(draft.trim());
+  }
+
+  /** Used by the composer AND by the two suggestion buttons under every reply. */
+  async function submitText(text: string) {
     if (!text || !user || !activeChat || sending) return;
     const chat = activeChat;
     const video = /^\/video\s+([\s\S]+)/i.exec(text);
@@ -1032,10 +1115,11 @@ export default function DashboardPage() {
     const recipe = /^\/recipe(?:\s+([\s\S]*))?$/i.exec(text);
     const forget = /^\/forget\s+([\s\S]+)/i.exec(text);
     const remember = /^\/remember\s+([\s\S]+)/i.exec(text) ?? /^(?:please\s+)?remember(?:\s+that)?[:\s]+([\s\S]{3,})/i.exec(text);
-    const slash = Boolean(video || code || team || deploy || recipe);
+    const rIntent = repoIntent(text);
+    const slash = Boolean(video || code || team || deploy || recipe || rIntent);
     const analysis = e2bKey && !slash ? analyzePcMessage(text) : { pureCommand: null, compound: false, stopAfter: false };
     const key = apiKeys[chat.provider];
-    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !key) { setSettingsOpen(true); return; }
+    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !key) { setSettingsOpen(true); return; }
 
     const payload = attach && !slash ? `${text}\n\n📎 File: ${attach.name}\n\`\`\`\n${attach.text}\n\`\`\`` : text;
     appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now() }]);
@@ -1049,6 +1133,7 @@ export default function DashboardPage() {
     if (team) { void runTeam(chat, team[1].trim()); return; }
     if (forget) { await applyMemoryCommand(chat, `forget|${forget[1].trim()}`); return; }
     if (remember) { await applyMemoryCommand(chat, `add|${remember[1].trim()}`); return; }
+    if (rIntent) { void runRepoCommand(chat, rIntent); return; } // /clone, /push, "clone github.com/a/b", "push all changes"
 
     if (analysis.pureCommand) {
       setSending(true);
@@ -1089,22 +1174,30 @@ export default function DashboardPage() {
     workStart(chat.id, "Tools aur memory dekh raha hoon…", "chat");
     try {
       if (!brains.current[chat.id]) await loadChatBrain(chat.id);
-      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
+      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: splitSuggestions(m.content).body }));
       const specs = await loadTools(chat);
 
-      // 1) UNDERSTAND FIRST (with the chat's own model, so it cannot fail because of a helper model)
-      workSet(chat.id, "Samajh raha hoon aap kya chahte ho…", "chat");
-      const u = await understand((s, p) => callLLM(chat, s, p, [], "act"), {
-        text, recent: history.slice(0, -1), role: roleOf(chat.id), tools: specs.map((s) => s.name), hasComputer: Boolean(e2bKey),
-      });
-      traceOf(chat.id)?.add("intent", `${u.intent}: ${u.why}`);
-      workSet(chat.id, `Samajh gaya: ${INTENT_LABEL[u.intent] ?? u.intent}${u.why.startsWith("keyword") ? " (keyword se)" : ""}`, "chat");
-      if (u.intent !== "chat") { await routeIntent(chat, u, text); return; }
+      // Adding a file to a GitHub repo is not coding: skip "understand" (it could pick the computer / Venus Code) and answer with tools.
+      const repoFile = repoFileIntent(text);
+      let extraRepo = "";
+      if (repoFile) {
+        workSet(chat.id, "Checking whether the repo is cloned…", "chat");
+        extraRepo = await repoHint(chat);
+      } else {
+        // 1) UNDERSTAND FIRST (with the chat's own model, so it cannot fail because of a helper model)
+        workSet(chat.id, "Samajh raha hoon aap kya chahte ho…", "chat");
+        const u = await understand((s, p) => callLLM(chat, s, p, [], "act"), {
+          text, recent: history.slice(0, -1), role: roleOf(chat.id), tools: specs.map((s) => s.name), hasComputer: Boolean(e2bKey),
+        });
+        traceOf(chat.id)?.add("intent", `${u.intent}: ${u.why}`);
+        workSet(chat.id, `Samajh gaya: ${INTENT_LABEL[u.intent] ?? u.intent}${u.why.startsWith("keyword") ? " (keyword se)" : ""}`, "chat");
+        if (u.intent !== "chat") { await routeIntent(chat, u, text); return; }
+      }
 
       // 2) A normal answer: streaming, with the connected tools available
       const system =
         `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
-        brainPrompt(brainOf(chat.id), text) + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem;
+        brainPrompt(brainOf(chat.id), text) + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem + extraRepo + SUGGEST_PROMPT;
       const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
       const at = Date.now();
       const userPrompt = history.pop()?.content ?? text;
@@ -1117,11 +1210,11 @@ export default function DashboardPage() {
 
       let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
       let tainted = false;
-      for (let round = 0; round < 3; round++) {
+      for (let round = 0; round < 6; round++) {
         const tc = extractToolCalls(reply);
         if (!tc.calls.length) break;
         const results: string[] = [];
-        for (const c of tc.calls.slice(0, 4)) {
+        for (const c of tc.calls.slice(0, 6)) {
           patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
           workSet(chat.id, `🔧 ${c.name} chala raha hoon…`, "chat");
           const t = await execTool(chat, c.name, c.args, tainted);
@@ -1137,7 +1230,9 @@ export default function DashboardPage() {
 
       const parsed = extractCommands(extractToolCalls(reply).clean);
       cmds = parsed.cmds.filter((c) => c.cmd === "memory" || c.cmd === "skill" || c.cmd === "deploy"); // chat can never start heavy work by itself
-      say(chat.id, parsed.clean || (cmds.length ? "Done." : "…"));
+      const body = parsed.clean || (cmds.length ? "Done." : "…");
+      if (splitSuggestions(body).next.length) say(chat.id, body);
+      else await sayNext(chat, body); // the model forgot the next-step line: a fast model writes it
     } catch (err) {
       say(chat.id, `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`);
     } finally { setSending(false); setStreaming(false); workEnd(chat.id, "chat"); }
@@ -1215,7 +1310,15 @@ export default function DashboardPage() {
           ) : (
             <>
               <div className="flex-1 overflow-y-auto px-6 py-6">
-                <div className="mx-auto max-w-2xl"><ChatThread messages={activeChat.messages} pending={sending && !streaming && !activeWork} onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }} /></div>
+                <div className="mx-auto max-w-2xl">
+                  <ChatThread
+                    messages={activeChat.messages}
+                    pending={sending && !streaming && !activeWork}
+                    busy={sending || Boolean(activeWork)}
+                    onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }}
+                    onSuggest={(t) => void submitText(t)}
+                  />
+                </div>
               </div>
               {activeWork && <WorkingBar key={`${activeChat.id}:${activeWork.startedAt}`} label={activeWork.label} startedAt={activeWork.startedAt} steps={activeWork.steps} />}
               <RunBars venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
