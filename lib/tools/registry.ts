@@ -1,11 +1,14 @@
 import { FREE_TOOLS, PLUGIN_TOOLS, type Def } from "./plugins";
 import { GITHUB_EXTRA } from "./github-extra";
+import { GITHUB_PUT } from "./github-put";
 import { IDENTITY_TOOLS } from "./identity";
 import { VERIFY_TOOLS } from "./verify";
 import { VOICE_TOOLS } from "./voice";
 import { CHANNEL_TOOLS, NOTIFY_TOOLS } from "./channels";
 import { MISSION_TOOLS } from "./mission";
 import { LEARNING_TOOLS } from "./learning";
+import { REPO_TOOLS } from "./repo";
+import { GMAIL_TOOLS } from "./gmail";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
 import { assertPublicUrl, cut, http } from "./net";
@@ -17,11 +20,11 @@ import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 type Conn = Record<string, string>;
 const ALL: Record<string, Def[]> = {
   ...PLUGIN_TOOLS,
-  github: [...(PLUGIN_TOOLS.github ?? []), ...GITHUB_EXTRA],
+  github: [...(PLUGIN_TOOLS.github ?? []), ...GITHUB_EXTRA, ...GITHUB_PUT],
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
@@ -66,6 +69,7 @@ export async function buildCatalog(c: Conn, ctx?: ToolCtx): Promise<{ specs: Too
   const specs: ToolSpec[] = ALL_FREE.map((d) => toSpec(d, "free"));
   const errors: string[] = [];
   for (const [id, defs] of Object.entries(ALL)) if (c[id]) specs.push(...defs.map((d) => toSpec(d, id)));
+  if (c["oauth:google"]) specs.push(...GMAIL_TOOLS.map((d) => toSpec(d, "oauth:google")));
 
   const mcp = mcpEntries(c);
   const results = await Promise.allSettled(mcp.map(async (e) => mcpList(e.url, await mcpBearer(e, ctx))));
@@ -103,9 +107,32 @@ function good(text: string, source: string, risk: Risk, ok = true): ToolResult {
   return { ok, text: w.text, flagged: w.flagged, risk };
 }
 
+const brief = (it: unknown): string => {
+  if (!it || typeof it !== "object") return String(it).slice(0, 80);
+  const o = it as Record<string, unknown>;
+  const who = String(o.to ?? o.email ?? o.path ?? o.name ?? "").slice(0, 60);
+  const what = String(o.subject ?? o.title ?? o.text ?? o.body ?? "").replace(/\s+/g, " ").slice(0, 70);
+  return [who, what].filter(Boolean).join(" — ");
+};
+
+/** What the owner sees in the approval question. Batches list every recipient / file, not just the first 400 characters. */
+function summarize(name: string, args: Record<string, unknown>): string {
+  if (Array.isArray(args.items)) {
+    return `${name} — ${args.items.length} item(s)\n` + args.items.slice(0, 10).map((it, i) => `${i + 1}. ${brief(it)}`).join("\n") + (args.items.length > 10 ? `\n… +${args.items.length - 10} more` : "");
+  }
+  if (Array.isArray(args.files) || Array.isArray(args.delete_paths)) {
+    const files = Array.isArray(args.files) ? args.files.slice(0, 10).map((f) => String((f as { path?: unknown })?.path ?? "")).join(", ") : "";
+    const dels = Array.isArray(args.delete_paths) ? args.delete_paths.slice(0, 10).join(", ") : "";
+    return `${name} on ${String(args.repo ?? "")}${args.branch ? ` (branch ${String(args.branch)})` : ""}${args.new_branch ? ` (new branch ${String(args.new_branch)})` : ""}${files ? `\nFiles: ${files}` : ""}${dels ? `\nDelete: ${dels}` : ""}`;
+  }
+  if (typeof args.to === "string") return `${name}\nTo: ${args.to}\nSubject: ${String(args.subject ?? "")}\n${String(args.body ?? args.text ?? "").slice(0, 200)}`;
+  if (typeof args.path === "string" && typeof args.content === "string") return `${name}\nFile: ${args.path}${args.delete === true ? " (delete)" : ""}\n${String(args.content).slice(0, 200)}`;
+  return `${name}\n${JSON.stringify(args).slice(0, 400)}`;
+}
+
 const ask = (name: string, args: Record<string, unknown>, risk: Risk): ToolResult => ({
   ok: false, text: "Waiting for the user's approval.",
-  needsApproval: { summary: `${name}\n${JSON.stringify(args).slice(0, 400)}`, risk },
+  needsApproval: { summary: summarize(name, args), risk },
 });
 
 // ---- OAuth tokens: stored as {access, refresh, exp}. Old plain-string tokens still work. ----
@@ -123,6 +150,17 @@ async function refreshTok(p: OAuthProvider, t: OTok): Promise<OTok> {
   }, 15_000);
   if (r.status >= 400 || !r.json?.access_token) throw new Error("refresh failed");
   return { access: String(r.json.access_token), refresh: r.json.refresh_token ? String(r.json.refresh_token) : t.refresh, exp: r.json.expires_in ? Date.now() + Number(r.json.expires_in) * 1000 : t.exp };
+}
+/** A valid access token for a provider; renews it (and saves the new one) when it is about to expire. */
+async function oauthAccess(p: OAuthProvider, raw: string, ctx?: ToolCtx): Promise<string> {
+  let tok = parseTok(raw);
+  if (tok.refresh && tok.exp && tok.exp < Date.now() + 60_000) {
+    try {
+      tok = await refreshTok(p, tok);
+      if (ctx) await ctx.save(`oauth:${p.id}`, JSON.stringify(tok));
+    } catch { throw new Error(`${p.label} login expired. Open Connectors and press Reconnect for ${p.label}.`); }
+  }
+  return tok.access;
 }
 
 /**
@@ -142,7 +180,7 @@ export async function callTool(
 
   const free = ALL_FREE.find((t) => t.name === name);
   if (free) {
-    if (mustAsk(free.risk, false)) return ask(name, args, "write"); // voice.call, mission.start: always approved by a human
+    if (mustAsk(free.risk, false)) return ask(name, args, "write"); // voice.call, mission.start, repo.push ...: always approved by a human
     try { return good(await free.run(args, [], opts.ctx), name, free.risk); }
     catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Tool failed." }; }
   }
@@ -155,6 +193,20 @@ export async function callTool(
     if (mustAsk(def.risk, isAuto(c, src))) return ask(name, args, "write");
     try { return good(await def.run(args, unpack(c[src]), opts.ctx), name, def.risk); }
     catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Tool failed.", risk: def.risk }; }
+  }
+
+  // Gmail tools use the Google OAuth connection (MIME is built on the server: the model never writes base64).
+  if (src === "gmail") {
+    const def = GMAIL_TOOLS.find((d) => d.name === name);
+    if (!def) return { ok: false, text: `Unknown tool "${name}".` };
+    const raw = c["oauth:google"];
+    if (!raw) return { ok: false, text: "Google is not connected for this chat (Connectors → Google)." };
+    if (mustAsk(def.risk, isAuto(c, "oauth:google"))) return ask(name, args, "write");
+    try {
+      const p = OAUTH_PROVIDERS.find((x) => x.id === "google") as OAuthProvider;
+      const access = await oauthAccess(p, raw, opts.ctx);
+      return good(await def.run(args, [access], opts.ctx), name, def.risk);
+    } catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Gmail failed.", risk: def.risk }; }
   }
 
   if (src.startsWith("mcp_")) {
@@ -188,17 +240,11 @@ export async function callTool(
       const risk: Risk = method === "GET" ? "read" : "write";
       if (mustAsk(risk, isAuto(c, `oauth:${p.id}`))) return ask(name, args, risk);
 
-      let tok = parseTok(raw);
-      if (tok.refresh && tok.exp && tok.exp < Date.now() + 60_000) {
-        try {
-          tok = await refreshTok(p, tok);
-          if (opts.ctx) await opts.ctx.save(`oauth:${p.id}`, JSON.stringify(tok)); // keep the new token for next time
-        } catch { return { ok: false, text: `${p.label} login expired. Open Connectors and press Reconnect for ${p.label}.` }; }
-      }
+      const access = await oauthAccess(p, raw, opts.ctx);
       // Join by hand: new URL("/me", ".../v1.0/") would drop the "/v1.0" part.
       const url = new URL(full ? path : p.apiBase.replace(/\/+$/, "") + path);
       if (url.protocol !== "https:" || !p.hosts.includes(url.hostname)) return { ok: false, text: "Request blocked: URL is outside the provider's verified API hosts." };
-      const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${tok.access}` };
+      const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${access}` };
       if (p.id === "github_oauth") { headers["X-GitHub-Api-Version"] = "2022-11-28"; headers["User-Agent"] = "AgenticVenus"; }
       if (p.id === "notion_oauth") headers["Notion-Version"] = "2022-06-28";
       if (args.body !== undefined) headers["Content-Type"] = "application/json";
