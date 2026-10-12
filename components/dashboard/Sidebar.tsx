@@ -5,6 +5,7 @@ import { Key, LogOut, Plus, Settings, Search, AudioLines } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import type { Chat } from "@/lib/chats";
+import { splitSuggestions } from "@/lib/suggest";
 import Link from "next/link";
 
 export default function Sidebar({
@@ -71,6 +72,7 @@ export default function Sidebar({
         {shown.map((chat) => {
           const active = chat.id === activeId;
           const last = chat.messages[chat.messages.length - 1];
+          const preview = last ? splitSuggestions(last.content).body : "";
           return (
             <button
               key={chat.id}
@@ -82,7 +84,7 @@ export default function Sidebar({
               <BotAvatar color={chat.agentColor} size={34} />
               <div className="min-w-0 flex-1">
                 <span className="truncate text-sm font-medium text-ink">{chat.agentName}</span>
-                <p className="truncate text-xs text-muted">{last ? last.content : "New chat"}</p>
+                <p className="truncate text-xs text-muted">{last ? preview : "New chat"}</p>
               </div>
             </button>
           );
