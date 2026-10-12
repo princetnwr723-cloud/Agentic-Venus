@@ -6,10 +6,11 @@ export type PluginMeta = {
 
 export const FREE_PACK = {
   label: "Built in",
-  note: "Always on. No key needed. Web, weather, wiki, currency, RSS, the verifiers (leads, facts, links), phone calls (voice.call), missions (long background jobs) and notify.send (message the owner).",
+  note: "Always on. No key needed. Web, weather, wiki, currency, RSS, the verifiers (leads, facts, links), phone calls, missions (long background jobs), notify.send (message the owner), memory / recall / skills, and the repository tools (clone a GitHub repo into Venus Code, edit files, push all changes).",
   tools: [
     "web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read",
     "verify.leads", "verify.facts", "verify.urls", "voice.call ✎", "voice.calls", "mission.start ✎", "mission.status", "notify.send",
+    "recall.search", "memory.save", "skill.save ✎", "repo.status", "repo.clone ✎", "repo.write_file ✎", "repo.push ✎",
   ],
 };
 
@@ -17,7 +18,7 @@ export const FREE_PACK = {
 export const PLUGINS: PluginMeta[] = [
   {
     id: "github", label: "GitHub",
-    note: "Search issues and PRs, read files, open issues, comment, open pull requests, commit to a branch. Free personal access token.",
+    note: "Search issues and PRs, read files, open issues, comment, open pull requests, commit to a branch, add/update/delete files directly (github.put_files), and clone/push repos into Venus Code. Token needs repo access (classic: repo scope; fine-grained: Contents read & write).",
     keysUrl: "https://github.com/settings/tokens",
     fields: [{ key: "token", placeholder: "ghp_… or github_pat_…", secret: true }],
     tools: [
@@ -25,7 +26,7 @@ export const PLUGINS: PluginMeta[] = [
       { name: "github.get_file", risk: "read" }, { name: "github.create_issue", risk: "write" },
       { name: "github.list_pull_requests", risk: "read" }, { name: "github.get_pull_request", risk: "read" },
       { name: "github.comment", risk: "write" }, { name: "github.create_pull_request", risk: "write" },
-      { name: "github.commit_files", risk: "write" },
+      { name: "github.commit_files", risk: "write" }, { name: "github.put_files", risk: "write" },
     ],
   },
   {
@@ -47,13 +48,13 @@ export const PLUGINS: PluginMeta[] = [
     note: "Chat with your agent on WhatsApp and get reports there. Uses the Twilio account from the Voice page. Only your number can command it. Start with the free Twilio WhatsApp sandbox (+14155238886).",
     keysUrl: "https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn",
     fields: [{ key: "owner", placeholder: "YOUR WhatsApp number, e.g. +919876543210" }, { key: "from", placeholder: "Twilio WhatsApp number, e.g. +14155238886 (sandbox)" }],
-    tools: [{ name: "whatsapp.send", risk: "write" }],
+    tools: [{ name: "whatsapp.send", risk: "write" }, { name: "whatsapp.send_many", risk: "write" }],
   },
   {
     id: "sms", label: "SMS (via Twilio)",
     note: "Text your agent and get reports by SMS. Uses the Twilio account from the Voice page. Only your number can command it.",
     fields: [{ key: "owner", placeholder: "YOUR mobile number, e.g. +919876543210" }, { key: "from", placeholder: "Your Twilio number, e.g. +12025550123" }],
-    tools: [{ name: "sms.send", risk: "write" }],
+    tools: [{ name: "sms.send", risk: "write" }, { name: "sms.send_many", risk: "write" }],
   },
   {
     id: "slackbot", label: "Slack (chat with your agent)",
@@ -64,10 +65,10 @@ export const PLUGINS: PluginMeta[] = [
   },
   {
     id: "email", label: "Email (Resend)",
-    note: "The agent can email you its reports and send emails. Free key at resend.com. 'From' can be onboarding@resend.dev while testing (then it can only email your own address).",
+    note: "The agent can email you its reports and send emails (one or many). Free key at resend.com. 'From' can be onboarding@resend.dev while testing (then it can only email your own address). For your own Gmail use the Google OAuth connection instead.",
     keysUrl: "https://resend.com/api-keys",
     fields: [{ key: "key", placeholder: "re_… (Resend API key)", secret: true }, { key: "from", placeholder: "Agent <onboarding@resend.dev>" }, { key: "to", placeholder: "Your email (reports go here)" }],
-    tools: [{ name: "email.send", risk: "write" }],
+    tools: [{ name: "email.send", risk: "write" }, { name: "email.send_many", risk: "write" }],
   },
   {
     id: "webhook", label: "Slack / Discord webhook",
