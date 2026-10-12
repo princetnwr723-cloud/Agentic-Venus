@@ -1,73 +1,156 @@
-import { Repeat } from "lucide-react";
-import type { ChatMessage } from "@/lib/chats";
-import Markdown from "@/components/Markdown";
-import { splitSuggestions } from "@/lib/suggest";
+import {
+  Activity,
+  Brain,
+  Clock,
+  Code2,
+  Film,
+  KeyRound,
+  Maximize2,
+  Minimize2,
+  Monitor,
+  Plug,
+  User,
+  Users,
+} from "lucide-react";
+import BotAvatar from "@/components/BotAvatar";
+import type { AvatarColor } from "@/lib/bots";
 
-export default function ChatThread({
-  messages,
-  pending,
-  busy,
-  onSaveAsRoutine,
-  onSuggest,
+function IconBtn({
+  label,
+  onClick,
+  active,
+  dot,
+  children,
 }: {
-  messages: ChatMessage[];
-  pending?: boolean;
-  busy?: boolean;
-  onSaveAsRoutine?: (text: string) => void;
-  onSuggest?: (text: string) => void;
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  dot?: boolean;
+  children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-4">
-      {messages.map((m, i) => {
-        const isAssistant = m.role === "assistant";
-        const { body, next } = isAssistant ? splitSuggestions(m.content) : { body: m.content, next: [] as string[] };
-        const isLast = i === messages.length - 1;
-        return (
-          <div key={i} className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}>
-            {m.role === "user" ? (
-              <div className="max-w-[75%] whitespace-pre-wrap rounded-xl bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">
-                {m.content}
-              </div>
-            ) : (
-              <div className="max-w-[85%] rounded-xl border border-line bg-panel2 px-4 py-2.5 text-sm leading-relaxed text-ink">
-                <Markdown text={body || "…"} />
-              </div>
-            )}
-            {m.role === "user" && onSaveAsRoutine && (
-              <button
-                onClick={() => onSaveAsRoutine(m.content)}
-                className="mt-1 flex items-center gap-1 text-[11px] text-faint hover:text-muted"
-              >
-                <Repeat size={11} /> Repeat this on a schedule
-              </button>
-            )}
-            {isAssistant && isLast && next.length > 0 && onSuggest && (
-              <div className="mt-2 flex max-w-[85%] flex-wrap gap-2">
-                {next.map((n) => (
-                  <button
-                    key={n}
-                    disabled={busy}
-                    onClick={() => onSuggest(n)}
-                    className="rounded-full border border-line bg-panel px-3 py-1.5 text-left text-xs text-ink transition-colors hover:border-gold hover:bg-panel2 disabled:opacity-40"
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
-
-      {pending && (
-        <div className="flex justify-start">
-          <div className="flex items-center gap-1 rounded-xl border border-line bg-panel2 px-4 py-3">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint" />
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:150ms]" />
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:300ms]" />
-          </div>
-        </div>
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      className={`relative rounded-full p-2 transition-colors hover:bg-panel2 hover:text-ink ${
+        active ? "bg-panel2 text-ink" : "text-muted"
+      }`}
+    >
+      {children}
+      {dot && (
+        <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-gold" />
       )}
-    </div>
+    </button>
+  );
+}
+
+export default function ChatHeader({
+  name,
+  color,
+  focusMode,
+  onToggleFocus,
+  onIdentity,
+  onCode,
+  onVenus,
+  onSkills,
+  onRuns,
+  onVpassword,
+  onConnectors,
+  hasConnectors,
+  onRoutines,
+  hasRoutines,
+  onTeam,
+  teamOpen,
+  teamRunning,
+  onPc,
+  pcOpen,
+  hasComputer,
+  pcPaused,
+}: {
+  name: string;
+  color: AvatarColor;
+  focusMode: boolean;
+  onToggleFocus: () => void;
+  onIdentity: () => void;
+  onCode: () => void;
+  onVenus: () => void;
+  onSkills: () => void;
+  onRuns: () => void;
+  onVpassword: () => void;
+  onConnectors: () => void;
+  hasConnectors: boolean;
+  onRoutines: () => void;
+  hasRoutines: boolean;
+  onTeam: () => void;
+  teamOpen: boolean;
+  teamRunning: boolean;
+  onPc: () => void;
+  pcOpen: boolean;
+  hasComputer: boolean;
+  pcPaused: boolean;
+}) {
+  const pcLabel = !hasComputer
+    ? "Computer (not created yet)"
+    : pcPaused
+    ? "Computer (off · saved)"
+    : "Computer";
+
+  return (
+    <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
+      <button
+        type="button"
+        onClick={onIdentity}
+        title="Open profile"
+        className="flex min-w-0 items-center gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-panel2/60"
+      >
+        <BotAvatar color={color} size={34} />
+        <span className="min-w-0 truncate text-sm font-medium text-ink">
+          {name}
+        </span>
+      </button>
+
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-0.5">
+        <IconBtn label="Profile & email" onClick={onIdentity}>
+          <User size={16} />
+        </IconBtn>
+        <IconBtn label="Venus Code" onClick={onCode}>
+          <Code2 size={16} />
+        </IconBtn>
+        <IconBtn label="Venus Pro (video)" onClick={onVenus}>
+          <Film size={16} />
+        </IconBtn>
+        <IconBtn label="Memory & Skills" onClick={onSkills}>
+          <Brain size={16} />
+        </IconBtn>
+        <IconBtn label="Runs" onClick={onRuns}>
+          <Activity size={16} />
+        </IconBtn>
+        <IconBtn label="vPassword" onClick={onVpassword}>
+          <KeyRound size={16} />
+        </IconBtn>
+        <IconBtn label="Connectors" onClick={onConnectors} dot={hasConnectors}>
+          <Plug size={16} />
+        </IconBtn>
+        <IconBtn label="Routines" onClick={onRoutines} dot={hasRoutines}>
+          <Clock size={16} />
+        </IconBtn>
+        <IconBtn label="Team" onClick={onTeam} active={teamOpen} dot={teamRunning}>
+          <Users size={16} />
+        </IconBtn>
+        <IconBtn label={pcLabel} onClick={onPc} active={pcOpen} dot={hasComputer && !pcPaused}>
+          <Monitor size={16} />
+        </IconBtn>
+        <IconBtn
+          label={focusMode ? "Exit focus mode" : "Focus mode"}
+          onClick={onToggleFocus}
+          active={focusMode}
+        >
+          {focusMode ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+        </IconBtn>
+      </div>
+    </header>
   );
 }
