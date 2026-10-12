@@ -22,6 +22,8 @@ export type Chat = {
   pcRecoveryPath?: string | null;
   pcLastBackupAt?: number;
   codeWs?: string | null;
+  /** The GitHub repository that is cloned in this chat's Venus Code workspace (set by the server on /clone). */
+  repo?: { owner: string; name: string; branch: string; at: number } | null;
   connectors?: Record<string, string>;
   createdAt?: Timestamp;
 };
@@ -44,6 +46,11 @@ export async function createChat(
     ...init, messages: [], pcSandboxId: null, pcPaused: false, codeWs: null, createdAt: serverTimestamp(),
   });
   return { id: ref.id, messages: [], pcSandboxId: null, pcPaused: false, codeWs: null, ...init };
+}
+
+/** Adds messages without overwriting what the server (missions, calls, connector updates) posted meanwhile. */
+export async function appendChatMessages(uid: string, chatId: string, msgs: ChatMessage[]) {
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { messages: arrayUnion(...msgs) });
 }
 
 export async function updateChatMessages(uid: string, chatId: string, messages: ChatMessage[]) {
@@ -83,9 +90,4 @@ export async function updateChatConnectors(uid: string, chatId: string, connecto
 
 export async function deleteChat(uid: string, chatId: string) {
   await deleteDoc(doc(db, "users", uid, "chats", chatId));
-}
-
-/** Adds messages without overwriting what the server (missions, calls, connector updates) posted meanwhile. */
-export async function appendChatMessages(uid: string, chatId: string, msgs: ChatMessage[]) {
-  await updateDoc(doc(db, "users", uid, "chats", chatId), { messages: arrayUnion(...msgs) });
 }
