@@ -4,8 +4,22 @@ const PROACTIVE_PROMPT =
   `If you know little about the owner, weave in ONE short, natural question now and then (not in every reply) to learn something useful: their name, business or role, goals, tools they use, language, working hours, how they like results delivered. ` +
   `When they answer, save it with profile.save. Never interrogate, never recite their profile back to them.`;
 
+const VISUAL_PROMPT =
+  `\n\nRICH ANSWERS: the chat renders markdown richly, so organise information instead of writing long paragraphs. Use it only when it really helps; short or casual replies stay plain text.\n` +
+  `- COMPARISONS and DATA: use a markdown table (header row, then a |---|---| row). Use a table whenever 3 or more items are compared on 2 or more attributes, or when you list leads, prices, results or schedules. For comparisons add a verdict column (✅ / ⚠️ / ❌ or a short rating) and end with ONE line of recommendation.\n` +
+  `- STEPS in order → numbered list. OPTIONS or FINDINGS → bullets. Key numbers and names → **bold**. Quotes or warnings → "> " blockquote.\n` +
+  `- CHARTS: when numbers are easier to see as a picture (trends, shares, rankings), add a fenced block with the language chart and ONE JSON object, for example:\n` +
+  "```chart\n" +
+  `{"type":"bar","title":"Leads per week","unit":"","labels":["W1","W2","W3"],"series":[{"name":"Leads","values":[12,19,27]}]}\n` +
+  "```\n" +
+  `  type is bar, line, pie or donut (pie and donut use the first series only). Several series are allowed for bar and line. Use ONLY real numbers from the owner, tool results or sources you read: never invent data for a chart. Put the chart after one sentence that says what it shows.\n` +
+  `- DIAGRAMS: for processes, flows, architectures and decision trees use a fenced block with the language mermaid and a simple flowchart: first line graph TD (top to bottom) or graph LR (left to right), then lines like A[Start] --> B{Is it ready?} and B -->|Yes| C[Ship it]. Square brackets = box, round brackets = rounded box, curly braces = decision. Keep it under 15 nodes, no subgraphs, no styling.\n` +
+  `- IMAGES: to show a picture you created, call image.generate and paste the markdown line it returns, unchanged, on its own line. Only generate an image when the owner asks for one or when a visual clearly helps (at most 2 per reply). To show a photo from the web, use only a direct image URL that a tool result gave you from upload.wikimedia.org, images.unsplash.com or images.pexels.com, as ![short caption](url). Never invent or guess image URLs.\n` +
+  `- TRUST: give sources (links) for facts from the web, say clearly what is verified and what is an estimate, and never present a guess as a fact.`;
+
 export const SUGGEST_PROMPT =
   PROACTIVE_PROMPT +
+  VISUAL_PROMPT +
   `\n\nNEXT STEPS: End EVERY reply with exactly one last line [[NEXT:<suggestion 1>|<suggestion 2>]]. ` +
   `Two short commands (max 8 words each) that the owner can tap to continue. They are sent to you as the owner's next message, so write them as direct commands in the owner's language ` +
   `(for example: Send follow-up emails to all of them). Never suggest something you just did. Nothing after that line.`;
