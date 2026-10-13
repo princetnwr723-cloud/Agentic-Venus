@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
@@ -26,6 +27,9 @@ export default function LandingPage() {
       <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
         <Logo />
         <div className="flex items-center gap-2">
+          <Link href="/docs" className="rounded-full px-4 py-2 text-sm text-muted hover:text-ink">
+            Docs
+          </Link>
           {user ? (
             <button
               onClick={() => router.push("/dashboard")}
@@ -63,7 +67,7 @@ export default function LandingPage() {
             tools you already use, and come back only when a decision needs
             you.
           </p>
-          <div className="mt-8 flex items-center gap-3">
+          <div className="mt-8 flex flex-wrap items-center gap-3">
             <button
               onClick={() =>
                 user ? router.push("/dashboard") : openAuth("signup")
@@ -72,9 +76,15 @@ export default function LandingPage() {
             >
               {user ? "Go to your dashboard" : "Get your first teammate"}
             </button>
+            <Link
+              href="/docs"
+              className="rounded-full border border-line px-5 py-2.5 text-sm text-ink hover:bg-panel"
+            >
+              Read the docs
+            </Link>
             <a
               href="#team"
-              className="rounded-full border border-line px-5 py-2.5 text-sm text-ink hover:bg-panel"
+              className="rounded-full px-3 py-2.5 text-sm text-muted hover:text-ink"
             >
               See the roster
             </a>
@@ -162,9 +172,14 @@ export default function LandingPage() {
       {/* footer */}
       <footer className="mx-auto flex max-w-6xl items-center justify-between border-t border-line px-6 py-8">
         <Logo size={18} />
-        <p className="text-xs text-faint">
-          © {new Date().getFullYear()} AgenticVenus
-        </p>
+        <div className="flex items-center gap-5">
+          <Link href="/docs" className="text-xs text-muted hover:text-ink">
+            Docs
+          </Link>
+          <p className="text-xs text-faint">
+            © {new Date().getFullYear()} AgenticVenus
+          </p>
+        </div>
       </footer>
 
       <AuthModal open={authOpen} initialTab={authTab} onClose={() => setAuthOpen(false)} />
