@@ -1,13 +1,14 @@
 import { auth } from "@/lib/firebase";
 import { bm25, jaccard } from "@/lib/bm25";
+import { parseSkillMarkdown as parseSkillMd, rankSkillList } from "@/lib/skills-core";
 import type { ProviderId } from "@/lib/providers";
 
 /** Memory and skills belong to ONE chat. Nothing is shared between chats. Storage is the server API (not client Firestore). */
 export type Scope = { uid: string; chatId: string };
-export type MemoryKind = "fact" | "preference" | "lesson" | "role";
+export type MemoryKind = "fact" | "preference" | "lesson" | "role" | "profile";
 export type Memory = { id: string; text: string; at: number; auto?: boolean; kind?: MemoryKind; weight?: number };
 export type Skill = {
-  id: string; name: string; description: string; instructions: string; source?: string; auto?: boolean;
+  id: string; name: string; description: string; instructions: string; source?: string; auto?: boolean; tags?: string[];
   uses?: number; wins?: number; fails?: number; version?: number; trial?: boolean; disabled?: boolean; prev?: string; updatedAt: number;
 };
 export type Brain = { memories: Memory[]; skills: Skill[] };
@@ -57,7 +58,7 @@ export async function addMemory(s: Scope, text: string, o: AddOpts = false): Pro
   };
   let next = [...items, mem];
   if (next.length > 200) {
-    const drop = next.filter((i) => i.auto && i.kind !== "role" && i.id !== mem.id).sort((a, b) => (a.weight ?? 1) - (b.weight ?? 1) || a.at - b.at)[0] ?? next[0];
+    const drop = next.filter((i) => i.auto && i.kind !== "role" && i.kind !== "profile" && i.id !== mem.id).sort((a, b) => (a.weight ?? 1) - (b.weight ?? 1) || a.at - b.at)[0] ?? next[0];
     next = next.filter((i) => i.id !== drop.id);
   }
   await writeMem(s, next);
@@ -105,25 +106,25 @@ export async function recordSkillOutcome(s: Scope, brain: Brain, names: string[]
   return out;
 }
 
-export function parseSkillMarkdown(text: string): { name: string; description: string; instructions: string } | null {
-  const m = /^\uFEFF?---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/.exec(text.trim());
-  if (!m) return null;
-  const get = (k: string) => { const r = new RegExp(`^${k}:\\s*(.+)$`, "im").exec(m[1]); return r ? r[1].trim().replace(/^["']|["']$/g, "") : ""; };
-  const name = get("name"), instructions = m[2].trim();
-  if (!name || !instructions) return null;
-  return { name, description: get("description") || name, instructions };
-}
+export const parseSkillMarkdown = parseSkillMd;
 
+/** Best skills for a job: keyword relevance + a boost when the skill's type (video, code, email ...) matches the job. */
 export function rankSkills(skills: Skill[], text: string, n = 3): Skill[] {
-  return bm25(skills.filter((x) => !x.disabled), (x) => `${x.name} ${x.name} ${x.description} ${x.instructions.slice(0, 600)}`, text).slice(0, n).map((x) => x.doc);
+  return rankSkillList(skills, text, n);
 }
 
-/** What goes into the agent's prompt: ITS role, ITS memory, ITS skills (this chat only). */
+/**
+ * What goes into the agent's prompt: ITS role, what it knows about the owner, ITS memory, ITS skills (this chat only).
+ * noSkills = the caller (Venus Pro, Venus Code, team planning) has no skill loader, but the 2 skills that fit the job
+ * are still injected in full, so e.g. a video-editing skill shapes how Venus Pro makes videos.
+ */
 export function brainPrompt(brain: Brain, text: string, opts: { noSkills?: boolean } = {}): string {
   const parts: string[] = [];
   const role = brain.memories.find((m) => m.kind === "role");
   if (role) parts.push("## Your role (set by the user — always act in it)\n" + role.text);
-  let mems = brain.memories.filter((m) => m.kind !== "role");
+  const profile = brain.memories.filter((m) => m.kind === "profile");
+  if (profile.length) parts.push("## What you know about your owner (use it naturally, never recite it)\n" + profile.slice(-30).map((m) => `- ${m.text}`).join("\n"));
+  let mems = brain.memories.filter((m) => m.kind !== "role" && m.kind !== "profile");
   if (mems.length > 12) {
     const top = bm25(mems, (m) => m.text, text).slice(0, 10).map((x) => x.doc);
     const heavy = mems.filter((m) => (m.weight ?? 1) >= 3).slice(-4);
@@ -131,11 +132,16 @@ export function brainPrompt(brain: Brain, text: string, opts: { noSkills?: boole
   }
   if (mems.length) parts.push("## What you remember in THIS chat\n" + mems.map((m) => `- ${m.kind === "lesson" ? "(lesson) " : ""}${m.text}`).join("\n"));
   const live = brain.skills.filter((x) => !x.disabled);
-  if (!opts.noSkills && live.length) {
-    const top = rankSkills(live, text, 3);
-    if (top.length) parts.push("## Skills you have learned — follow them when they apply\n" + top.map((x) => `### ${x.name}${x.trial ? " (still being tested)" : ""}\n${x.instructions.slice(0, 3500)}`).join("\n\n"));
-    const rest = live.filter((x) => !top.some((t) => t.id === x.id));
-    if (rest.length) parts.push("Other skills available: " + rest.map((x) => `${x.name} — ${x.description}`).join("; "));
+  if (live.length) {
+    if (opts.noSkills) {
+      const top = rankSkills(live, text, 2);
+      if (top.length) parts.push("## Skills that fit this job — follow them closely\n" + top.map((x) => `### ${x.name}\n${x.instructions.slice(0, 2500)}`).join("\n\n"));
+    } else {
+      const top = rankSkills(live, text, 3);
+      if (top.length) parts.push("## Skills you have learned — follow them when they apply\n" + top.map((x) => `### ${x.name}${x.trial ? " (still being tested)" : ""}\n${x.instructions.slice(0, 3500)}`).join("\n\n"));
+      const rest = live.filter((x) => !top.some((t) => t.id === x.id));
+      if (rest.length) parts.push("Other skills available (load the full text with skill.read): " + rest.map((x) => `${x.name} — ${x.description}`).join("; "));
+    }
   }
   return parts.length ? "\n\n" + parts.join("\n\n") : "";
 }
@@ -156,15 +162,15 @@ export async function skillFromText(env: LlmEnv, text: string): Promise<{ name: 
   return r?.name && r?.instructions ? { name: String(r.name), description: String(r.description ?? r.name), instructions: String(r.instructions) } : null;
 }
 
-/** Merges the auto-learned memories when there are too many (the user's own and the role are never touched). */
+/** Merges the auto-learned memories when there are too many (the user's own, the role and the profile are never touched). */
 async function consolidate(s: Scope, env: LlmEnv) {
   const items = await readMem(s);
   if (items.length <= 80) return;
-  const auto = items.filter((i) => i.auto && i.kind !== "role");
+  const auto = items.filter((i) => i.auto && i.kind !== "role" && i.kind !== "profile");
   const r = await llmJson(env, `Merge these notes of an AI agent into at most 40 shorter, non-duplicate notes. Keep every durable fact, preference and lesson; drop trivia. Reply with JSON only: {"items":[{"text":"...","kind":"fact|preference|lesson","weight":1-3}]}\n\n${auto.map((i) => `- ${i.text}`).join("\n").slice(0, 12000)}`);
   const merged = (Array.isArray(r?.items) ? r.items : []).slice(0, 40);
   if (!merged.length) return;
-  const keep = items.filter((i) => !(i.auto && i.kind !== "role"));
+  const keep = items.filter((i) => !(i.auto && i.kind !== "role" && i.kind !== "profile"));
   const fresh: Memory[] = merged.map((m: any, k: number) => ({ id: "c" + Date.now().toString(36) + k, text: String(m.text).slice(0, 300), at: Date.now(), auto: true, kind: (["fact", "preference", "lesson"].includes(m.kind) ? m.kind : "fact") as MemoryKind, weight: Math.min(3, Math.max(1, Number(m.weight) || 1)) }));
   await writeMem(s, [...keep, ...fresh]);
 }
@@ -182,11 +188,11 @@ export async function reflect(
   const usedSkills = brain.skills.filter((x) => used.includes(x.name));
   const r = await llmJson(env, `You are the learning module of an AI agent that works for ONE user in ONE chat. Decide what is worth keeping from the task below.
 Reply with JSON only:
-{"memories":[{"text":"durable fact or preference about the user's work","kind":"fact|preference","weight":1-3}],
+{"memories":[{"text":"durable fact or preference about the user's work","kind":"fact|preference|profile","weight":1-3}],
  "skill":null | {"name":"kebab-case","description":"what it does + when to use it","instructions":"markdown steps that worked"},
  "revisions":[{"skill":"name of a skill that was used","instructions":"the FULL improved instructions"}],
  "lessons":["what to do differently next time"]}
-Rules: at most 3 memories; only durable, reusable, non-sensitive things (NEVER passwords, keys, tokens, card data, private data). Create "skill" only when a multi-step procedure worked AND is likely to repeat; not a duplicate of: ${brain.skills.map((x) => x.name).join(", ") || "(none)"}. "revisions" and "lessons" ONLY if the result below is "${verdict}" and not "pass": explain the real cause of the problem. Otherwise return empty lists.
+Rules: at most 3 memories (use kind "profile" for lasting facts about the owner as a person or business); only durable, reusable, non-sensitive things (NEVER passwords, keys, tokens, card data, private data). Create "skill" only when a multi-step procedure worked AND is likely to repeat; not a duplicate of: ${brain.skills.map((x) => x.name).join(", ") || "(none)"}. "revisions" and "lessons" ONLY if the result below is "${verdict}" and not "pass": explain the real cause of the problem. Otherwise return empty lists.
 
 RESULT: ${verdict}
 TASK: ${input.task.slice(0, 600)}
@@ -196,7 +202,8 @@ ${verdict !== "pass" ? "SKILLS THAT WERE USED:\n" + usedSkills.map((x) => `### $
   if (!r) return learned;
 
   for (const m of (Array.isArray(r.memories) ? r.memories : []).slice(0, 3)) {
-    const saved = await addMemory(s, String(m?.text ?? m), { auto: true, kind: m?.kind === "preference" ? "preference" : "fact", weight: Number(m?.weight) || 1 });
+    const kind: MemoryKind = m?.kind === "preference" ? "preference" : m?.kind === "profile" ? "profile" : "fact";
+    const saved = await addMemory(s, String(m?.text ?? m), { auto: true, kind, weight: Number(m?.weight) || 1 });
     if (saved) learned.push(`remembered: ${saved.text}`);
   }
   if (r.skill?.name && r.skill?.instructions && String(r.skill.instructions).length > 150 && !brain.skills.some((x) => x.id === slug(String(r.skill.name)))) {
