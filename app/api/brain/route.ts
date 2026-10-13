@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { authFromRequest } from "@/lib/job-token";
 import { getAdminDb } from "@/lib/firebase-admin";
+import { categoriesOf } from "@/lib/skills-core";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -13,7 +14,7 @@ const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const slug = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "skill";
 
 function cleanMem(x: any) {
-  const kind = ["fact", "preference", "lesson", "role"].includes(x?.kind) ? x.kind : "fact";
+  const kind = ["fact", "preference", "lesson", "role", "profile"].includes(x?.kind) ? x.kind : "fact";
   return {
     id: str(x?.id, 40) || "m" + Date.now().toString(36), text: str(x?.text, 400), at: num(x?.at) || Date.now(),
     ...(x?.auto ? { auto: true } : {}), kind, weight: Math.min(3, Math.max(1, num(x?.weight) || 1)),
@@ -56,8 +57,10 @@ export async function POST(req: Request) {
         const old = (await ref.get()).data() as Record<string, any> | undefined;
         if (!old && (await skills.get()).size >= 80) return fail("This chat already has 80 skills. Delete one first.", 400);
         const reset = Boolean(k.resetStats);
+        const description = str(k.description, 300).trim();
+        const found = categoriesOf(`${name} ${description} ${instructions}`, { max: 3, min: 2 });
         const skill = {
-          id, name, description: str(k.description, 300).trim(), instructions,
+          id, name, description, instructions, tags: Array.isArray(k.tags) && k.tags.length ? k.tags.map(String).slice(0, 5) : found.length ? found : ["general"],
           ...(k.source ? { source: str(k.source, 300) } : {}), ...(k.auto ? { auto: true } : {}),
           uses: old?.uses ?? 0, wins: reset ? 0 : old?.wins ?? 0, fails: reset ? 0 : old?.fails ?? 0,
           version: num(k.version) || old?.version || 1, trial: typeof k.trial === "boolean" ? k.trial : old?.trial ?? false,
