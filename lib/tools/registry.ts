@@ -8,6 +8,7 @@ import { CHANNEL_TOOLS, NOTIFY_TOOLS } from "./channels";
 import { MISSION_TOOLS } from "./mission";
 import { LEARNING_TOOLS } from "./learning";
 import { REPO_TOOLS } from "./repo";
+import { VISUAL_TOOLS } from "./visual";
 import { GMAIL_TOOLS } from "./gmail";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
