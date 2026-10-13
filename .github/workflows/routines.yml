@@ -56,3 +56,19 @@ jobs:
             echo "::error::Missions tick returned HTTP $STATUS"
             exit 1
           fi
+
+      - name: Proactive messages (at most one per chat per day)
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
+        run: |
+          URL="${APP_URL%/}/api/proactive/tick"
+          STATUS=$(curl -s -o p.txt -w "%{http_code}" -X POST "$URL" \
+            -H "Authorization: Bearer $RUNNER_SECRET" -H "Content-Type: application/json" -d '{}')
+          echo "HTTP status: $STATUS"
+          cat p.txt
+          echo
+          if [ "$STATUS" -ge 400 ]; then
+            echo "::error::Proactive tick returned HTTP $STATUS"
+            exit 1
+          fi
