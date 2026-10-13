@@ -3,11 +3,12 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { bm25, jaccard } from "@/lib/bm25";
 import { callProvider } from "@/lib/ai-providers-server";
 import { loadAgent } from "@/lib/voice-calls";
+import { categoriesOf, rankSkillList } from "@/lib/skills-core";
 
 export type Mem = { id: string; text: string; at: number; auto?: boolean; kind?: string; weight?: number };
 export type SkillDoc = {
   id: string; name: string; description: string; instructions: string; auto?: boolean; uses?: number; wins?: number;
-  fails?: number; version?: number; trial?: boolean; disabled?: boolean; prev?: string; updatedAt: number;
+  fails?: number; version?: number; trial?: boolean; disabled?: boolean; prev?: string; source?: string; tags?: string[]; updatedAt: number;
 };
 
 const chatRef = (uid: string, chatId: string) => getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
@@ -38,7 +39,7 @@ export async function addMemoryServer(uid: string, chatId: string, text: string,
   };
   let next = [...items, mem];
   if (next.length > 200) {
-    const drop = next.filter((i) => i.auto && i.kind !== "role" && i.id !== mem.id).sort((a, b) => (a.weight ?? 1) - (b.weight ?? 1) || a.at - b.at)[0] ?? next[0];
+    const drop = next.filter((i) => i.auto && i.kind !== "role" && i.kind !== "profile" && i.id !== mem.id).sort((a, b) => (a.weight ?? 1) - (b.weight ?? 1) || a.at - b.at)[0] ?? next[0];
     next = next.filter((i) => i.id !== drop.id);
   }
   await writeMem(uid, chatId, next);
@@ -60,13 +61,13 @@ export async function listSkills(uid: string, chatId: string): Promise<SkillDoc[
   return s.docs.map((d) => d.data() as SkillDoc);
 }
 export function rankSkills(skills: SkillDoc[], text: string, n = 3): SkillDoc[] {
-  return bm25(skills.filter((x) => !x.disabled), (x) => `${x.name} ${x.name} ${x.description} ${x.instructions.slice(0, 600)}`, text).slice(0, n).map((x) => x.doc);
+  return rankSkillList(skills, text, n);
 }
 
 /** Same name = a new VERSION: the old text is kept in `prev` so the owner can roll back on the Skills page. */
 export async function saveSkillServer(
   uid: string, chatId: string,
-  k: { name: string; description: string; instructions: string; auto?: boolean; trial?: boolean; resetStats?: boolean }
+  k: { name: string; description: string; instructions: string; auto?: boolean; trial?: boolean; resetStats?: boolean; source?: string; disabled?: boolean }
 ): Promise<SkillDoc> {
   const name = k.name.trim().slice(0, 80);
   const instructions = k.instructions.trim().slice(0, 20000);
@@ -77,13 +78,16 @@ export async function saveSkillServer(
   const old = (await ref.get()).data() as SkillDoc | undefined;
   if (!old && (await skills.get()).size >= 80) throw new Error("This chat already has 80 skills. Delete one first.");
   const changed = Boolean(old && old.instructions !== instructions);
+  const description = k.description.trim().slice(0, 300) || old?.description || name;
+  const tags = categoriesOf(`${name} ${description} ${instructions}`, { max: 3, min: 2 });
   const skill: SkillDoc = {
-    id, name, description: k.description.trim().slice(0, 300) || old?.description || name, instructions,
+    id, name, description, instructions, tags: tags.length ? tags : ["general"],
     ...(k.auto ? { auto: true } : old?.auto ? { auto: true } : {}),
+    ...(k.source ? { source: k.source.slice(0, 300) } : old?.source ? { source: old.source } : {}),
     uses: old?.uses ?? 0, wins: k.resetStats ? 0 : old?.wins ?? 0, fails: k.resetStats ? 0 : old?.fails ?? 0,
     version: old ? (old.version ?? 1) + (changed ? 1 : 0) : 1,
     trial: typeof k.trial === "boolean" ? k.trial : old?.trial ?? false,
-    disabled: k.resetStats ? false : old?.disabled ?? false,
+    disabled: typeof k.disabled === "boolean" ? k.disabled : k.resetStats ? false : old?.disabled ?? false,
     ...(changed && old ? { prev: old.instructions.slice(0, 20000) } : old?.prev ? { prev: old.prev } : {}),
     updatedAt: Date.now(),
   };
@@ -95,20 +99,22 @@ export async function saveSkillServer(
 export async function brainContext(uid: string, chatId: string, query = ""): Promise<{ role: string; mem: string }> {
   const [mems, skills] = await Promise.all([readMem(uid, chatId), listSkills(uid, chatId)]);
   const role = mems.find((i) => i.kind === "role")?.text ?? "";
-  let list = mems.filter((i) => i.kind !== "role");
+  const profile = mems.filter((i) => i.kind === "profile");
+  let list = mems.filter((i) => i.kind !== "role" && i.kind !== "profile");
   if (list.length > 12) {
     const top = bm25(list, (m) => m.text, query).slice(0, 10).map((x) => x.doc);
     const heavy = list.filter((m) => (m.weight ?? 1) >= 3).slice(-4);
     list = [...top, ...heavy, ...list.slice(-4)].filter((m, i, a) => a.findIndex((x) => x.id === m.id) === i).slice(0, 18);
   }
   const parts: string[] = [];
+  if (profile.length) parts.push("WHAT YOU KNOW ABOUT YOUR OWNER (use it naturally, never recite it):\n" + profile.slice(-30).map((m) => `- ${m.text}`).join("\n"));
   if (list.length) parts.push(list.map((m) => `- ${m.kind === "lesson" ? "(lesson) " : ""}${m.text}`).join("\n"));
   const live = skills.filter((s) => !s.disabled);
   if (live.length) {
     const top = rankSkills(live, query, 3);
     if (top.length) parts.push("SKILLS YOU LEARNED (follow them when they apply):\n" + top.map((s) => `### ${s.name}${s.trial ? " (on trial)" : ""}\n${clip(s.instructions, 2500)}`).join("\n\n"));
     const rest = live.filter((s) => !top.some((t) => t.id === s.id));
-    if (rest.length) parts.push("Other skills you have: " + rest.map((s) => `${s.name} — ${s.description}`).join("; "));
+    if (rest.length) parts.push("Other skills you have (load with skill.read): " + rest.map((s) => `${s.name} — ${s.description}`).join("; "));
   }
   return { role, mem: parts.join("\n\n") };
 }
@@ -160,11 +166,11 @@ export async function learnFromRun(
       messages: [{ role: "user", content:
 `You are the learning module of an AI agent that works for ONE owner. Decide what is worth keeping from the task below.
 Reply with JSON only:
-{"memories":[{"text":"durable fact or preference about the owner's work","kind":"fact|preference","weight":1-3}],
+{"memories":[{"text":"durable fact or preference about the owner's work","kind":"fact|preference|profile","weight":1-3}],
  "skill":null | {"name":"kebab-case","description":"what it does + when to use it","instructions":"markdown steps that worked"},
  "revisions":[{"skill":"name of a skill that was used","instructions":"the FULL improved instructions"}],
  "lessons":["what to do differently next time"]}
-Rules: at most 3 memories; only durable, reusable, non-sensitive things (NEVER passwords, keys, tokens, card data, private data). Create "skill" only when a multi-step procedure worked AND is likely to repeat, and it is not a duplicate of: ${skills.map((x) => x.name).join(", ") || "(none)"}. "revisions" and "lessons" ONLY if the result is not "pass": explain the real cause. Otherwise return empty lists.
+Rules: at most 3 memories (kind "profile" = a lasting fact about the owner as a person or business); only durable, reusable, non-sensitive things (NEVER passwords, keys, tokens, card data, private data). Create "skill" only when a multi-step procedure worked AND is likely to repeat, and it is not a duplicate of: ${skills.map((x) => x.name).join(", ") || "(none)"}. "revisions" and "lessons" ONLY if the result is not "pass": explain the real cause. Otherwise return empty lists.
 
 RESULT: ${input.verdict}
 TASK: ${clip(input.task, 600)}
@@ -180,7 +186,8 @@ ${input.verdict !== "pass" ? "SKILLS THAT WERE USED:\n" + used.map((x) => `### $
     }) : null;
     if (r) {
       for (const m of (r.memories ?? []).slice(0, 3)) {
-        const saved = await addMemoryServer(uid, chatId, String(m?.text ?? ""), { auto: true, kind: m?.kind === "preference" ? "preference" : "fact", weight: Number(m?.weight) || 1 });
+        const kind = m?.kind === "preference" ? "preference" : m?.kind === "profile" ? "profile" : "fact";
+        const saved = await addMemoryServer(uid, chatId, String(m?.text ?? ""), { auto: true, kind, weight: Number(m?.weight) || 1 });
         if (saved) learned.push(`remembered: ${saved}`);
       }
       const sk = r.skill;
