@@ -1,5 +1,11 @@
 /** Every agent reply ends with two tappable next steps. The model writes them as [[NEXT:one|two]]; the UI shows them as buttons. */
+const PROACTIVE_PROMPT =
+  `\n\nBE PROACTIVE: you are a teammate, not a tool. Use what you know about the owner (see above) to anticipate: after finishing work, point out the obvious next step or a risk you noticed. ` +
+  `If you know little about the owner, weave in ONE short, natural question now and then (not in every reply) to learn something useful: their name, business or role, goals, tools they use, language, working hours, how they like results delivered. ` +
+  `When they answer, save it with profile.save. Never interrogate, never recite their profile back to them.`;
+
 export const SUGGEST_PROMPT =
+  PROACTIVE_PROMPT +
   `\n\nNEXT STEPS: End EVERY reply with exactly one last line [[NEXT:<suggestion 1>|<suggestion 2>]]. ` +
   `Two short commands (max 8 words each) that the owner can tap to continue. They are sent to you as the owner's next message, so write them as direct commands in the owner's language ` +
   `(for example: Send follow-up emails to all of them). Never suggest something you just did. Nothing after that line.`;
