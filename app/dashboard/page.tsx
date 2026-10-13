@@ -14,7 +14,7 @@ import { listRoutinesForChat, createRoutine, setRoutineEnabled, deleteRoutine, r
 import { setModelPref } from "@/lib/model-pref";
 import { PRESET_AGENTS, type AvatarColor } from "@/lib/bots";
 import type { ProviderId } from "@/lib/providers";
-import { addMemory, brainPrompt, forgetMemory, loadBrain, parseSkillMarkdown, rankSkills, reflect, saveSkill, setRole, skillFromText, type Brain, type Verdict } from "@/lib/brain";
+import { addMemory, brainPrompt, forgetMemory, loadBrain, rankSkills, reflect, setRole, type Brain, type Verdict } from "@/lib/brain";
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
 import { acquire, releaseNow } from "@/lib/computers";
@@ -29,6 +29,7 @@ import { understand, type Understanding } from "@/lib/intent";
 import { describeStep, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
 import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOutcome, type PcPending } from "@/lib/pc-agent";
 import { SUGGEST_PROMPT, splitSuggestions, withNext } from "@/lib/suggest";
+import { looksLikeSkillInstall } from "@/lib/skills-core";
 import { repoFileIntent, repoIntent, type RepoIntent } from "@/lib/repo-intent";
 import type { ToolSpec } from "@/lib/tools/types";
 import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
@@ -1034,29 +1035,26 @@ export default function DashboardPage() {
     return [parsed.clean, extra].filter(Boolean).join("\n\n") || "Done.";
   }
 
-  // ---- Skills from chat (saved for THIS chat only) ----
+  // ---- Skills from chat (saved for THIS chat only): URL, GitHub repo, "npx skills add ..." command or pasted text ----
 
   async function installSkillFrom(chat: Chat, input: string): Promise<{ names: string[]; message: string }> {
     if (!user) return { names: [], message: "" };
-    const scope = { uid: user.uid, chatId: chat.id };
-    const env = { apiKeys, provider: chat.provider, model: chat.model };
-    const urls = input.match(/https?:\/\/[^\s)>\]]+/g) ?? [];
-    const sources: Array<{ text: string; src: string }> = [];
-    for (const url of urls.slice(0, 3)) {
-      try {
-        const r = await fetch("/api/skills/fetch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
-        const d = await readJson(r);
-        if (r.ok && d.text) sources.push({ text: d.text, src: url });
-      } catch { /* skip */ }
+    try {
+      const r = await readJson(await fetch("/api/skills/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chatId: chat.id, input }) }));
+      if (r.error) throw new Error(String(r.error));
+      const names: string[] = Array.isArray(r.names) ? r.names.map(String) : [];
+      const errors: string[] = Array.isArray(r.errors) ? r.errors.map(String) : [];
+      await loadChatBrain(chat.id);
+      const problems = errors.length ? `\n\n⚠️ Problems:\n${errors.map((e) => `- ${e}`).join("\n")}` : "";
+      return {
+        names,
+        message: names.length
+          ? `🧩 Skill installed for this chat: **${names.join(", ")}**. I will use it automatically whenever a job fits it (manage it on the [Skills page](/skills?chat=${chat.id})).${problems}`
+          : `⚠️ I could not install that skill.${problems}`,
+      };
+    } catch (e) {
+      return { names: [], message: `⚠️ ${e instanceof Error ? e.message : "Skill install failed."}` };
     }
-    if (sources.length === 0 && input.length > 200) sources.push({ text: input.replace(/^[\s\S]{0,80}?\bskill\b[:\s-]*/i, ""), src: "pasted" });
-    const names: string[] = [];
-    for (const s of sources) {
-      const parsed = parseSkillMarkdown(s.text) ?? (await skillFromText(env, s.text));
-      if (parsed) names.push((await saveSkill(scope, { ...parsed, source: s.src })).name);
-    }
-    await loadChatBrain(chat.id);
-    return { names, message: names.length ? `🧩 Skill saved for this chat: **${names.join(", ")}**. I'll use it whenever it fits (manage it on the [Skills page](/skills?chat=${chat.id})).` : "⚠️ I could not read that as a skill. Send a link to a SKILL.md or paste its text." };
   }
 
   async function runCommands(cmds: Cmd[], chat: Chat) {
@@ -1153,7 +1151,7 @@ export default function DashboardPage() {
     }
 
     let extraSystem = "";
-    if (/\b(install|add|save|learn|import)\b[\s\S]*\bskills?\b/i.test(text) && (/https?:\/\//.test(text) || text.length > 300)) {
+    if (looksLikeSkillInstall(text)) {
       setSending(true);
       const r = await installSkillFrom(chat, text);
       setSending(false);
@@ -1210,11 +1208,11 @@ export default function DashboardPage() {
 
       let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
       let tainted = false;
-      for (let round = 0; round < 6; round++) {
+      for (let round = 0; round < 14; round++) {
         const tc = extractToolCalls(reply);
         if (!tc.calls.length) break;
         const results: string[] = [];
-        for (const c of tc.calls.slice(0, 6)) {
+        for (const c of tc.calls.slice(0, 8)) {
           patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
           workSet(chat.id, `🔧 ${c.name} chala raha hoon…`, "chat");
           const t = await execTool(chat, c.name, c.args, tainted);
@@ -1222,7 +1220,7 @@ export default function DashboardPage() {
           results.push(`### ${c.name}\n${t.text}`);
         }
         workSet(chat.id, "Tool ke result se jawab bana raha hoon…", "chat");
-        const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nAnswer the user now using these results. Call another tool only if it is really needed.`;
+        const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nCheck: is the owner's WHOLE request done and confirmed by these results? If not, or if a tool failed or returned nothing useful, do NOT stop: fix the arguments and retry, or use a different tool or route, and continue now. Answer only when everything is done and proven, or when you are truly blocked (then say exactly what is blocked, what you tried, and what you need from the owner).`;
         const prev = reply;
         reply = await callLLM(chat, system, resultsMsg, [...convo, { role: "assistant", content: prev }]);
         convo = [...convo, { role: "assistant", content: prev }, { role: "user", content: resultsMsg }];
@@ -1233,6 +1231,8 @@ export default function DashboardPage() {
       const body = parsed.clean || (cmds.length ? "Done." : "…");
       if (splitSuggestions(body).next.length) say(chat.id, body);
       else await sayNext(chat, body); // the model forgot the next-step line: a fast model writes it
+      // quietly learn about the owner from this message (profile memory)
+      void fetch("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chatId: chat.id, user: text, reply: body.slice(0, 1500) }) }).then(() => loadChatBrain(chat.id)).catch(() => {});
     } catch (err) {
       say(chat.id, `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`);
     } finally { setSending(false); setStreaming(false); workEnd(chat.id, "chat"); }
