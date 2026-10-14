@@ -52,7 +52,7 @@ const FINDY = /\b(find|collect|gather|scrape|extract|research|generate|compile|l
 export function forcePc(t: string, tools: string[] = []): boolean {
   if (CODE_RE.test(t)) return false;
   if (repoFileIntent(t)) return false;
-  const messageTool = tools.some((n) => /^(gmail|email|oauth_google|oauth_microsoft|whatsapp|sms|telegram|slackbot)\b/.test(n));
+  const messageTool = tools.some((n) => /^(mail|gmail|email|oauth_google|oauth_microsoft|whatsapp|sms|telegram|slackbot)\b/.test(n));
   if (messageTool && MAILY.test(t) && MAIL_ACT.test(t) && !FINDY.test(t)) return false;
   if (QUOTA.test(t) && VERB_RE.test(t)) return true;
   if (/\b(leads?|prospects?)\b/i.test(t) && VERB_RE.test(t) && !/^\s*(what|kya|how|why|explain)\b/i.test(t)) return true;
