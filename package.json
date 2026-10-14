@@ -23,13 +23,15 @@
     "@e2b/desktop": "latest",
     "@sparticuz/chromium": "^131.0.1",
     "@vercel/functions": "^1.5.0",
-    "playwright-core": "^1.49.1"
+    "playwright-core": "^1.49.1",
+    "nodemailer": "^6.9.16"
   },
   "overrides": {
     "chalk": "4.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",
+    "@types/nodemailer": "^6.4.17",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "autoprefixer": "^10.4.20",
