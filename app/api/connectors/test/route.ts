@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readBody, requestStatus } from "@/lib/request";
-import { assertPublicUrl, http } from "@/lib/tools/net";
+import { assertPublicHost, assertPublicUrl, http } from "@/lib/tools/net";
 import { mcpList, McpAuthError } from "@/lib/tools/mcp-client";
 import { unpack } from "@/lib/tools/catalog";
 import { WA_SANDBOX, sendTelegram, signChannelToken, telegramSecret } from "@/lib/channels";
@@ -71,6 +71,20 @@ export async function POST(req: Request) {
       if (!r.json?.ok) return bad(`Slack rejected the bot token: ${r.json?.error || r.status}`);
       const url = `${appBaseUrl(req)}/api/channels/slack?token=${encodeURIComponent(signChannelToken(uid, "slack"))}`;
       return ok(`Saved. In your Slack app → Event Subscriptions, set the Request URL to: ${url} and subscribe to the bot event message.im.`);
+    }
+
+    if (k === "smtp") {
+      const [host, port, user, pass] = unpack(t);
+      if (!host || !user || !pass) return bad("Enter host, port, username and password.");
+      await assertPublicHost(host.trim());
+      const nm: any = await import("nodemailer");
+      const create = nm.createTransport ?? nm.default?.createTransport;
+      const p = Number(port) || 465;
+      const tr = create({ host: host.trim(), port: p, secure: p === 465, requireTLS: p === 587, auth: { user, pass }, connectionTimeout: 12000, greetingTimeout: 12000, socketTimeout: 15000 });
+      try { await tr.verify(); }
+      catch (e: any) { return bad(`SMTP login failed${e?.code ? " (" + e.code + ")" : ""}: ${String(e?.message ?? "").slice(0, 140)}. For Gmail use an APP PASSWORD, not your normal password.`); }
+      finally { try { tr.close?.(); } catch { /* ignore */ } }
+      return ok(`${user} · login works`);
     }
 
     if (k === "email") {
