@@ -9,13 +9,26 @@ export const FREE_PACK = {
   note: "Always on. No key needed. Web, weather, wiki, currency, RSS, the verifiers (leads, facts, links), phone calls, missions (long background jobs), notify.send (message the owner), memory / recall / skills, and the repository tools (clone a GitHub repo into Venus Code, edit files, push all changes).",
   tools: [
     "web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read",
-    "verify.leads", "verify.facts", "verify.urls", "voice.call ✎", "voice.calls", "mission.start ✎", "mission.status", "notify.send",
+    "verify.leads", "verify.facts", "verify.urls", "mail.send ✎", "mail.send_many ✎", "mail.status", "plan.set", "plan.done", "plan.status", "voice.call ✎", "voice.calls", "mission.start ✎", "mission.status", "notify.send",
     "recall.search", "memory.save", "skill.save ✎", "repo.status", "repo.clone ✎", "repo.write_file ✎", "repo.push ✎",
   ],
 };
 
 // Only the tools people need most. Everything else: add an MCP server in the Custom tab (search by name).
 export const PLUGINS: PluginMeta[] = [
+  {
+    id: "smtp", label: "Email (SMTP / App password)",
+    note: "The most reliable way to send email. Works with Gmail (use an APP PASSWORD: myaccount.google.com/apppasswords, host smtp.gmail.com, port 465), Outlook (smtp.office365.com, 587), Zoho and any provider. No Google OAuth needed. The agent uses it automatically through mail.send / mail.send_many.",
+    keysUrl: "https://myaccount.google.com/apppasswords",
+    fields: [
+      { key: "host", placeholder: "SMTP host, e.g. smtp.gmail.com" },
+      { key: "port", placeholder: "Port: 465 (SSL) or 587" },
+      { key: "user", placeholder: "Username (your full email)" },
+      { key: "pass", placeholder: "Password / app password", secret: true },
+      { key: "from", placeholder: "From, e.g. Your Name <you@gmail.com>" },
+    ],
+    tools: [{ name: "mail.send", risk: "write" }, { name: "mail.send_many", risk: "write" }],
+  },
   {
     id: "github", label: "GitHub",
     note: "Search issues and PRs, read files, open issues, comment, open pull requests, commit to a branch, add/update/delete files directly (github.put_files), and clone/push repos into Venus Code. Token needs repo access (classic: repo scope; fine-grained: Contents read & write).",
