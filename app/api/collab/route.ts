@@ -19,8 +19,13 @@ export async function POST(req: Request) {
 
     if (action === "brief") {
       const ids: string[] = Array.from(
-        new Set((Array.isArray(b.targets) ? b.targets : []).map(String).filter((x: string) => validId(x)))
-      ).filter((x: string) => x !== chatId).slice(0, 4) as string[];
+        new Set(
+          (Array.isArray(b.targets) ? b.targets : [])
+            .map(String)
+            .filter((x): x is string => validId(x))
+        )
+      ).filter((x): x is string => x !== chatId).slice(0, 4);
+      
       if (!ids.length) return NextResponse.json({ briefs: [] });
       const query = String(b.query || "").slice(0, 400);
       const per = Math.floor(6500 / ids.length);
