@@ -9,9 +9,12 @@ import { MISSION_TOOLS } from "./mission";
 import { LEARNING_TOOLS } from "./learning";
 import { REPO_TOOLS } from "./repo";
 import { VISUAL_TOOLS } from "./visual";
+import { MAIL_TOOLS } from "./mail";
+import { PLAN_TOOLS } from "./plan";
 import { GMAIL_TOOLS } from "./gmail";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
+import { oauthAccess } from "./oauth-token";
 import { assertPublicUrl, cut, http } from "./net";
 import { safeId, unpack } from "./catalog";
 import { OAUTH_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
@@ -25,7 +28,7 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
@@ -119,7 +122,8 @@ const brief = (it: unknown): string => {
 /** What the owner sees in the approval question. Batches list every recipient / file, not just the first 400 characters. */
 function summarize(name: string, args: Record<string, unknown>): string {
   if (Array.isArray(args.items)) {
-    return `${name} — ${args.items.length} item(s)\n` + args.items.slice(0, 10).map((it, i) => `${i + 1}. ${brief(it)}`).join("\n") + (args.items.length > 10 ? `\n… +${args.items.length - 10} more` : "");
+    const tpl = [args.subject ? `Subject: ${String(args.subject).slice(0, 100)}` : "", args.body ? `Text: ${String(args.body).replace(/\s+/g, " ").slice(0, 160)}` : ""].filter(Boolean).join("\n");
+    return `${name} — ${args.items.length} item(s)${tpl ? "\n" + tpl : ""}\n` + args.items.slice(0, 12).map((it, i) => `${i + 1}. ${brief(it)}`).join("\n") + (args.items.length > 12 ? `\n… +${args.items.length - 12} more` : "");
   }
   if (Array.isArray(args.files) || Array.isArray(args.delete_paths)) {
     const files = Array.isArray(args.files) ? args.files.slice(0, 10).map((f) => String((f as { path?: unknown })?.path ?? "")).join(", ") : "";
@@ -135,34 +139,6 @@ const ask = (name: string, args: Record<string, unknown>, risk: Risk): ToolResul
   ok: false, text: "Waiting for the user's approval.",
   needsApproval: { summary: summarize(name, args), risk },
 });
-
-// ---- OAuth tokens: stored as {access, refresh, exp}. Old plain-string tokens still work. ----
-type OTok = { access: string; refresh?: string; exp?: number };
-const parseTok = (v: string): OTok => {
-  try { const j = JSON.parse(v); if (j && typeof j.access === "string") return j as OTok; } catch { /* plain token */ }
-  return { access: v };
-};
-async function refreshTok(p: OAuthProvider, t: OTok): Promise<OTok> {
-  const id = process.env[p.clientIdEnv], secret = process.env[p.clientSecretEnv];
-  if (!id || !secret || !t.refresh) throw new Error("no refresh token");
-  const r = await http(p.tokenUrl, {
-    method: "POST", headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t.refresh, client_id: id, client_secret: secret }).toString(),
-  }, 15_000);
-  if (r.status >= 400 || !r.json?.access_token) throw new Error("refresh failed");
-  return { access: String(r.json.access_token), refresh: r.json.refresh_token ? String(r.json.refresh_token) : t.refresh, exp: r.json.expires_in ? Date.now() + Number(r.json.expires_in) * 1000 : t.exp };
-}
-/** A valid access token for a provider; renews it (and saves the new one) when it is about to expire. */
-async function oauthAccess(p: OAuthProvider, raw: string, ctx?: ToolCtx): Promise<string> {
-  let tok = parseTok(raw);
-  if (tok.refresh && tok.exp && tok.exp < Date.now() + 60_000) {
-    try {
-      tok = await refreshTok(p, tok);
-      if (ctx) await ctx.save(`oauth:${p.id}`, JSON.stringify(tok));
-    } catch { throw new Error(`${p.label} login expired. Open Connectors and press Reconnect for ${p.label}.`); }
-  }
-  return tok.access;
-}
 
 /**
  * The ONLY place tools run. A write action stops here until a human approved it.
@@ -181,7 +157,9 @@ export async function callTool(
 
   const free = ALL_FREE.find((t) => t.name === name);
   if (free) {
-    if (mustAsk(free.risk, false)) return ask(name, args, "write"); // voice.call, mission.start, repo.push ...: always approved by a human
+    // mail.* honours the "don't ask before write actions" switch of any connected sender
+    const autoMail = name.startsWith("mail.") && (isAuto(c, "oauth:google") || isAuto(c, "oauth:microsoft") || isAuto(c, "smtp") || isAuto(c, "email"));
+    if (mustAsk(free.risk, autoMail)) return ask(name, args, "write"); // voice.call, mission.start, repo.push ...: approved by a human
     try { return good(await free.run(args, [], opts.ctx), name, free.risk); }
     catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Tool failed." }; }
   }
@@ -201,7 +179,7 @@ export async function callTool(
     const def = GMAIL_TOOLS.find((d) => d.name === name);
     if (!def) return { ok: false, text: `Unknown tool "${name}".` };
     const raw = c["oauth:google"];
-    if (!raw) return { ok: false, text: "Google is not connected for this chat (Connectors → Google)." };
+    if (!raw) return { ok: false, text: "Google is not connected for this chat (Connectors → Google). To SEND email without Google use mail.send." };
     if (mustAsk(def.risk, isAuto(c, "oauth:google"))) return ask(name, args, "write");
     try {
       const p = OAUTH_PROVIDERS.find((x) => x.id === "google") as OAuthProvider;
