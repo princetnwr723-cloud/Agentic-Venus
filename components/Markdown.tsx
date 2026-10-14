@@ -344,17 +344,17 @@ function DiagramView({ src }: { src: string }) {
   const { dir, nodes, edges } = g;
   const LR = dir === "LR";
   const PAD = 16, GM = 56, GC = 22;
-  const dims = new Map(nodes.map((n) => {
+  const dims = new Map<string, { w: number; h: number }>(nodes.map((n) => {
     const w = Math.max(84, n.label.length * 7.2 + (n.shape === "diamond" ? 54 : 28));
-    return [n.id, { w, h: n.shape === "diamond" ? 54 : 38 }] as const;
+    return [n.id, { w, h: n.shape === "diamond" ? 54 : 38 }] as [string, { w: number; h: number }];
   }));
 
-  const layer = new Map(nodes.map((n) => [n.id, 0] as const));
+  const layer = new Map<string, number>(nodes.map((n) => [n.id, 0] as [string, number]));
   for (let it = 0; it < nodes.length; it++) {
     let changed = false;
     for (const e of edges) {
       if (e.from === e.to) continue;
-      const nl = (layer.get(e.from) ?? 0) + 1;
+      const nl: number = (layer.get(e.from) ?? 0) + 1;
       if (nl > (layer.get(e.to) ?? 0) && nl < nodes.length) { layer.set(e.to, nl); changed = true; }
     }
     if (!changed) break;
