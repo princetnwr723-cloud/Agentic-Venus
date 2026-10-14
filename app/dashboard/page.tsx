@@ -40,7 +40,7 @@ import {
 import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
-import ChatComposer from "@/components/dashboard/ChatComposer";
+import ChatComposer, { type Mentionable } from "@/components/dashboard/ChatComposer";
 import RunBars from "@/components/dashboard/RunBars";
 import WorkingBar from "@/components/dashboard/WorkingBar";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
@@ -69,6 +69,12 @@ const INTENT_LABEL: Record<string, string> = {
   chat: "jawab dena", set_role: "role save karna", assemble: "team banana", pc: "computer ka kaam", code: "coding project",
   video: "video banana", team: "team ka kaam", remember: "yaad rakhna", forget: "bhoolna", clarify: "ek sawaal puchna",
 };
+
+// A chat also carries the "Agent cooperation" switch (stored on the chat document).
+type ChatX = Chat & { cooperation?: boolean };
+type AgentInfo = { id: string; name: string; role: string; last: string; code: boolean };
+
+const normName = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, "");
 
 type Work = { label: string; startedAt: number; steps: string[]; owner: string };
 
@@ -121,6 +127,8 @@ export default function DashboardPage() {
   const teamBusyRef = useRef<Set<string>>(new Set());
   const brains = useRef<Record<string, Brain>>({});
   const toolCache = useRef<Record<string, { sig: string; specs: ToolSpec[] }>>({});
+  const pickedRef = useRef<Record<string, string>>({}); // "@UI_Agent" -> chat id (chosen in the @ menu)
+  const coopCache = useRef<Record<string, { t: number; list: AgentInfo[] }>>({});
 
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [routinesOpen, setRoutinesOpen] = useState(false);
@@ -187,6 +195,18 @@ export default function DashboardPage() {
   }, [user]);
 
   const activeChat = useMemo(() => chats.find((c) => c.id === activeId) ?? null, [chats, activeId]);
+
+  // The other agents the @ menu can offer (every other chat of this account).
+  const mentionables = useMemo<Mentionable[]>(
+    () =>
+      chats.filter((c) => c.id !== activeId).map((c) => {
+        const last = [...c.messages].reverse().find((m) => m.role === "assistant");
+        const preview = last ? splitSuggestions(last.content).body.replace(/\s+/g, " ").slice(0, 80) : "No messages yet";
+        return { id: c.id, name: c.agentName, color: c.agentColor, hint: PRESET_AGENTS.find((a) => a.name === c.agentName)?.role ?? "", preview: preview || "No messages yet" };
+      }),
+    [chats, activeId]
+  );
+
   useEffect(() => {
     if (!user || !activeChat) { setRoutines([]); return; }
     listRoutinesForChat(user.uid, activeChat.id).then(setRoutines);
@@ -205,7 +225,7 @@ export default function DashboardPage() {
   }, [user, activeChat?.id, e2bKey]);
 
   const hasAnyKey = Object.values(apiKeys).some(Boolean);
-  const patchChat = (id: string, patch: Partial<Chat>) => setChats((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  const patchChat = (id: string, patch: Partial<Chat> & { cooperation?: boolean }) => setChats((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
 
   function appendMessages(chatId: string, msgs: ChatMessage[]) {
     if (!user) return;
@@ -283,6 +303,79 @@ export default function DashboardPage() {
     patchChat(activeChat.id, { provider, model });
     setModelPref(provider, model);
     await updateChatModel(user.uid, activeChat.id, provider, model);
+  }
+
+  // ---- Agent cooperation: use the work of the other agents (chats) ----
+
+  async function setCooperation(on: boolean) {
+    if (!user || !activeChat) return;
+    const id = activeChat.id;
+    patchChat(id, { cooperation: on });
+    delete coopCache.current[id];
+    try {
+      await updateDoc(doc(db, "users", user.uid, "chats", id), { cooperation: on });
+      say(id, on
+        ? "🤝 **Agent cooperation is ON.** From now on I can use the work of your other agents by myself (their notes, skills, results and code files) whenever it helps. You don't need to type @."
+        : "🤝 **Agent cooperation is OFF.** I work alone again. You can still type @ to pick one agent.");
+    } catch (e) {
+      patchChat(id, { cooperation: !on });
+      setPcMessage(`⚠️ Could not change agent cooperation: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  }
+
+  /** The agents named with @ in the message ("@UI_Agent"). A name picked in the @ menu wins; otherwise the name is matched. */
+  function resolveMentions(chat: Chat, text: string): Chat[] {
+    const out: Chat[] = [];
+    const others = chatsRef.current.filter((c) => c.id !== chat.id);
+    const re = /(^|\s)@([\w\u0900-\u097f-]+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const tok = "@" + m[2];
+      const n = normName(m[2]);
+      let t = pickedRef.current[tok] ? others.find((c) => c.id === pickedRef.current[tok]) : undefined;
+      if (!t && n) t = others.find((c) => normName(c.agentName) === n) ?? (n.length >= 2 ? others.find((c) => normName(c.agentName).startsWith(n)) : undefined);
+      if (t && !out.some((x) => x.id === t!.id)) out.push(t);
+    }
+    return out.slice(0, 4);
+  }
+
+  /** Reads the work of the mentioned agents on the server and turns it into a block the working agent receives. */
+  async function collabBlock(chat: Chat, targets: Chat[], query: string): Promise<string> {
+    if (!targets.length) return "";
+    const names = targets.map((t) => "@" + t.agentName).join(", ");
+    try {
+      const r = await readJson(await fetch("/api/collab", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "brief", chatId: chat.id, targets: targets.map((t) => t.id), query }) }));
+      if (r.error) throw new Error(String(r.error));
+      const briefs: Array<{ id: string; name: string; text: string }> = Array.isArray(r.briefs) ? r.briefs : [];
+      if (!briefs.length) return `\n\n(COLLABORATION: the owner mentioned ${names}, but nothing could be read from them.)`;
+      return (
+        `\n\n=== COLLABORATION CONTEXT ===\nThe owner @-mentioned other agents of their team for this task. Their work is below. Treat it as the owner's own team material: reuse their components, decisions, wording and results, follow their style, and say which agent each part came from. ` +
+        `Do not change their files. To read more of an agent's files use the tool collab.read_file (agent, path); to ask for different material use collab.ask (agent, query).\n\n` +
+        briefs.map((b) => `--- @${b.name} ---\n${b.text}`).join("\n\n") +
+        `\n=== END COLLABORATION CONTEXT ===`
+      );
+    } catch (e) {
+      return `\n\n(COLLABORATION: could not read ${names}: ${e instanceof Error ? e.message : "unknown error"}. Tell the owner and continue without it.)`;
+    }
+  }
+
+  /** When "Agent cooperation" is ON the agent is told who its colleagues are and how to use them by itself. */
+  async function coopPrompt(chat: Chat): Promise<string> {
+    const hit = coopCache.current[chat.id];
+    let list: AgentInfo[] | null = hit && Date.now() - hit.t < 60_000 ? hit.list : null;
+    if (!list) {
+      try {
+        const r = await readJson(await fetch("/api/collab", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "agents", chatId: chat.id }) }));
+        list = Array.isArray(r.agents) ? (r.agents as AgentInfo[]) : [];
+        coopCache.current[chat.id] = { t: Date.now(), list };
+      } catch { list = []; }
+    }
+    if (!list.length) return "";
+    return (
+      `\n\nAGENT COOPERATION IS ON. The owner runs several agents and you may use their work by yourself, without being asked, whenever it makes your result better (UI components, research, copy, leads, code, decisions already made). Your colleagues:\n` +
+      list.slice(0, 12).map((a) => `- ${a.name}${a.role ? ` (${a.role})` : ""}${a.code ? " [has code workspace]" : ""}${a.last ? ` — last: ${a.last.slice(0, 100)}` : ""}`).join("\n") +
+      `\nBefore starting work that overlaps a colleague's area, call collab.ask (agent, query) to read their work and collab.read_file (agent, path) for a specific file, then reuse it and say which agent helped. Never change their files; never mention an agent that did not help.`
+    );
   }
 
   // ---- This chat's computer (for computer tasks). Venus Code and Venus Pro get their OWN computers. ----
@@ -692,7 +785,7 @@ export default function DashboardPage() {
     runningRef.current[chatId] = true;
     stopRef.current[chatId] = false;
     busyChats.current.add(chatId);
-    patchSession(chatId, { running: true, steps: [`▶ ${task}`], request: null });
+    patchSession(chatId, { running: true, steps: [`▶ ${task.slice(0, 300)}`], request: null });
     const showWork = !opts?.quiet;
     const showPanel = !opts?.quiet || Boolean(opts?.showPanel);
     if (showWork) workStart(chatId, opts?.resume ? "Chalte hue task se jud raha hoon…" : "Computer chalu kar raha hoon…", "pc");
@@ -747,7 +840,7 @@ export default function DashboardPage() {
       const at = Date.now();
       const shown = withNext(finalText || "Finished.", await suggestNext(chat, finalText || "Finished."));
       appendMessages(chatId, logTask
-        ? [{ role: "user", content: `🖥️ Task on the computer: ${task}`, at }, { role: "assistant", content: shown, at }]
+        ? [{ role: "user", content: `🖥️ Task on the computer: ${task.slice(0, 600)}`, at }, { role: "assistant", content: shown, at }]
         : [{ role: "assistant", content: shown, at }]);
     }
     // Quiet/background/team tasks also get the same persistence + credit-saving lifecycle.
@@ -1135,12 +1228,27 @@ export default function DashboardPage() {
     appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now() }]);
     setDraft(""); setAttach(null);
 
+    // @agent mentions: read the work of those agents first; "Agent cooperation" tells the agent about its colleagues
+    const targets = resolveMentions(chat, text);
+    const coop = (chatsRef.current.find((c) => c.id === chat.id) as ChatX | undefined)?.cooperation === true;
+    let collab = "";
+    let coopText = "";
+    if (targets.length || coop) {
+      setSending(true);
+      workStart(chat.id, targets.length ? `${targets.map((t) => "@" + t.agentName).join(", ")} ka kaam padh raha hoon…` : "Doosre agents ko dekh raha hoon…", "collab");
+      try {
+        if (targets.length) collab = await collabBlock(chat, targets, text);
+        if (coop) coopText = await coopPrompt(chat);
+      } finally { workEnd(chat.id, "collab"); setSending(false); }
+    }
+    const extra = collab + coopText;
+
     // explicit commands: the user chose them, no guessing
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
     if (deploy) { void runDeploy(chat, deploy[1]); return; }
-    if (video) { void startVenus(chat, video[1].trim()); return; }
-    if (code) { void runCodeFor(chat, code[1].trim()); return; }
-    if (team) { void runTeam(chat, team[1].trim()); return; }
+    if (video) { void startVenus(chat, video[1].trim() + extra); return; }
+    if (code) { void runCodeFor(chat, code[1].trim() + extra); return; }
+    if (team) { void runTeam(chat, team[1].trim() + extra); return; }
     if (forget) { await applyMemoryCommand(chat, `forget|${forget[1].trim()}`); return; }
     if (remember) { await applyMemoryCommand(chat, `add|${remember[1].trim()}`); return; }
     if (rIntent) { void runRepoCommand(chat, rIntent); return; } // /clone, /push, "clone github.com/a/b", "push all changes"
@@ -1171,11 +1279,12 @@ export default function DashboardPage() {
       if (r.names.length) extraSystem = `\n\nThe user just installed the skill(s): ${r.names.join(", ")}. Acknowledge briefly and carry out any remaining part of the request using the skill.`;
       if (text.replace(/https?:\/\/\S+/g, "").length < 90) return;
     }
+    extraSystem += extra;
 
     // the user switched on Computer mode: that is an explicit order
     if (e2bKey && computerMode) {
       say(chat.id, "On it — opening the computer. You can watch it work in the panel.");
-      void runPcTask(chat, text, false);
+      void runPcTask(chat, text + extra, false);
       return;
     }
 
@@ -1202,7 +1311,12 @@ export default function DashboardPage() {
         });
         traceOf(chat.id)?.add("intent", `${u.intent}: ${u.why}`);
         workSet(chat.id, `Samajh gaya: ${INTENT_LABEL[u.intent] ?? u.intent}${u.why.startsWith("keyword") ? " (keyword se)" : ""}`, "chat");
-        if (u.intent !== "chat") { await routeIntent(chat, u, text); return; }
+        if (u.intent !== "chat") {
+          // the mentioned agents' work travels with the task into the computer / Venus Code / Venus Pro / team
+          if (extra && ["pc", "code", "video", "team"].includes(u.intent)) u.task = (u.task || text) + extra;
+          await routeIntent(chat, u, text);
+          return;
+        }
       }
 
       // 2) A normal answer: streaming, with the connected tools available
@@ -1316,6 +1430,7 @@ export default function DashboardPage() {
   const connectedNames = Object.keys(activeChat?.connectors ?? {}).filter((k) => !k.startsWith("auto:")).map((k) => (k.includes(":") ? k.replace(":", " · ") : k));
   const pcStatus = !activeSandboxId ? "no computer yet" : session.status === "paused" ? "off (saved)" : session.running ? "working" : session.status === "ready" ? "on" : session.status;
   const activeWork = activeChat ? work[activeChat.id] : undefined;
+  const coopOn = (activeChat as ChatX | null)?.cooperation === true;
 
   return (
     <div className="flex h-screen bg-bg">
@@ -1366,6 +1481,7 @@ export default function DashboardPage() {
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
                 hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
                 attach={attach} onPickFile={(f) => void handleAttach(f)} onClearAttach={() => setAttach(null)}
+                mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
               />
             </>
           )}
@@ -1418,6 +1534,7 @@ export default function DashboardPage() {
           memories={brainOf(activeChat.id).memories.length} skills={brainOf(activeChat.id).skills.length} computer={pcStatus}
           getToken={() => user.getIdToken()}
           onEmailCreated={(ph) => { patchChat(activeChat.id, { connectors: { ...(activeChat.connectors ?? {}), identity: ph } }); delete toolCache.current[activeChat.id]; }}
+          cooperation={coopOn} onToggleCooperation={(on) => void setCooperation(on)}
         />
       )}
     </div>
