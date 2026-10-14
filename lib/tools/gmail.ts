@@ -8,12 +8,12 @@ const MAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/;
 const API = "https://gmail.googleapis.com/gmail/v1/users/me";
 
 /** The model sometimes calls a field "email" instead of "to", "text" instead of "body": accept the common names. */
-const pick = (it: Item, ...keys: string[]): unknown => {
+export const pick = (it: Item, ...keys: string[]): unknown => {
   for (const k of keys) { const v = it[k]; if (v !== undefined && v !== null && String(v).trim() !== "") return v; }
   return undefined;
 };
 
-function recipients(v: unknown, label = "to"): string {
+export function recipients(v: unknown, label = "to"): string {
   const raw = Array.isArray(v) ? v : String(v ?? "").split(/[,;]/);
   const list = raw
     .map((x) => (x && typeof x === "object" ? String((x as { email?: unknown; address?: unknown }).email ?? (x as { address?: unknown }).address ?? "") : String(x)))
@@ -73,7 +73,7 @@ async function gcall(access: string, path: string, init: { method?: string; body
   throw new Error(`Gmail ${r.status || "network"}: ${msg}`);
 }
 
-async function sendOne(access: string, it: Item, extra: { threadId?: string; inReplyTo?: string; references?: string } = {}): Promise<string> {
+export async function sendOne(access: string, it: Item, extra: { threadId?: string; inReplyTo?: string; references?: string } = {}): Promise<string> {
   const to = recipients(pick(it, "to", "email", "recipient", "address", "recipients"));
   const cc = pick(it, "cc") ? recipients(pick(it, "cc"), "cc") : "";
   const bcc = pick(it, "bcc") ? recipients(pick(it, "bcc"), "bcc") : "";
