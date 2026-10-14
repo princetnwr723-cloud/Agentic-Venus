@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Copy, Mail, RefreshCw, X } from "lucide-react";
+import { Copy, Mail, RefreshCw, Users, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import { browserCreate, browserOverview } from "@/lib/mail-browser";
 import type { AvatarColor } from "@/lib/bots";
@@ -16,10 +16,12 @@ const KIND: Record<string, string> = { created: "📬 inbox created", mail: "✉
 
 export default function IdentityPanel({
   open, onClose, chatId, name, color, presetRole, role, model, plugins, memories, skills, computer, getToken, onEmailCreated,
+  cooperation, onToggleCooperation,
 }: {
   open: boolean; onClose: () => void; chatId: string; name: string; color: AvatarColor; presetRole?: string; role: string; model: string;
   plugins: string[]; memories: number; skills: number; computer: string; getToken: () => Promise<string>;
   onEmailCreated: (placeholder: string) => void;
+  cooperation: boolean; onToggleCooperation: (on: boolean) => void;
 }) {
   const [tab, setTab] = useState<"profile" | "email" | "activity">("profile");
   const [data, setData] = useState<Overview | null>(null);
@@ -106,6 +108,30 @@ export default function IdentityPanel({
               <div className={row}><span className="text-muted">Computer</span><span className="text-ink">{computer}</span></div>
               <div className={row}><span className="text-muted">Memory (this chat only)</span><span className="text-ink">{memories} notes · {skills} skills</span></div>
               <div className={row}><span className="text-muted">Connected tools</span><span className="max-w-[260px] text-right text-ink">{plugins.length ? plugins.join(", ") : "free pack only"}</span></div>
+              <div className={row}><span className="text-muted">Agent cooperation</span><span className="text-ink">{cooperation ? "On" : "Off"}</span></div>
+
+              <div className="mt-4 rounded-lg border border-line p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-1.5 text-sm font-medium text-ink"><Users size={14} className="text-gold" /> Agent cooperation</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted">
+                      {cooperation
+                        ? "ON: this agent can use the work of all your other agents by itself whenever it helps (their notes, skills, results and code files). You do not need to type @."
+                        : "OFF: this agent works alone. Turn it on to let it use your other agents' work automatically. You can still type @ in the message box to pick one agent yourself."}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={cooperation}
+                    aria-label="Agent cooperation"
+                    onClick={() => onToggleCooperation(!cooperation)}
+                    className={`h-6 w-11 shrink-0 rounded-full transition-colors ${cooperation ? "bg-avatar-teal" : "bg-line"}`}
+                  >
+                    <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${cooperation ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
