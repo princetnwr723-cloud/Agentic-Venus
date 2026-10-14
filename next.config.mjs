@@ -2,7 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   experimental: {
-    serverComponentsExternalPackages: ["@sparticuz/chromium", "playwright-core"],
+    serverComponentsExternalPackages: ["@sparticuz/chromium", "playwright-core", "nodemailer"],
     outputFileTracingIncludes: {
       "/api/browser": ["./node_modules/@sparticuz/chromium/**/*"],
     },
