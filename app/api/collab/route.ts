@@ -18,11 +18,13 @@ export async function POST(req: Request) {
     }
 
     if (action === "brief") {
-      const ids = Array.from(new Set((Array.isArray(b.targets) ? b.targets : []).map(String).filter(validId))).filter((x) => x !== chatId).slice(0, 4);
+      const ids: string[] = Array.from(
+        new Set((Array.isArray(b.targets) ? b.targets : []).map(String).filter((x: string) => validId(x)))
+      ).filter((x: string) => x !== chatId).slice(0, 4) as string[];
       if (!ids.length) return NextResponse.json({ briefs: [] });
       const query = String(b.query || "").slice(0, 400);
       const per = Math.floor(6500 / ids.length);
-      const got = await Promise.all(ids.map(async (id) => {
+      const got = await Promise.all(ids.map(async (id: string) => {
         const r = await briefAgent(uid, id, query, { budget: per, code: true }).catch(() => null);
         return r ? { id, name: r.name, text: r.text } : null;
       }));
