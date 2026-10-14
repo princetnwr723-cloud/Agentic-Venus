@@ -18,11 +18,13 @@ export async function POST(req: Request) {
     }
 
     if (action === "brief") {
-      const rawTargets = Array.isArray(b.targets) ? b.targets : [];
-      const mappedTargets = rawTargets.map((t) => String(t));
-      const validTargets = mappedTargets.filter((x): x is string => validId(x));
-      const uniqueTargets = Array.from(new Set(validTargets)) as string[];
-      const ids: string[] = uniqueTargets.filter((x) => x !== chatId).slice(0, 4);
+      const rawTargets: unknown[] = Array.isArray(b.targets) ? b.targets : [];
+      const ids: string[] = [];
+      for (const t of rawTargets) {
+        const id = String(t);
+        if (validId(id) && id !== chatId && !ids.includes(id)) ids.push(id);
+        if (ids.length >= 4) break;
+      }
 
       if (!ids.length) return NextResponse.json({ briefs: [] });
       const query = String(b.query || "").slice(0, 400);
@@ -31,8 +33,8 @@ export async function POST(req: Request) {
         const r = await briefAgent(uid, id, query, { budget: per, code: true }).catch(() => null);
         return r ? { id, name: r.name, text: r.text } : null;
       }));
-      const briefs = got.filter(Boolean);
-      if (briefs.length) await grant(uid, chatId, briefs.map((x) => (x as { id: string }).id)); // the agent may now read their files too
+      const briefs = got.filter((x): x is { id: string; name: string; text: string } => x !== null);
+      if (briefs.length) await grant(uid, chatId, briefs.map((x) => x.id)); // the agent may now read their files too
       return NextResponse.json({ briefs });
     }
 
