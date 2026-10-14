@@ -102,6 +102,7 @@ export default function DashboardPage() {
   const [sessions, setSessions] = useState<Record<string, PcSession>>({});
   const [work, setWork] = useState<Record<string, Work>>({});
   const [, setBrainTick] = useState(0);
+  const [approval, setApproval] = useState<{ summary: string; warn: string; resolve: (ok: boolean) => void } | null>(null);
 
   const sessionsRef = useRef<Record<string, PcSession>>({});
   const sandboxRef = useRef<Record<string, string | null>>({});
@@ -571,10 +572,21 @@ export default function DashboardPage() {
     let r = await post(false);
     if (r.needsApproval) {
       const why = force ? "\n\n⚠️ Something the agent just read tried to give it instructions, so even auto-approved actions need your OK." : "";
-      if (!window.confirm(`Approve this action?\n\n${r.needsApproval.summary}${why}`)) return { text: "The user declined this action. Do not retry it.", flagged: false };
+      const summary = String(r.needsApproval.summary);
+      const okay = await new Promise<boolean>((resolve) => setApproval({ summary, warn: why.trim(), resolve }));
+      if (!okay) return { text: "The user declined this action. Do not retry it.", flagged: false };
       r = await post(true);
     }
     return { text: r.ok ? String(r.text) : `ERROR: ${r.text || r.error || "tool failed"}`, flagged: Array.isArray(r.flagged) && r.flagged.length > 0 };
+  }
+
+  /** An unfinished checklist from earlier (the server keeps it), so "continue" resumes exactly where it stopped. */
+  async function openPlanNote(chat: Chat): Promise<string> {
+    try {
+      const r = await readJson(await fetch("/api/tools", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "call", chatId: chat.id, name: "plan.status", args: {}, approved: false, force: false }) }));
+      const t = String(r.text ?? "").replace(/<\/?untrusted[^>]*>/g, "").trim();
+      return /PLAN OPEN:\s*\d+/.test(t) ? `\n\nUNFINISHED PLAN from earlier. Continue it if the owner's message is about it; if it is a different task or the steps are obsolete, call plan.clear first:\n${t}` : "";
+    } catch { return ""; }
   }
 
   // ---- Venus Code: ONLY for software projects, on its OWN computer ----
@@ -1174,6 +1186,7 @@ export default function DashboardPage() {
       if (!brains.current[chat.id]) await loadChatBrain(chat.id);
       const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: splitSuggestions(m.content).body }));
       const specs = await loadTools(chat);
+      const planNote = await openPlanNote(chat);
 
       // Adding a file to a GitHub repo is not coding: skip "understand" (it could pick the computer / Venus Code) and answer with tools.
       const repoFile = repoFileIntent(text);
@@ -1195,7 +1208,7 @@ export default function DashboardPage() {
       // 2) A normal answer: streaming, with the connected tools available
       const system =
         `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
-        brainPrompt(brainOf(chat.id), text) + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem + extraRepo + SUGGEST_PROMPT;
+        brainPrompt(brainOf(chat.id), text) + planNote + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem + extraRepo + SUGGEST_PROMPT;
       const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
       const at = Date.now();
       const userPrompt = history.pop()?.content ?? text;
@@ -1208,22 +1221,48 @@ export default function DashboardPage() {
 
       let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
       let tainted = false;
-      for (let round = 0; round < 14; round++) {
+      let planActive = planNote.length > 0;
+      let gates = 0;
+      // keeps long jobs inside the model's memory: old steps are dropped, the saved plan + latest results stay
+      const compact = (list: typeof convo): typeof convo => {
+        if (list.length <= 26) return list;
+        let s = list.length - 16;
+        if (list[s].role === "user") s++;
+        return [{ role: "user", content: "(earlier steps were trimmed: rely on the plan and on the results below)" }, ...list.slice(s)];
+      };
+      for (let round = 0; round < 40; round++) {
         const tc = extractToolCalls(reply);
-        if (!tc.calls.length) break;
+        if (!tc.calls.length) {
+          // the agent wants to stop: if its checklist still has open steps, send it back to work
+          if (!planActive || gates >= 6) break;
+          const st = await execTool(chat, "plan.status", {}, tainted);
+          if (!/PLAN OPEN:\s*\d+/.test(st.text)) break;
+          gates++;
+          workSet(chat.id, "Bacha hua kaam poora kar raha hoon…", "chat");
+          const nudge = `NOT FINISHED. Your plan still has open steps:\n${st.text}\n\nDo the next open step NOW with the right tool, then call plan.done with proof from the tool result. If a step fails, try another route first; only if truly impossible mark it done with note "skipped: reason". If the owner changed the subject, call plan.clear. Do not give the final answer until every step is done or explicitly skipped.`;
+          const before = reply;
+          reply = await callLLM(chat, system, nudge, [...convo, { role: "assistant", content: before }]);
+          convo = compact([...convo, { role: "assistant", content: before }, { role: "user", content: nudge }]);
+          continue;
+        }
         const results: string[] = [];
         for (const c of tc.calls.slice(0, 8)) {
+          if (c.name.startsWith("plan.")) planActive = true;
           patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
           workSet(chat.id, `🔧 ${c.name} chala raha hoon…`, "chat");
           const t = await execTool(chat, c.name, c.args, tainted);
           if (t.flagged) tainted = true;
           results.push(`### ${c.name}\n${t.text}`);
         }
-        workSet(chat.id, "Tool ke result se jawab bana raha hoon…", "chat");
-        const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nCheck: is the owner's WHOLE request done and confirmed by these results? If not, or if a tool failed or returned nothing useful, do NOT stop: fix the arguments and retry, or use a different tool or route, and continue now. Answer only when everything is done and proven, or when you are truly blocked (then say exactly what is blocked, what you tried, and what you need from the owner).`;
+        workSet(chat.id, "Tool ke result se agla step dekh raha hoon…", "chat");
+        const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nCheck: is the owner's WHOLE request done and confirmed by these results? If not, or if a tool failed or returned nothing useful, do NOT stop: fix the arguments and retry, or use a different tool or route, and continue now. If you have a plan, call plan.done for the steps these results confirm. Answer only when everything is done and proven, or when you are truly blocked (then say exactly what is blocked, what you tried, and what you need from the owner).`;
         const prev = reply;
         reply = await callLLM(chat, system, resultsMsg, [...convo, { role: "assistant", content: prev }]);
-        convo = [...convo, { role: "assistant", content: prev }, { role: "user", content: resultsMsg }];
+        convo = compact([...convo, { role: "assistant", content: prev }, { role: "user", content: resultsMsg }]);
+      }
+      if (planActive) {
+        const st = await execTool(chat, "plan.status", {}, tainted);
+        if (/PLAN OPEN:\s*\d+/.test(st.text)) reply = `${extractToolCalls(reply).clean}\n\n⏸️ Kuch steps abhi bache hain. "continue" bolo, main wahin se aage badhunga.`;
       }
 
       const parsed = extractCommands(extractToolCalls(reply).clean);
@@ -1348,6 +1387,20 @@ export default function DashboardPage() {
           />
         )}
       </div>
+
+      {approval && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 px-4">
+          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-xl2 border border-line bg-panel p-5">
+            <h2 className="text-sm font-medium text-ink">Approve this action?</h2>
+            <pre className="mt-3 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-bg p-3 text-xs text-ink">{approval.summary}</pre>
+            {approval.warn && <p className="mt-2 text-[11px] text-gold">{approval.warn}</p>}
+            <div className="mt-4 flex gap-2">
+              <button onClick={() => { approval.resolve(false); setApproval(null); }} className="flex-1 rounded-lg border border-line py-2.5 text-sm text-ink hover:bg-panel2">Decline</button>
+              <button onClick={() => { approval.resolve(true); setApproval(null); }} className="flex-1 rounded-lg bg-white py-2.5 text-sm font-medium text-bg hover:opacity-90">Approve</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <NewChatModal open={newChatOpen} onClose={() => setNewChatOpen(false)} customAgents={customAgents} onPick={handlePickAgent} onCreateAgent={handleCreateAgent} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
