@@ -2,6 +2,7 @@ import type { Def } from "./plugins";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { addMemoryServer, forgetMemoryServer, listSkills, recallSearch, saveSkillServer } from "@/lib/learning";
 import { installFromInput } from "@/lib/skill-install";
+import { COLLAB_TOOLS } from "./collab";
 
 const s = (v: unknown, n = 4000) => String(v ?? "").trim().slice(0, n);
 const need = <T,>(ctx: T | undefined): T => { if (!ctx) throw new Error("This tool only works from a chat."); return ctx; };
@@ -72,7 +73,8 @@ export const LEARNING_TOOLS: Def[] = [
     run: async (a, _c, ctx) => {
       const c = need(ctx);
       const want = s(a.name, 80).toLowerCase();
-      const k = (await listSkills(c.uid, c.chatId)).find((x) => x.name.toLowerCase() === want) ?? (await listSkills(c.uid, c.chatId)).find((x) => x.name.toLowerCase().includes(want));
+      const all = await listSkills(c.uid, c.chatId);
+      const k = all.find((x) => x.name.toLowerCase() === want) ?? all.find((x) => x.name.toLowerCase().includes(want));
       return k ? `# Skill: ${k.name}\n${k.instructions.slice(0, 12000)}` : `No skill named "${s(a.name, 80)}". Use skill.list to see the names.`;
     },
   },
@@ -86,4 +88,5 @@ export const LEARNING_TOOLS: Def[] = [
       return on ? "Proactive messages are ON (at most one a day)." : "Proactive messages are OFF.";
     },
   },
+  ...COLLAB_TOOLS,
 ];
