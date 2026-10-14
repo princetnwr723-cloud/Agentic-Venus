@@ -19,10 +19,10 @@ export async function POST(req: Request) {
 
     if (action === "brief") {
       const rawTargets = Array.isArray(b.targets) ? b.targets : [];
-      const mappedTargets = rawTargets.map((t: unknown) => String(t));
-      const validTargets = mappedTargets.filter((x: string): x is string => validId(x));
-      const uniqueTargets = Array.from(new Set(validTargets));
-      const ids: string[] = uniqueTargets.filter((x: string) => x !== chatId).slice(0, 4);
+      const mappedTargets = rawTargets.map((t) => String(t));
+      const validTargets = mappedTargets.filter((x): x is string => validId(x));
+      const uniqueTargets = Array.from(new Set(validTargets)) as string[];
+      const ids: string[] = uniqueTargets.filter((x) => x !== chatId).slice(0, 4);
 
       if (!ids.length) return NextResponse.json({ briefs: [] });
       const query = String(b.query || "").slice(0, 400);
