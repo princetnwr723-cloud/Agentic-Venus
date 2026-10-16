@@ -55,6 +55,7 @@ export async function startJob(sb: Sb, jobId: string, script: string) {
   if (!/^[a-z0-9]+$/.test(jobId)) throw new Error("Bad job id.");
 
   const b64 = Buffer.from(script, "utf8").toString("base64");
+
   await exec(
     sb,
     `mkdir -p /tmp/jobs && rm -f /tmp/jobs/${jobId}.exit /tmp/jobs/${jobId}.log && echo ${b64} | base64 -d > /tmp/jobs/${jobId}.sh && (nohup bash -lc 'bash /tmp/jobs/${jobId}.sh > /tmp/jobs/${jobId}.log 2>&1; echo $? > /tmp/jobs/${jobId}.exit' >/dev/null 2>&1 &); echo ok`,
@@ -68,9 +69,11 @@ function tidy(s: string): string {
 
 function parsePercent(log: string, total: number): number {
   let best = 0;
+
   for (const m of log.matchAll(/(\d+)\s*\/\s*(\d+)/g)) {
     if (Number(m[2]) === total) best = Math.max(best, Number(m[1]));
   }
+
   return total > 0 ? Math.min(1, best / total) : 0;
 }
 
@@ -96,62 +99,78 @@ export async function jobStatus(sb: Sb, jobId: string, total = 0) {
   };
 }
 
-const INSTALL_SCRIPT = `set -e
+const INSTALL_SCRIPT = `set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
-
-# E2B jobs can start with a reduced PATH. Include standard and user npm locations.
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.npm-global/bin"
 cd ${DIR}
 
-echo "== [1/5] Node.js and npm"
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+log() { printf '\\n== %s ==\\n' "$1"; }
 
-if ! command -v node >/dev/null 2>&1 || [ "$NODE_MAJOR" -lt 18 ] || ! command -v npm >/dev/null 2>&1; then
-  echo "Installing Node.js 20 and npm"
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-  sudo apt-get install -y nodejs
-  hash -r
+log "1/6 Install system prerequisites"
+if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=""; fi
+$SUDO apt-get update -y
+$SUDO apt-get install -y ca-certificates curl xz-utils ffmpeg fonts-liberation fonts-noto-color-emoji
+
+log "2/6 Install a complete Node.js 20 runtime (includes npm and npx)"
+# The distro nodejs package may be old and may not include npm.
+# Install the official Node.js binary distribution instead.
+NODE_BASE="https://nodejs.org/dist/latest-v20.x"
+SUMS="$(curl -fsSL --retry 3 --connect-timeout 15 "$NODE_BASE/SHASUMS256.txt")"
+NODE_ARCHIVE="$(printf '%s\\n' "$SUMS" | awk '$2 ~ /^node-v20\\.[0-9]+\\.[0-9]+-linux-x64\\.tar\\.xz$/ {print $2; exit}')"
+
+if [ -z "$NODE_ARCHIVE" ]; then
+  echo "ERROR: Could not discover the official Node.js 20 Linux x64 archive."
+  exit 1
 fi
 
-# Some environments install npm separately or outside the initial PATH.
-for candidate in /usr/bin/npm /usr/local/bin/npm "$HOME/.npm-global/bin/npm"; do
-  if [ -x "$candidate" ]; then
-    export PATH="$(dirname "$candidate"):$PATH"
-    break
-  fi
-done
+NODE_TMP="/tmp/$NODE_ARCHIVE"
+curl -fL --retry 3 --connect-timeout 15 "$NODE_BASE/$NODE_ARCHIVE" -o "$NODE_TMP"
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "ERROR: node is unavailable after installation; PATH=$PATH"
-  exit 127
+EXPECTED_SHA="$(printf '%s\\n' "$SUMS" | awk -v f="$NODE_ARCHIVE" '$2 == f {print $1; exit}')"
+ACTUAL_SHA="$(sha256sum "$NODE_TMP" | awk '{print $1}')"
+
+if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+  echo "ERROR: Node.js archive checksum verification failed."
+  exit 1
 fi
 
-if ! command -v npm >/dev/null 2>&1; then
-  echo "ERROR: npm is unavailable after installing nodejs; PATH=$PATH"
-  echo "Check the E2B image's Node.js installation and PATH before retrying."
-  exit 127
-fi
+$SUDO mkdir -p /opt/venus-node
+$SUDO tar -xJf "$NODE_TMP" -C /opt/venus-node --strip-components=1
+rm -f "$NODE_TMP"
 
-node -v
-npm -v
+export PATH="/opt/venus-node/bin:/usr/local/bin:$PATH"
+$SUDO ln -sf /opt/venus-node/bin/node /usr/local/bin/node
+$SUDO ln -sf /opt/venus-node/bin/npm /usr/local/bin/npm
+$SUDO ln -sf /opt/venus-node/bin/npx /usr/local/bin/npx
 
-echo "== [2/5] ffmpeg and system libraries"
-sudo apt-get update -y || true
-sudo apt-get install -y ffmpeg fonts-liberation fonts-noto-color-emoji
+command -v node
+command -v npm
+command -v npx
+node -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 18) process.exit(1); console.log("Node.js", process.version)'
+npm --version
+npx --version
 
-sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 || sudo apt-get install -y libnss3 libgbm1 libasound2t64 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2 || true
+log "3/6 Install browser runtime libraries"
+$SUDO apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 || $SUDO apt-get install -y libnss3 libgbm1 libasound2t64 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2
 
-echo "== [3/5] Remotion packages"
+log "4/6 Install Remotion and React"
+export PATH="/opt/venus-node/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 npm install --no-audit --no-fund react@18.3.1 react-dom@18.3.1 'remotion@^4' '@remotion/cli@^4' '@remotion/google-fonts@^4'
 
-echo "== [4/5] Headless Chrome"
+log "5/6 Install Remotion's browser"
 npx remotion browser ensure
 
-echo "== [5/5] Self-test render"
+log "6/6 Verify a real frame can render"
 mkdir -p out
 npx remotion still src/index.ts Main out/selftest.png --frame=20 --log=error
 
-echo "STUDIO READY"
+if [ ! -s out/selftest.png ]; then
+  echo "ERROR: Remotion returned without creating out/selftest.png"
+  exit 1
+fi
+
+file out/selftest.png || true
+echo "STUDIO READY: Node, npm, Remotion browser and a test frame are verified."
 `;
 
 export async function setupStudio(sb: Sb) {
@@ -161,6 +180,7 @@ export async function setupStudio(sb: Sb) {
   for (const [p, c] of Object.entries({ ...TEMPLATE_FILES, ...EXTRA_FILES })) {
     files[`${DIR}/${p}`] = c;
   }
+
   files[`${DIR}/.template-version`] = TEMPLATE_VERSION_FINAL;
 
   await writeFiles(sb, files);
@@ -199,8 +219,8 @@ tail -c 1500 /tmp/jobs/install.log 2>/dev/null`,
 
 /**
  * Writes the storyboard and AI-written scene files, checks them for syntax
- * errors, and builds the registry from scenes that passed. Failed scenes are
- * reported so the agent can repair them.
+ * errors, and builds the registry from scenes that passed. Failed scenes
+ * are reported so the agent can repair them.
  */
 export async function prepareProject(
   sb: Sb,
@@ -225,6 +245,7 @@ export async function prepareProject(
       if (s.type !== "custom") return s;
 
       const { code, ...rest } = s as Record<string, unknown>;
+
       if (typeof code === "string" && code) {
         const problem = checkCode(code);
 
@@ -247,6 +268,7 @@ export async function prepareProject(
   await writeFiles(sb, files);
 
   let good = customs;
+
   if (customs.length > 0) {
     const r = await exec(
       sb,
@@ -258,6 +280,7 @@ export async function prepareProject(
       const out = JSON.parse(r.stdout.trim().split("\n").pop() || "{}") as {
         bad?: Array<{ file: string; message: string }>;
       };
+
       const badFiles = new Map((out.bad ?? []).map((b) => [b.file, b.message]));
 
       for (const c of customs) {
@@ -271,7 +294,7 @@ export async function prepareProject(
 
       good = customs.filter((c) => !badFiles.has(c.file));
     } catch {
-      // Checker unavailable: the render itself will reveal problems.
+      // If the checker is unavailable, the render will reveal problems.
     }
   }
 
