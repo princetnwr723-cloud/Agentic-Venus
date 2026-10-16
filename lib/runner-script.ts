@@ -5,7 +5,7 @@
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "5";
+export const RUNNER_VERSION = "6";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -240,13 +240,17 @@ async function nTurn() {
   } else if (p === "gemini") {
     const d = await post("https://generativelanguage.googleapis.com/v1beta/models/" + job.model + ":generateContent", {"x-goog-api-key": KEY}, {contents: nmsgs, tools: [{functionDeclarations: defs.map((t) => ({name: t.name, description: t.description, parameters: jsonSchema(t)}))}], generationConfig: {maxOutputTokens: 8192}});
     const cand = d.candidates && d.candidates[0];
-    const content = cand && cand.content && Array.isArray(cand.content.parts) && cand.content.parts.length ? cand.content : {role: "model", parts: [{text: "(no answer)"}]};
+    const content = cand && cand.content && Array.isArray(cand.content.parts) && cand.content.parts.length ? cand.content : {role: "model", parts: []};
     if (!content.role) content.role = "model";
+    if (!content.parts.length) emit("info", "Gemini returned no content parts; finishReason=" + String(cand && cand.finishReason || "unknown") + ". This response will not count as task completion.");
     nmsgs.push(content);
     content.parts.forEach((pt, i) => {
       if (pt.functionCall) calls.push(toCall(pt.functionCall.name, pt.functionCall.args, "g" + i));
       else if (typeof pt.text === "string" && !pt.thought) text.push(pt.text);
     });
+    if (!calls.length && !text.join("\n").trim() && content.parts.length) {
+      emit("info", "Gemini returned no usable text/tool call (possibly thought-only output); finishReason=" + String(cand && cand.finishReason || "unknown") + ".");
+    }
   } else {
     const d = await post(OPENAI_URLS[p], {Authorization: "Bearer " + KEY}, {model: job.model, messages: nmsgs, tool_choice: "auto", tools: defs.map((t) => ({type: "function", function: {name: t.name, description: t.description, parameters: jsonSchema(t)}}))});
     const m = (d.choices && d.choices[0] && d.choices[0].message) || {};
@@ -755,6 +759,13 @@ async function gates(fin, ctx) {
     return "You changed UI files but have not LOOKED at the result. Open it with the look tool (path index.html, or url http://localhost:3000 for a dev server), check layout, text and images, fix what is wrong, then finish again.";
   }
   const changed = changedFiles();
+  const requiresImplementation = /\b(build|create|make|implement|develop|website|web\s*app|webpage|landing\s*page|application|app|site|page|component|feature)\b/i.test(INSTR);
+  const deliverables = changed.filter((f) => !/\.(md|mdx|mmd|txt|rst|adoc)$/i.test(f) && !/(^|\/)(LICENSE|CHANGELOG|CONTRIBUTING)(\.|$)/i.test(f));
+  if (requiresImplementation && deliverables.length === 0) {
+    ctx.gates.impl = (ctx.gates.impl || 0) + 1;
+    emit("info", "Gate: no implementation files changed; documentation-only completion blocked.");
+    return "IMPLEMENTATION REQUIRED: You have not changed any real implementation/output files. Do not finish after writing DESIGN.md, design.mmd, README.md, or VENUS.md. Create or update the actual source files requested by the user (for a static website: index.html, style.css, script.js; for a framework: the real app/source components), then inspect the files and verify the result. If a write/tool call failed, diagnose and retry it.";
+  }
   if (changed.length >= 2 && ctx.gates.mem < 1 && memUnchanged()) {
     ctx.gates.mem++;
     emit("info", "Gate: project memory (VENUS.md) not updated.");
@@ -863,8 +874,22 @@ async function main() {
     if (turn.thought) emit("thought", turn.thought.slice(0, 700));
 
     if (calls.length === 0) {
-      if (++noTool >= 2) return end("done", turn.thought || "Done.", ctx.memories);
-      addUser("Use a tool, or call finish if you are done.");
+      noTool++;
+      const answer = String(turn.thought || "").trim();
+      if (!answer) {
+        emit("info", "The model returned an empty response (no text and no tool calls). This is not task completion.");
+        if (noTool >= 3) {
+          writeState(ctx);
+          return end("error", "The model returned 3 consecutive empty responses. No completion was claimed and no further files were written. Retry with a supported model/provider or check the provider response and model name.", ctx.memories);
+        }
+        addUser("Your last response was empty: it contained no text and no tool calls. Do not stop. Continue the task now by calling a tool (read/list/write/edit/bash) or call finish only after the requested implementation is complete and verified.");
+        continue;
+      }
+      if (noTool >= 3) {
+        writeState(ctx);
+        return end("error", "The model repeatedly returned text without executing a tool or calling finish. The task is not marked complete. Retry or choose a model that supports tool calling reliably.", ctx.memories);
+      }
+      addUser("This is a software task. Do not stop with a plain-text response. Continue by calling the next required tool, implement the requested files, verify them, and call finish only when done.");
       continue;
     }
     noTool = 0;
