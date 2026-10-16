@@ -107,7 +107,7 @@ wait_for_apt() {
     fi
     if [ "$busy" -eq 0 ]; then return 0; fi
     attempt=$((attempt + 1))
-    echo "Package manager is busy; waiting for its locks (${attempt}/${max_attempts})..."
+    echo "Package manager is busy; waiting for its locks (\${attempt}/\${max_attempts})..."
     sleep 5
   done
   echo "ERROR: apt/dpkg locks remained busy for 180 seconds. No lock files were deleted and no package process was killed. Retry Studio setup after the other package operation finishes."
@@ -118,10 +118,10 @@ apt_retry() {
   local attempt=1 max_attempts=4
   until wait_for_apt && $SUDO apt-get -o DPkg::Lock::Timeout=180 -o Acquire::Retries=3 "$@"; do
     if [ "$attempt" -ge "$max_attempts" ]; then
-      echo "ERROR: apt-get failed after ${max_attempts} attempts: $*"
+      echo "ERROR: apt-get failed after \${max_attempts} attempts: $*"
       return 1
     fi
-    echo "apt-get attempt ${attempt} failed; waiting 10 seconds before retry..."
+    echo "apt-get attempt \${attempt} failed; waiting 10 seconds before retry..."
     sleep 10
     attempt=$((attempt + 1))
   done
