@@ -32,7 +32,7 @@ export type Scene = { type: SceneType; seconds: number; [k: string]: unknown };
 export type Storyboard = {
   title: string; concept?: string; fps: number; width: number; height: number; theme: string;
   palette?: Record<string, string>; fonts?: { display?: string; body?: string };
-  music?: string; captions: boolean; scenes: Scene[];
+  music?: string; sfx?: string; captions: boolean; scenes: Scene[];
 };
 
 const ALLOWED_IMPORTS = ["react", "remotion", "../kit", "../theme"];
@@ -69,13 +69,14 @@ function clean(v: unknown, depth = 0): unknown {
 
 const FILE_RE = /^p\/[A-Za-z0-9_-]+\/(img|vo|vid)\/[A-Za-z0-9_.-]+$/;
 const MUSIC_RE = /^p\/[A-Za-z0-9_-]+\/music\.mp3$/;
+const SFX_RE = /^p\/[A-Za-z0-9_-]+\/sfx\.mp3$/;
 
 export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
   const rawObj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const code = typeof rawObj.code === "string" ? rawObj.code.slice(0, 12000) : undefined;
   const base = (clean({ ...rawObj, code: undefined }) as Record<string, unknown>) ?? {};
   const type = SCENE_TYPES.includes(base.type as SceneType) ? (base.type as SceneType) : "title";
-  const seconds = Math.min(14, Math.max(2.5, Number(base.seconds) || 4));
+  const seconds = Math.min(14, Math.max(1.5, Number(base.seconds) || 4));
   const out: Scene = { ...base, type, seconds };
   for (const k of ["voice", "image", "video"]) {
     if (!keepFiles || typeof out[k] !== "string" || !FILE_RE.test(String(out[k]))) delete out[k];
@@ -104,7 +105,7 @@ export function sanitizeStoryboard(
   const themeId = String(opts.theme ?? r.theme ?? "midnight");
   const theme = THEMES.some((t) => t.id === themeId) ? themeId : "midnight";
 
-  const list = Array.isArray(r.scenes) ? r.scenes.slice(0, 14) : [];
+  const list = Array.isArray(r.scenes) ? r.scenes.slice(0, 24) : [];
   let scenes = list.map((s) => sanitizeScene(s, Boolean(opts.keepFiles)));
   if (scenes.length === 0) scenes = [{ type: "title", seconds: 4, headline: String(r.title ?? "Untitled") }];
 
@@ -121,7 +122,7 @@ export function sanitizeStoryboard(
   const total = scenes.reduce((a, s) => a + s.seconds, 0) - (OVERLAP / 30) * (scenes.length - 1);
   if (total > max) {
     const f = max / total;
-    scenes = scenes.map((s) => ({ ...s, seconds: Math.max(2.5, Math.round(s.seconds * f * 10) / 10) }));
+    scenes = scenes.map((s) => ({ ...s, seconds: Math.max(1.5, Math.round(s.seconds * f * 10) / 10) }));
   }
 
   const palette: Record<string, string> = {};
@@ -142,6 +143,7 @@ export function sanitizeStoryboard(
     ...(Object.keys(palette).length >= 4 ? { palette } : {}),
     ...(fonts.display || fonts.body ? { fonts } : {}),
     ...(opts.keepFiles && typeof r.music === "string" && MUSIC_RE.test(r.music) ? { music: r.music } : {}),
+    ...(opts.keepFiles && typeof r.sfx === "string" && SFX_RE.test(r.sfx) ? { sfx: r.sfx } : {}),
     captions: opts.captions ?? Boolean(r.captions),
     scenes,
   };
