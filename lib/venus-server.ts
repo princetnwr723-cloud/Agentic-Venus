@@ -1,4 +1,5 @@
-// Server-only helpers that talk to the Studio computer (an E2B sandbox).
+
+ // Server-only helpers that talk to the Studio computer (an E2B sandbox).
 import { connect, exec } from "@/lib/e2b-server";
 import { TEMPLATE_FILES } from "@/lib/venus-template";
 import { EXTRA_FILES, TEMPLATE_VERSION_FINAL } from "@/lib/venus-template-extra";
@@ -16,34 +17,43 @@ export function safeId(s: unknown): string {
 export async function writeFiles(sb: Sb, files: Record<string, string>) {
   const batches: string[] = [];
   let cur = "";
+
   for (const [path, content] of Object.entries(files)) {
     const b64 = Buffer.from(content, "utf8").toString("base64");
     const piece = `mkdir -p "$(dirname '${path}')" && echo ${b64} | base64 -d > '${path}'\n`;
+
     if (cur && cur.length + piece.length > 70_000) {
       batches.push(cur);
       cur = "";
     }
     cur += piece;
   }
+
   if (cur) batches.push(cur);
+
   for (const b of batches) {
     const r = await exec(sb, b, 30_000);
-    if (r.exitCode !== 0) throw new Error("Could not write files: " + (r.stderr || r.stdout).slice(0, 300));
+    if (r.exitCode !== 0) {
+      throw new Error("Could not write files: " + (r.stderr || r.stdout).slice(0, 300));
+    }
   }
 }
 
 export async function writeBinary(sb: Sb, path: string, bytes: Buffer) {
   const b64 = bytes.toString("base64");
   await exec(sb, `mkdir -p "$(dirname '${path}')" && : > '${path}.b64'`, 10_000);
+
   for (let i = 0; i < b64.length; i += 60_000) {
     await exec(sb, `echo ${b64.slice(i, i + 60_000)} >> '${path}.b64'`, 15_000);
   }
+
   const r = await exec(sb, `base64 -d '${path}.b64' > '${path}' && rm -f '${path}.b64'`, 15_000);
   if (r.exitCode !== 0) throw new Error("Could not save the audio file.");
 }
 
 export async function startJob(sb: Sb, jobId: string, script: string) {
   if (!/^[a-z0-9]+$/.test(jobId)) throw new Error("Bad job id.");
+
   const b64 = Buffer.from(script, "utf8").toString("base64");
   await exec(
     sb,
@@ -66,15 +76,18 @@ function parsePercent(log: string, total: number): number {
 
 export async function jobStatus(sb: Sb, jobId: string, total = 0) {
   if (!/^[a-z0-9]+$/.test(jobId)) throw new Error("Bad job id.");
+
   const r = await exec(
     sb,
     `cat /tmp/jobs/${jobId}.exit 2>/dev/null; echo ---; tail -c 6000 /tmp/jobs/${jobId}.log 2>/dev/null`,
     10_000
   );
+
   const idx = r.stdout.indexOf("---\n");
   const exitStr = (idx >= 0 ? r.stdout.slice(0, idx) : "").trim();
   const log = tidy(idx >= 0 ? r.stdout.slice(idx + 4) : r.stdout);
   const done = exitStr !== "";
+
   return {
     done,
     exitCode: done ? Number(exitStr) : undefined,
@@ -85,37 +98,78 @@ export async function jobStatus(sb: Sb, jobId: string, total = 0) {
 
 const INSTALL_SCRIPT = `set -e
 export DEBIAN_FRONTEND=noninteractive
+
+# E2B jobs can start with a reduced PATH. Include standard and user npm locations.
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.npm-global/bin"
 cd ${DIR}
-echo "== [1/5] Node.js"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
+
+echo "== [1/5] Node.js and npm"
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+
+if ! command -v node >/dev/null 2>&1 || [ "$NODE_MAJOR" -lt 18 ] || ! command -v npm >/dev/null 2>&1; then
+  echo "Installing Node.js 20 and npm"
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
   sudo apt-get install -y nodejs
+  hash -r
 fi
+
+# Some environments install npm separately or outside the initial PATH.
+for candidate in /usr/bin/npm /usr/local/bin/npm "$HOME/.npm-global/bin/npm"; do
+  if [ -x "$candidate" ]; then
+    export PATH="$(dirname "$candidate"):$PATH"
+    break
+  fi
+done
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: node is unavailable after installation; PATH=$PATH"
+  exit 127
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "ERROR: npm is unavailable after installing nodejs; PATH=$PATH"
+  echo "Check the E2B image's Node.js installation and PATH before retrying."
+  exit 127
+fi
+
 node -v
+npm -v
+
 echo "== [2/5] ffmpeg and system libraries"
 sudo apt-get update -y || true
 sudo apt-get install -y ffmpeg fonts-liberation fonts-noto-color-emoji
+
 sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 || sudo apt-get install -y libnss3 libgbm1 libasound2t64 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2 || true
+
 echo "== [3/5] Remotion packages"
-npm install --save-exact --no-audit --no-fund react@18.3.1 react-dom@18.3.1 remotion@^4 @remotion/cli@^4 @remotion/google-fonts@^4
+npm install --no-audit --no-fund react@18.3.1 react-dom@18.3.1 'remotion@^4' '@remotion/cli@^4' '@remotion/google-fonts@^4'
+
 echo "== [4/5] Headless Chrome"
 npx remotion browser ensure
+
 echo "== [5/5] Self-test render"
 mkdir -p out
 npx remotion still src/index.ts Main out/selftest.png --frame=20 --log=error
+
 echo "STUDIO READY"
 `;
 
 export async function setupStudio(sb: Sb) {
   await exec(sb, `mkdir -p ${DIR}/src/custom ${DIR}/out ${DIR}/work ${DIR}/public`, 15_000);
+
   const files: Record<string, string> = {};
-  for (const [p, c] of Object.entries({ ...TEMPLATE_FILES, ...EXTRA_FILES })) files[`${DIR}/${p}`] = c;
+  for (const [p, c] of Object.entries({ ...TEMPLATE_FILES, ...EXTRA_FILES })) {
+    files[`${DIR}/${p}`] = c;
+  }
   files[`${DIR}/.template-version`] = TEMPLATE_VERSION_FINAL;
+
   await writeFiles(sb, files);
   await startJob(sb, "install", INSTALL_SCRIPT);
 }
 
-export async function studioState(sb: Sb): Promise<{ state: "none" | "installing" | "ready" | "failed"; log: string }> {
+export async function studioState(
+  sb: Sb
+): Promise<{ state: "none" | "installing" | "ready" | "failed"; log: string }> {
   const r = await exec(
     sb,
     `cd ${DIR} 2>/dev/null || { echo none; exit 0; }
@@ -126,23 +180,27 @@ echo ---
 tail -c 1500 /tmp/jobs/install.log 2>/dev/null`,
     12_000
   );
+
   if (r.stdout.trim().startsWith("none")) return { state: "none", log: "" };
+
   const idx = r.stdout.indexOf("---\n");
   const head = idx >= 0 ? r.stdout.slice(0, idx) : r.stdout;
   const log = tidy(idx >= 0 ? r.stdout.slice(idx + 4) : "");
   const v = /v=(.*)/.exec(head)?.[1]?.trim() ?? "";
   const e = /e=(.*)/.exec(head)?.[1]?.trim() ?? "";
   const ok = /ok=(\d)/.exec(head)?.[1] === "1";
+
   if (v !== TEMPLATE_VERSION_FINAL) return { state: "none", log };
   if (e === "") return { state: "installing", log };
   if (e === "0" && ok) return { state: "ready", log };
+
   return { state: "failed", log };
 }
 
 /**
- * Writes the storyboard and the AI-written scene files, checks them for syntax
- * errors, and builds the registry from the scenes that passed. Scenes that
- * failed are reported so the agent can repair them.
+ * Writes the storyboard and AI-written scene files, checks them for syntax
+ * errors, and builds the registry from scenes that passed. Failed scenes are
+ * reported so the agent can repair them.
  */
 export async function prepareProject(
   sb: Sb,
@@ -150,6 +208,7 @@ export async function prepareProject(
   storyboard: Storyboard
 ): Promise<{ errors: Array<{ index: number; message: string }> }> {
   const dir = `${DIR}/src/custom`;
+
   await exec(
     sb,
     `mkdir -p ${dir} ${DIR}/work/${pid} ${DIR}/public/p/${pid}/img ${DIR}/public/p/${pid}/vo && rm -f ${dir}/${pid}_*.tsx`,
@@ -164,9 +223,11 @@ export async function prepareProject(
     ...storyboard,
     scenes: storyboard.scenes.map((s, i) => {
       if (s.type !== "custom") return s;
+
       const { code, ...rest } = s as Record<string, unknown>;
       if (typeof code === "string" && code) {
         const problem = checkCode(code);
+
         if (problem) {
           errors.push({ index: i, message: problem });
         } else {
@@ -177,30 +238,47 @@ export async function prepareProject(
       } else {
         errors.push({ index: i, message: "This AI scene has no code yet." });
       }
+
       return rest;
     }),
   };
+
   files[`${DIR}/work/${pid}/storyboard.json`] = JSON.stringify(slim);
   await writeFiles(sb, files);
 
   let good = customs;
   if (customs.length > 0) {
-    const r = await exec(sb, `cd ${DIR} && node check.cjs ${customs.map((c) => `'${c.file}'`).join(" ")}`, 30_000);
+    const r = await exec(
+      sb,
+      `cd ${DIR} && node check.cjs ${customs.map((c) => `'${c.file}'`).join(" ")}`,
+      30_000
+    );
+
     try {
-      const out = JSON.parse(r.stdout.trim().split("\n").pop() || "{}") as { bad?: Array<{ file: string; message: string }> };
+      const out = JSON.parse(r.stdout.trim().split("\n").pop() || "{}") as {
+        bad?: Array<{ file: string; message: string }>;
+      };
       const badFiles = new Map((out.bad ?? []).map((b) => [b.file, b.message]));
+
       for (const c of customs) {
-        if (badFiles.has(c.file)) errors.push({ index: c.index, message: "Syntax error: " + badFiles.get(c.file) });
+        if (badFiles.has(c.file)) {
+          errors.push({
+            index: c.index,
+            message: "Syntax error: " + badFiles.get(c.file),
+          });
+        }
       }
+
       good = customs.filter((c) => !badFiles.has(c.file));
     } catch {
-      // checker unavailable: the render itself will reveal problems
+      // Checker unavailable: the render itself will reveal problems.
     }
   }
 
   const registry =
     good.map((c, i) => `import C${i} from "./${pid}_${c.id}";`).join("\n") +
     `\nexport const CUSTOM: any = {${good.map((c, i) => `"${c.id}": C${i}`).join(",")}};\n`;
+
   await writeFiles(sb, { [`${dir}/registry.ts`]: registry });
 
   return { errors };
