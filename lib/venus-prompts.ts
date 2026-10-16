@@ -1,546 +1,135 @@
-"use client";
+import { ASPECTS, type Aspect } from "@/lib/venus-schema";
 
-import Link from "next/link";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import {
-  ArrowRight, Brain, Check, ChevronRight, Clock, Code2, Copy, Film, GitBranch, KeyRound, Layers, Menu, MessageSquare,
-  Minus, Monitor, Phone, Plug, Rocket, Search, ShieldCheck, Sparkles, Users, X,
-} from "lucide-react";
-import Logo from "@/components/Logo";
-import {
-  AGENTS, BEST_AT, ENV_VARS, FAQ, FEATURES, HELPS, LIMITS, MATRIX, PRODUCT, RATINGS, type Cell, type IconKey,
-} from "@/lib/docs-content";
+export function directorPrompt(o: {
+  brief: string; seconds: number; aspect: Aspect; voice: boolean; captions: boolean;
+  design: "ai" | "library"; context?: string;
+}): string {
+  const a = ASPECTS[o.aspect];
+  return `You are the art director of "Venus Pro", an AI motion-graphics studio. Turn the brief into a storyboard for a ${o.seconds}-second video (${a.width}x${a.height}, ${o.aspect}). Reply with ONE JSON object only — no prose, no markdown fences.
 
-const ICONS: Record<IconKey, ReactNode> = {
-  monitor: <Monitor size={17} />, code: <Code2 size={17} />, film: <Film size={17} />, users: <Users size={17} />,
-  brain: <Brain size={17} />, plug: <Plug size={17} />, key: <KeyRound size={17} />, phone: <Phone size={17} />,
-  rocket: <Rocket size={17} />, clock: <Clock size={17} />, shield: <ShieldCheck size={17} />, check: <Check size={17} />,
-  message: <MessageSquare size={17} />, git: <GitBranch size={17} />, sparkles: <Sparkles size={17} />, layers: <Layers size={17} />,
-};
+STEP 1 — ART DIRECTION. Invent a visual identity that fits THIS topic (do not default to blue/purple unless it fits). If the user's memory below describes a brand (name, colors, fonts, handle), USE it.
+- "concept": one sentence describing the look and motion style.
+- "palette": generate a topic-specific six-color palette {"bg1","bg2","accent","accent2","text","muted"}; strong contrast between text and background. Do not use a preset theme palette or repeat the same palette for unrelated briefs. Select colors from the subject, emotional tone, brand context, and intended audience. Use light backgrounds when appropriate; dark is not mandatory.
+- "fonts": {"display": inter|montserrat|poppins|spacegrotesk|playfair|oswald, "body": inter|poppins|spacegrotesk}. Choose typography to match the subject rather than defaulting to the same pair every time.
 
-type NavItem = { id: string; group: string; title: string; kw: string };
-const NAV: NavItem[] = [
-  { id: "overview", group: "Start", title: "Overview", kw: "intro what is agenticvenus" },
-  { id: "quickstart", group: "Start", title: "Quick start", kw: "setup install begin first chat keys" },
-  { id: "agent", group: "The agent", title: "Meet your agent", kw: "chief persona role identity" },
-  { id: "routing", group: "The agent", title: "How it decides", kw: "intent understand route commands slash" },
-  { id: "different", group: "The agent", title: "What makes it different", kw: "unique advantage why" },
-  { id: "features", group: "Features", title: "All features", kw: "list capabilities" },
-  { id: "computer", group: "Features", title: "Computer agent", kw: "browser desktop e2b recipes screen" },
-  { id: "code", group: "Features", title: "Venus Code", kw: "coding github clone push deploy" },
-  { id: "video", group: "Features", title: "Venus Pro (video)", kw: "remotion storyboard reel" },
-  { id: "team", group: "Features", title: "Team & specialists", kw: "chief planner parallel roster" },
-  { id: "memory", group: "Features", title: "Memory & skills", kw: "learn remember skill trial" },
-  { id: "connectors", group: "Features", title: "Connectors & channels", kw: "mcp oauth telegram whatsapp slack gmail" },
-  { id: "voice", group: "Features", title: "Voice & missions", kw: "phone call twilio mission routine schedule" },
-  { id: "verification", group: "Trust", title: "Verification", kw: "leads verified contract evidence csv" },
-  { id: "security", group: "Trust", title: "Security model", kw: "vault vpassword injection shield approval" },
-  { id: "compare", group: "Compare", title: "Comparison & ratings", kw: "openclaw hermes grok openai rating score" },
-  { id: "best", group: "Compare", title: "Where it is best", kw: "strengths" },
-  { id: "help", group: "Compare", title: "How it helps you", kw: "use cases founders developers" },
-  { id: "architecture", group: "Reference", title: "Architecture", kw: "firebase vercel supabase e2b runner tick" },
-  { id: "env", group: "Reference", title: "Environment variables", kw: "config env vercel secrets" },
-  { id: "limits", group: "Reference", title: "Honest limitations", kw: "weakness known issues beta" },
-  { id: "faq", group: "Reference", title: "FAQ", kw: "questions answers" },
-];
+STEP 2 — SCENES. Every scene accepts "seconds", "narration", "transition" (fade|slide|zoom|wipe|blur), "fontScale" and "camera" — a virtual camera move or up to 3 stacked: push, pull, pan-left, pan-right, tilt-up, tilt-down, orbit, handheld, crash-zoom, whip. Use camera moves like a cinematographer: push on key statements, handheld on footage, crash-zoom for emphasis, whip to open an energetic scene. Not every scene needs one.
+Library scene types:
+ title {headline, subhead?} · kinetic {text, emphasis?: [words]} · bullets {headline, items: [3-5 short strings]} · stat {label, value: number, prefix?, suffix?, decimals?, caption?} · bar-chart {headline, data: [{label, value}] (2-6), unit?} · line-chart {headline, data: [{label, value}] (3-8)} · quote {text, author?} · split {headline?, left: {title, points}, right: {title, points}} · timeline {headline, steps: [{label, text}] (3-5)} · ranking {headline, items: [{title, note?}] (3-5)} · image {headline?, subhead?, imageQuery: "2-4 English words"} · footage {headline?, subhead?, footageQuery: "2-4 English words for REAL stock video b-roll"} · outro {headline, subhead?, handle?}
+CODE-ONLY MOTION GRAPHICS — MANDATORY FOR EVERY VIDEO:
+Every scene MUST use type "custom" and must be rendered from a generated React/TSX Remotion scene component. Do not use the built-in library scene types, "image", or "footage". Do not request stock photos, stock video, downloaded assets, or external media. Draw the visuals with code: React, SVG, vector shapes, gradients, masks, charts, particles, kinetic typography, and frame-driven animation. Choose the number of custom scenes dynamically from the brief, duration, narrative complexity, and pace. There is NO fixed scene count. Typical guidance (not a hard rule): 10-15 seconds may need 4-7 scenes; 20-30 seconds may need 7-13; 30-45 seconds may need 10-18; 45-60 seconds may need 14-22. Use fewer scenes for slow, emotional storytelling and more short scenes for energetic product launches, explainers, UI demos, and music-synchronized edits. Add a new scene only when the visual idea, story beat, camera/motion language, or sound cue meaningfully changes. Avoid filler and avoid forcing every video into the same count. Each scene must have a unique letters/digits-only id, a specific 1-3 sentence "brief" describing exact composition and animation, a short "headline", and a "fallbackText". Vary the visual grammar to fit the subject: kinetic type, SVG diagrams, data visualization, orbital geometry, particles, timeline builds, isometric shapes, split reveals, radial meters, or morph-like transitions. All animation must be deterministic and driven by Remotion's frame APIs. No CSS keyframe animation, timers, network requests, or random unseeded effects. The video should be made from code-rendered graphics, not a slideshow of stock media.
 
-// ---------- small building blocks ----------
-function Section({ id, eyebrow, title, children }: { id: string; eyebrow: string; title: string; children: ReactNode }) {
-  return (
-    <section id={id} className="scroll-mt-24 border-b border-line py-12 last:border-0">
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-gold">{eyebrow}</p>
-      <h2 className="mb-5 text-2xl font-semibold tracking-tight text-ink md:text-[1.7rem]">{title}</h2>
-      <div className="space-y-4 text-[15px] leading-relaxed text-muted">{children}</div>
-    </section>
-  );
-}
-const H3 = ({ children }: { children: ReactNode }) => <h3 className="mt-6 text-base font-semibold text-ink">{children}</h3>;
-const B = ({ children }: { children: ReactNode }) => <b className="font-medium text-ink">{children}</b>;
-const Pill = ({ children }: { children: ReactNode }) => (
-  <code className="rounded bg-panel2 px-1.5 py-0.5 text-[12.5px] text-gold">{children}</code>
-);
+OUTPUT FORMAT:
+{"title":"...","concept":"...","palette":{"bg1":"#...","bg2":"#...","accent":"#...","accent2":"#...","text":"#...","muted":"#..."},"fonts":{"display":"...","body":"..."},"scenes":[{"type":"custom","id":"c1","seconds":3.5,"soundCue":"typing","brief":"...","headline":"...","fallbackText":"..."}, ...]}
 
-function Callout({ tone = "info", title, children }: { tone?: "info" | "warn"; title: string; children: ReactNode }) {
-  return (
-    <div className={`rounded-xl border p-4 text-sm ${tone === "warn" ? "border-gold/40 bg-goldSoft/40" : "border-line bg-panel"}`}>
-      <p className="mb-1 font-medium text-ink">{title}</p>
-      <div className="leading-relaxed text-muted">{children}</div>
-    </div>
-  );
+RULES
+- Scene count is adaptive, not fixed. Choose the count that best serves the brief and pacing; keep within the renderer's supported maximum. The sum of scene seconds should be approximately ${o.seconds} plus only the small amount needed for transition overlap, and the final timeline must not exceed ${o.seconds}. Scene durations may be short for fast edits (about 1.5-5 seconds) or longer for complex explanations and emotional moments (up to 8 seconds). Avoid monotonous pacing.
+- First scene opens the video, last is "outro" or a closing custom scene.
+- Every scene is custom code. Never repeat the same composition or motion concept twice in a row; vary transitions and virtual camera moves.
+- SOUND DESIGN PLAN: include a "soundCue" field per scene, chosen from "typing", "soft-click", "whoosh", "impact", "chime", "riser", "none". Use typing/soft-click for UI or text-entry moments, whoosh for meaningful transitions, impact for major reveals, chime for a positive resolution, and none when silence is more effective. Avoid using a loud effect on every scene. Effects will be generated and timed by the renderer; do not request copyrighted audio.
+- On-screen text SHORT (headlines max 7 words), English unless the brief asks otherwise.
+- NEVER invent statistics, prices or facts. Use numbers only if they are in the brief or you are certain; otherwise use non-numeric scenes.
+- ${o.voice ? 'Every scene needs a "narration" (natural spoken English, about 2 words per second of the scene) that agrees with the on-screen text.' : 'Do not add "narration".'}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
+
+BRIEF:
+${o.brief}`;
 }
 
-function Code({ children, label }: { children: string; label?: string }) {
-  const [done, setDone] = useState(false);
+const SCENE_API = `You write ONE React (TSX) file that renders a single scene of a Remotion video.
+
+HARD RULES
+- First line: import React from "react";
+- Allowed imports ONLY: "react", "remotion", "../kit", "../theme". Nothing else.
+- Default export: export default function Scene({p, T, dur}: any). p = this scene's JSON (e.g. p.headline), T = theme {bg1,bg2,accent,accent2,text,muted,card,line,onAccent,dark,fd,fb} (fd/fb are the display/body font-family strings — use T.fd for headings, T.fb for body), dur = scene length in frames (30 fps).
+- From "remotion": AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig, Easing, random, Sequence.
+- From "../kit": EASE, Frame, Rise, H, fit, grad, useU, clampArr, num, txt. useU() returns {u, w, h, portrait}; u = min(width,height)/720 — size EVERYTHING with u so it works in 16:9, 9:16 and 1:1.
+- Everything animates from useCurrentFrame() only. No CSS animations, no setTimeout, no Math.random (use random("seed")), no network, no external images/fonts/video. Use SVG, CSS gradients, shapes and text.
+- Root element is <AbsoluteFill>. The video already draws the background, so keep your root transparent.
+- Enter animation within the first ~16 frames; be settled by dur-14 (the video fades the scene out itself).
+- Never throw: give every prop a default. Keep text inside the frame (use fit() and maxWidth). Max ~140 lines.
+- Make it look PREMIUM: layered shapes, staggered springs, easing, depth, generous spacing. Avoid plain centered text.`;
+
+const SCENE_EXAMPLE = `import React from "react";
+import {AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig, Easing} from "remotion";
+import {useU} from "../kit";
+
+export default function Scene({p, T, dur}: any) {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const {u, w, h} = useU();
+  const words = String(p.headline || "Make it move").split(" ");
+  const sweep = interpolate(frame, [10, 40], [0, 1], {extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.out(Easing.cubic)});
   return (
-    <div className="overflow-hidden rounded-xl border border-line bg-panel">
-      <div className="flex items-center justify-between border-b border-line px-3.5 py-2 text-[11px] text-faint">
-        <span>{label ?? "shell"}</span>
-        <button
-          onClick={() => { navigator.clipboard?.writeText(children); setDone(true); setTimeout(() => setDone(false), 1200); }}
-          className="flex items-center gap-1 hover:text-ink"
-        >
-          {done ? <Check size={12} /> : <Copy size={12} />} {done ? "Copied" : "Copy"}
-        </button>
+    <AbsoluteFill style={{alignItems: "center", justifyContent: "center"}}>
+      <svg width={w} height={h} style={{position: "absolute"}}>
+        {[0, 1, 2, 3].map((i) => {
+          const r = (140 + i * 70) * u;
+          const a = frame * (0.6 + i * 0.25) * (i % 2 ? -1 : 1);
+          return (
+            <g key={i} transform={"rotate(" + a + " " + w / 2 + " " + h / 2 + ")"} opacity={0.18 + i * 0.1}>
+              <circle cx={w / 2} cy={h / 2} r={r} fill="none" stroke={T.accent} strokeWidth={2 * u} strokeDasharray={12 * u + " " + 18 * u} />
+              <circle cx={w / 2 + r} cy={h / 2} r={7 * u} fill={T.accent2} />
+            </g>
+          );
+        })}
+      </svg>
+      <div style={{display: "flex", gap: 22 * u, flexWrap: "wrap", justifyContent: "center", maxWidth: "80%"}}>
+        {words.map((word, i) => {
+          const s = spring({frame: frame - (6 + i * 5), fps, config: {damping: 14, stiffness: 120}});
+          return (
+            <span key={i} style={{fontFamily: T.fd, fontWeight: 800, fontSize: 96 * u, color: i % 2 ? T.accent : T.text, display: "inline-block", opacity: s, transform: "translateY(" + (1 - s) * 60 * u + "px) rotate(" + (1 - s) * -6 + "deg)"}}>
+              {word}
+            </span>
+          );
+        })}
       </div>
-      <pre className="overflow-x-auto p-3.5 text-[12.5px] leading-relaxed text-ink"><code>{children}</code></pre>
-    </div>
+      <div style={{position: "absolute", bottom: h * 0.28, width: 360 * u * sweep, height: 8 * u, borderRadius: 99, background: "linear-gradient(90deg, " + T.accent + ", " + T.accent2 + ")"}} />
+    </AbsoluteFill>
   );
+}`;
+
+export function sceneCodePrompt(o: {
+  scene: Record<string, unknown>; palette?: Record<string, string>; fonts?: { display?: string; body?: string };
+  aspect: string; frames: number; concept?: string; previousCode?: string; error?: string; critique?: string;
+}): string {
+  const fix = o.previousCode
+    ? `\n\nYOUR PREVIOUS CODE:\n${o.previousCode}\n\n${o.error ? `IT FAILED WITH THIS ERROR:\n${o.error}\nFix the cause.` : ""}${o.critique ? `A REVIEWER / THE USER SAID:\n${o.critique}\nApply this.` : ""}`
+    : "";
+  return `${SCENE_API}
+
+EXAMPLE OF THE EXPECTED STYLE (do not copy it; design something new for the brief):
+${SCENE_EXAMPLE}
+
+VIDEO CONTEXT: concept "${o.concept ?? ""}", palette ${JSON.stringify(o.palette ?? {})}, fonts ${JSON.stringify(o.fonts ?? {})}, format ${o.aspect}, this scene lasts ${o.frames} frames.
+SCENE JSON (p):
+${JSON.stringify(o.scene)}
+
+Write the scene so it matches the "brief" in the JSON. Reply with ONLY the TSX code in one \`\`\`tsx block.${fix}`;
 }
 
-function Steps({ items }: { items: Array<[string, ReactNode]> }) {
-  return (
-    <ol className="space-y-3">
-      {items.map(([t, body], i) => (
-        <li key={t} className="flex gap-3.5">
-          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-goldSoft text-xs font-semibold text-gold">{i + 1}</span>
-          <div><p className="font-medium text-ink">{t}</p><div className="text-sm">{body}</div></div>
-        </li>
-      ))}
-    </ol>
-  );
+export function editPrompt(scene: Record<string, unknown>, instruction: string): string {
+  return `You edit one scene of a motion-graphics storyboard. Current scene JSON:
+${JSON.stringify(scene)}
+
+User instruction: ${instruction}
+
+Reply with ONE JSON object only: {"scene": <the full updated scene JSON>, "regenerateCode": true|false}.
+- Keep "type" unless the instruction asks for a different kind of scene. For this project, preserve "custom" code-generated scenes unless explicitly asked otherwise.
+- Library scene types: title, kinetic, bullets, stat, bar-chart, line-chart, quote, split, timeline, ranking, image, footage, outro. Keep their props valid. "camera" may hold up to 3 of: push, pull, pan-left, pan-right, tilt-up, tilt-down, orbit, handheld, crash-zoom, whip.
+- If the scene is "custom": update "brief" (what appears and how it moves) and set "regenerateCode": true when the VISUAL design must change; for text-only changes edit "headline" and set false.
+- Preserve or update "soundCue" to match the edited scene; allowed values: typing, soft-click, whoosh, impact, chime, riser, none.
+- Keep text short. Never invent statistics.`;
 }
 
-function CardGrid({ items }: { items: Array<{ title: string; body: string; icon?: IconKey; tag?: string }> }) {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {items.map((f) => (
-        <div key={f.title} className="rounded-xl border border-line bg-panel p-4 transition-colors hover:border-gold/50">
-          <div className="mb-2 flex items-center gap-2.5">
-            {f.icon && <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-panel2 text-gold">{ICONS[f.icon]}</span>}
-            <p className="text-sm font-medium text-ink">{f.title}</p>
-            {f.tag && <span className="ml-auto rounded-full border border-line px-2 py-0.5 text-[10px] text-faint">{f.tag}</span>}
-          </div>
-          <p className="text-[13px] leading-relaxed text-muted">{f.body}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
+export function reviewPrompt(tiles: Array<{ tile: number; index: number; type: string; summary: string }>): string {
+  const lines = tiles.map((t) => `Tile ${t.tile} (left to right, top to bottom) = scene index ${t.index}, type "${t.type}", text: "${t.summary}"`).join("\n");
+  return `You are the quality reviewer of a motion-graphics video. The image is a contact sheet of frames from the middle of each scene.
 
-const CELL: Record<Cell, ReactNode> = {
-  yes: <Check size={15} className="mx-auto text-avatar-teal" />,
-  part: <Minus size={15} className="mx-auto text-gold" />,
-  no: <X size={14} className="mx-auto text-faint" />,
-};
+${lines}
 
-function Ratings() {
-  const totals = AGENTS.map((_, i) => RATINGS.reduce((n, r) => n + r.scores[i], 0));
-  const max = RATINGS.length * 10;
-  return (
-    <div className="space-y-5">
-      <div className="overflow-x-auto rounded-xl border border-line">
-        <table className="w-full min-w-[720px] text-left text-[13px]">
-          <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint">
-            <tr>
-              <th className="px-4 py-3 font-medium">Dimension</th>
-              {AGENTS.map((a, i) => <th key={a} className={`px-3 py-3 text-center font-medium ${i === 0 ? "text-gold" : ""}`}>{a}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {RATINGS.map((r) => (
-              <tr key={r.dim} className="border-t border-line">
-                <td className="px-4 py-3"><p className="text-ink">{r.dim}</p><p className="text-[11px] text-faint">{r.why}</p></td>
-                {r.scores.map((s, i) => (
-                  <td key={i} className="px-3 py-3 text-center">
-                    <span className={`text-sm font-semibold ${i === 0 ? "text-gold" : "text-ink"}`}>{s}</span>
-                    <div className="mx-auto mt-1.5 h-1 w-14 overflow-hidden rounded-full bg-panel2">
-                      <div className={`h-full rounded-full ${i === 0 ? "bg-gold" : "bg-muted"}`} style={{ width: `${s * 10}%` }} />
-                    </div>
-                  </td>
-                ))}
-              </tr>
-            ))}
-            <tr className="border-t border-line bg-panel">
-              <td className="px-4 py-3 font-medium text-ink">Total (out of {max})</td>
-              {totals.map((t, i) => (
-                <td key={i} className={`px-3 py-3 text-center text-base font-semibold ${i === 0 ? "text-gold" : "text-ink"}`}>{t}</td>
-              ))}
-            </tr>
-          </tbody>
-        </table>
-      </div>
+Check each tile for REAL problems only: text cut off or overflowing the frame, text too small to read, overlapping elements, an empty or broken layout, low contrast. Do not nitpick style.
 
-      <div className="overflow-x-auto rounded-xl border border-line">
-        <table className="w-full min-w-[720px] text-left text-[13px]">
-          <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint">
-            <tr>
-              <th className="px-4 py-3 font-medium">Capability</th>
-              {AGENTS.map((a, i) => <th key={a} className={`px-3 py-3 text-center font-medium ${i === 0 ? "text-gold" : ""}`}>{a}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {MATRIX.map((m) => (
-              <tr key={m.row} className="border-t border-line">
-                <td className="px-4 py-2.5 text-ink">{m.row}</td>
-                {m.v.map((c, i) => <td key={i} className={`px-3 py-2.5 ${i === 0 ? "bg-goldSoft/20" : ""}`}>{CELL[c]}</td>)}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="flex flex-wrap gap-4 text-[11px] text-faint">
-        <span className="flex items-center gap-1"><Check size={12} className="text-avatar-teal" /> built in</span>
-        <span className="flex items-center gap-1"><Minus size={12} className="text-gold" /> partial / needs setup</span>
-        <span className="flex items-center gap-1"><X size={12} /> not offered</span>
-      </p>
-    </div>
-  );
-}
+Reply with ONE JSON object only:
+{"verdict":"good"|"fix","issues":[{"scene":<scene index>,"problem":"<specific visual problem>","patch":{...}}]}
 
-// ---------- page ----------
-export default function DocsView() {
-  const [q, setQ] = useState("");
-  const [active, setActive] = useState("overview");
-  const [open, setOpen] = useState(false);
-  const search = useRef<HTMLInputElement>(null);
-
-  const shown = useMemo(() => {
-    const n = q.trim().toLowerCase();
-    return n ? NAV.filter((x) => `${x.title} ${x.kw} ${x.group}`.toLowerCase().includes(n)) : NAV;
-  }, [q]);
-  const groups = useMemo(() => Array.from(new Set(shown.map((x) => x.group))), [shown]);
-
-  useEffect(() => {
-    const els = NAV.map((n) => document.getElementById(n.id)).filter(Boolean) as HTMLElement[];
-    const io = new IntersectionObserver(
-      (entries) => { const v = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]; if (v) setActive(v.target.id); },
-      { rootMargin: "-90px 0px -65% 0px" }
-    );
-    els.forEach((e) => io.observe(e));
-    return () => io.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); search.current?.focus(); } };
-    window.addEventListener("keydown", on);
-    return () => window.removeEventListener("keydown", on);
-  }, []);
-
-  function go(id: string) { setOpen(false); document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }); history.replaceState(null, "", "#" + id); }
-
-  const sidebar = (
-    <nav className="space-y-6 pb-10">
-      {groups.map((g) => (
-        <div key={g}>
-          <p className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">{g}</p>
-          {shown.filter((x) => x.group === g).map((x) => (
-            <button
-              key={x.id} onClick={() => go(x.id)}
-              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${active === x.id ? "bg-panel2 font-medium text-ink" : "text-muted hover:bg-panel hover:text-ink"}`}
-            >
-              {x.title}{active === x.id && <ChevronRight size={13} className="text-gold" />}
-            </button>
-          ))}
-        </div>
-      ))}
-      {shown.length === 0 && <p className="px-3 text-sm text-faint">Nothing matches “{q}”.</p>}
-    </nav>
-  );
-
-  return (
-    <div className="min-h-screen bg-bg">
-      <header className="sticky top-0 z-40 border-b border-line bg-bg/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 md:px-6">
-          <button className="rounded-lg p-1.5 text-muted hover:bg-panel md:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={18} /></button>
-          <Link href="/" className="flex items-center gap-2"><Logo size={18} /></Link>
-          <span className="hidden rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted sm:inline">Docs</span>
-          <div className="ml-auto flex w-full max-w-xs items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5">
-            <Search size={14} className="text-faint" />
-            <input
-              ref={search} value={q} onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && shown[0]) { go(shown[0].id); } }}
-              placeholder="Search docs…" className="w-full bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none"
-            />
-            <kbd className="hidden rounded border border-line px-1.5 text-[10px] text-faint sm:block">⌘K</kbd>
-          </div>
-          <Link href="/dashboard" className="hidden rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-bg hover:opacity-90 sm:block">Open app</Link>
-        </div>
-      </header>
-
-      {open && (
-        <div className="fixed inset-0 z-50 md:hidden">
-          <div className="absolute inset-0 bg-black/70" onClick={() => setOpen(false)} />
-          <div className="absolute inset-y-0 left-0 w-72 overflow-y-auto border-r border-line bg-panel p-4">
-            <button className="mb-3 rounded-lg p-1.5 text-muted hover:bg-panel2" onClick={() => setOpen(false)}><X size={18} /></button>
-            {sidebar}
-          </div>
-        </div>
-      )}
-
-      <div className="mx-auto flex max-w-7xl gap-10 px-4 md:px-6">
-        <aside className="sticky top-14 hidden h-[calc(100vh-3.5rem)] w-60 shrink-0 overflow-y-auto py-8 md:block">{sidebar}</aside>
-
-        <main className="min-w-0 max-w-3xl flex-1 pb-24">
-          {/* hero */}
-          <div className="relative overflow-hidden border-b border-line py-14">
-            <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-gold/[0.07] blur-3xl" />
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel px-3 py-1 text-xs text-muted"><span className="h-1.5 w-1.5 rounded-full bg-gold" /> Documentation · Beta</span>
-            <h1 className="mt-5 text-4xl font-semibold leading-[1.08] tracking-tight text-ink md:text-5xl">{PRODUCT.name}<br /><span className="text-gold">{PRODUCT.tagline}</span></h1>
-            <p className="mt-5 max-w-xl text-base leading-relaxed text-muted">{PRODUCT.intro}</p>
-            <div className="mt-7 flex flex-wrap gap-3">
-              <button onClick={() => go("quickstart")} className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90">Quick start <ArrowRight size={15} /></button>
-              <button onClick={() => go("compare")} className="rounded-full border border-line px-5 py-2.5 text-sm text-ink hover:bg-panel">See the comparison</button>
-            </div>
-          </div>
-
-          <Section id="overview" eyebrow="Start" title="Overview">
-            <p>AgenticVenus is a web app where each <B>chat is an AI teammate</B>. A teammate has a name, a role you give it, its own memory and skills, its own connected tools, and — when the job needs it — its own cloud computer.</p>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {[["11", "model providers"], ["63", "specialist roles"], ["4", "work modes: computer · code · video · team"]].map(([n, l]) => (
-                <div key={l} className="rounded-xl border border-line bg-panel p-4"><p className="text-2xl font-semibold text-gold">{n}</p><p className="text-xs text-muted">{l}</p></div>
-              ))}
-            </div>
-            <p>The stack is Next.js 14 on Vercel, Firebase (auth + Firestore), Supabase Storage for large files, and E2B desktop sandboxes for computers. Everything uses <B>your own accounts and keys</B>.</p>
-          </Section>
-
-          <Section id="quickstart" eyebrow="Start" title="Quick start">
-            <Steps items={[
-              ["Create an account", <>Sign up with email or Google. Connect <B>one AI provider</B> key — Claude, OpenAI, Gemini, whichever you have.</>],
-              ["Start a chat", <>Press <Pill>+</Pill> and pick a teammate (Chief, Sales Outbound, Inbox Manager…) or create your own.</>],
-              ["Give it a role", <>Say <Pill>you are my head of sales</Pill>. The role is pinned in memory for this chat only.</>],
-              ["Add a computer (optional)", <>Paste an <B>E2B key</B> under API keys. Computer, Code, Video and Team modes unlock.</>],
-              ["Hand over a task", <>Plain language works. Examples below.</>],
-            ]} />
-            <Code label="examples">{`Find 25 verified HVAC companies in Austin and give me a CSV
-/code build a landing page for my dental clinic
-/video 30s reel on how AI agents change work, 9:16
-/team find leads, write outreach emails and a landing page
-/clone owner/repo     ...then...     push all changes`}</Code>
-          </Section>
-
-          <Section id="agent" eyebrow="The agent" title="Meet your agent">
-            <p>Every chat is an agent with five layers:</p>
-            <CardGrid items={[
-              { title: "Identity", body: "Name, colour, role (\"you are my CEO\"), and an optional own email inbox for sign-ups and verification codes.", icon: "sparkles" },
-              { title: "Brain", body: "Per-chat memory (facts, preferences, lessons, owner profile) and skills (reusable procedures with a win/fail record).", icon: "brain" },
-              { title: "Hands", body: "Tools from connectors, MCP servers and APIs, plus the computer, Venus Code and Venus Pro.", icon: "plug" },
-              { title: "Guardrails", body: "Approvals for every write, prompt-injection shield, vault, vPassword and audit log.", icon: "shield" },
-              { title: "Reach", body: "Dashboard chat, Telegram, WhatsApp, SMS, Slack DM and phone calls — same brain everywhere.", icon: "message" },
-              { title: "Initiative", body: "At most one proactive 💡 message a day: a next step, a reminder or one question to know you better.", icon: "rocket" },
-            ]} />
-            <p>The default <B>Chief</B> is a chief of staff: it plans, picks specialists, tracks progress and reports back in one message.</p>
-          </Section>
-
-          <Section id="routing" eyebrow="The agent" title="How it decides what to do">
-            <p>Before acting, the agent runs an <B>“understand first”</B> step with your chat’s own model. It chooses one intent and only starts heavy work when you really asked for it.</p>
-            <div className="overflow-x-auto rounded-xl border border-line">
-              <table className="w-full min-w-[520px] text-left text-[13px]">
-                <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint"><tr><th className="px-4 py-2.5">Intent</th><th className="px-4 py-2.5">When</th><th className="px-4 py-2.5">Runs on</th></tr></thead>
-                <tbody>
-                  {[
-                    ["chat", "Questions, writing, advice, and anything a connected tool can do in a call (email, Sheets, GitHub files)", "Model + tools"],
-                    ["pc", "Live websites, lists of leads, scraping, forms, downloads, terminal work", "Visible computer"],
-                    ["code", "Software must be written or changed", "Venus Code (own computer)"],
-                    ["video", "Motion-graphics video or reel", "Venus Pro (own computer)"],
-                    ["team", "One goal that needs 2+ areas", "Chief + specialists"],
-                    ["set_role / assemble / remember / forget", "Setup and memory commands — nothing is started", "Memory only"],
-                  ].map(([a, b, c]) => <tr key={a} className="border-t border-line"><td className="px-4 py-2.5 text-gold">{a}</td><td className="px-4 py-2.5 text-ink">{b}</td><td className="px-4 py-2.5">{c}</td></tr>)}
-                </tbody>
-              </table>
-            </div>
-            <Callout title="Deterministic safety nets">A work order like “find 100 leads” can never be answered as plain chat (that is how fake lists appear) — it is forced to the computer. And “send these 5 emails” can never open the computer — it uses the Gmail tool.</Callout>
-            <p>Slash commands skip the guessing: <Pill>/code</Pill> <Pill>/video</Pill> <Pill>/team</Pill> <Pill>/deploy</Pill> <Pill>/recipe</Pill> <Pill>/clone</Pill> <Pill>/push</Pill> <Pill>/remember</Pill> <Pill>/forget</Pill></p>
-          </Section>
-
-          <Section id="different" eyebrow="The agent" title="What makes it different">
-            <ul className="space-y-3">
-              {[
-                ["Results are checked by code", "Lists are verified (site live, company on page, mail-capable domain) and the final CSV is generated by the runner, so the model cannot inflate it."],
-                ["Secrets the model never sees", "vPassword types logins, 2FA codes and approved card details straight into the page. The model only sees names."],
-                ["Each job has its own computer", "Chat, Venus Code and Venus Pro use separate sandboxes, so a video render never blocks a coding job. Idle computers are paused automatically."],
-                ["Honest reporting", "Failed or skipped team steps are never reported as done. A verifier gives pass / partial / fail, and fails closed."],
-                ["Self-improvement with brakes", "New skills start on trial, prove themselves in 2 wins, get paused after repeated failures, and keep the previous version for rollback."],
-                ["Model-agnostic", "11 providers, fallback chain on rate limits, and a router that uses strong models to plan and fast ones to report."],
-              ].map(([t, b]) => (
-                <li key={t} className="flex gap-3"><Check size={17} className="mt-1 shrink-0 text-avatar-teal" /><span><B>{t}.</B> {b}</span></li>
-              ))}
-            </ul>
-          </Section>
-
-          <Section id="features" eyebrow="Features" title="Everything in the box">
-            <CardGrid items={FEATURES} />
-          </Section>
-
-          <Section id="computer" eyebrow="Features" title="Computer agent">
-            <p>A private Linux desktop per chat. The agent works on the <B>visible screen</B>: a real Chrome window (driven over CDP, so it still sees numbered elements), a real terminal, real mouse and keyboard.</p>
-            <ul className="list-disc space-y-1.5 pl-5">
-              <li>Toolbelt: Chrome, VS Code, LibreOffice, GIMP, Inkscape, ffmpeg, pandoc, tesseract, Python data stack.</li>
-              <li>Browser ops: click, type, select, check, upload, tabs, downloads; cookie banners are dismissed automatically.</li>
-              <li><B>Take control:</B> switch the panel from watch-only to your own mouse and keyboard at any time.</li>
-              <li><B>Proof of work:</B> the screen is recorded and a 6-hour replay link is posted with the result.</li>
-              <li><B>Recipes:</B> finished tasks are saved as label-based steps and replayed with <B>no AI model</B>. If a site changes, only the broken step is re-learned.</li>
-              <li><B>Auto-off:</B> when the work ends, the computer is paused to save credits; files and logins are kept.</li>
-            </ul>
-          </Section>
-
-          <Section id="code" eyebrow="Features" title="Venus Code">
-            <p>A coding agent that runs <B>inside the computer</B> as a background worker, so it keeps going if you close the tab.</p>
-            <CardGrid items={[
-              { title: "Quality gates", body: "Plan first for big tasks, read-before-edit, diagnostics after every edit, project tests/build on finish." },
-              { title: "Independent review", body: "A second pass reviews the git diff for bugs, missing requirements, placeholders and secrets before it can finish." },
-              { title: "Parallel writers", body: "Up to 3 writer sub-agents in separate git worktrees on disjoint files, merged back; read-only explorers in parallel." },
-              { title: "Safe by default", body: "Destructive commands blocked, .env/keys unreadable, permission modes: plan · strict · auto, project hooks in .venus/hooks.json." },
-              { title: "Long projects", body: "Milestone-based fresh context with saved state, stuck detection and a compute budget." },
-              { title: "Ship it", body: "Instant HTML preview, live dev server on port 3000, /deploy to Vercel, GitHub clone/push to a new branch with a PR link." },
-            ]} />
-          </Section>
-
-          <Section id="video" eyebrow="Features" title="Venus Pro (video)">
-            <p>A timeline editor with a live animatic, plus a Remotion render pipeline on its own studio computer.</p>
-            <Steps items={[
-              ["Storyboard", "The model chooses scene count dynamically from duration, story complexity, and pace; it also creates a topic-specific palette, typography, camera moves, transitions, and sound cues."],
-              ["Design", "Every scene is custom code-rendered motion graphics. Scene code is syntax-checked, repaired when possible, and paired with optional generated sound effects synchronized to scene beats."],
-              ["Assets, voice, music", "Stock photos/footage (Pexels), OpenAI voice-over per scene, generated ambient music bed."],
-              ["Review & render", "A contact sheet of frames is reviewed by the model, fixes are applied, then 720p or 1080p is rendered and uploaded."],
-            ]} />
-            <p>Edit afterwards: razor-split, trim, reorder, change palette/fonts, or ask the in-editor agent (“make this punchier”).</p>
-          </Section>
-
-          <Section id="team" eyebrow="Features" title="Team & specialists">
-            <p>Say “assemble a team” to pick a roster (nothing starts), or give a goal and Chief builds the <B>smallest</B> team, then plans up to 7 steps with dependencies. Independent steps run in parallel; steps that share one computer run one after another.</p>
-            <div className="flex flex-wrap gap-2">
-              {["Leadership", "Research", "Sales", "Marketing", "Content", "Engineering", "Design & Video", "Data", "Operations", "Finance & People"].map((c) => (
-                <span key={c} className="rounded-full border border-line bg-panel px-3 py-1 text-xs text-ink">{c}</span>
-              ))}
-            </div>
-            <p>Each member maps to a tool: computer, Venus Code, Venus Pro, web research, writing, or email drafts. You can open any member’s thread and talk to them directly, and watch the team feed live.</p>
-          </Section>
-
-          <Section id="memory" eyebrow="Features" title="Memory & skills">
-            <p>Everything is <B>scoped to one chat</B>. The agent learns quietly: owner profile facts, preferences and lessons — never passwords, keys or card data.</p>
-            <CardGrid items={[
-              { title: "Skills you install", body: "Paste a SKILL.md link, a GitHub repo, an `npx skills add` command or text. Suspicious instruction-like skills are installed paused." },
-              { title: "Skills it creates", body: "After a multi-step success it writes a trial skill, which is promoted after 2 wins." },
-              { title: "Skills it repairs", body: "On failure it explains the cause, rewrites the skill as a new version and keeps the previous one for rollback." },
-              { title: "Recall", body: "Searches earlier chat messages, missions and call summaries with BM25 ranking." },
-            ]} />
-          </Section>
-
-          <Section id="connectors" eyebrow="Features" title="Connectors & channels">
-            <p>Connect once per chat. The agent’s tool list is rebuilt on every message, and an “Agent updated” note explains what it can now do.</p>
-            <ul className="list-disc space-y-1.5 pl-5">
-              <li><B>OAuth:</B> Google (Gmail, Sheets, Drive, Calendar), Microsoft 365, Slack, GitHub, Notion, Linear, HubSpot, Asana, Zoom, Figma, Webflow, Dropbox.</li>
-              <li><B>MCP:</B> search a service name (popular list + official registry) or paste a remote MCP URL; servers that need login use automatic OAuth sign-in.</li>
-              <li><B>REST API:</B> base URL + key; GET is free, writes ask for approval.</li>
-              <li><B>Chat apps:</B> Telegram, WhatsApp and SMS (Twilio), Slack DM, email (Resend). Only your own ID or number is answered.</li>
-              <li><B>Batch tools:</B> <Pill>gmail.send_many</Pill>, <Pill>github.put_files</Pill> etc. send many items in one approved call and report each success/failure.</li>
-            </ul>
-          </Section>
-
-          <Section id="voice" eyebrow="Features" title="Voice, missions & routines">
-            <H3>Phone calls</H3>
-            <p>Paste a Twilio key once; number, webhooks and permissions are set up automatically. On a call the agent says it is an AI first, may use read-only tools, and adds <Pill>[[TODO]]</Pill> items for anything that changes data. Voices: free built-in, OpenAI, Gemini, ElevenLabs or Deepgram.</p>
-            <H3>Missions</H3>
-            <p>Long jobs run server-side in 40-second slices with notes as memory: find leads → verify → call one by one → update a sheet → report on every connected channel. Limits you set: number of calls, whether writes need approval, step cap.</p>
-            <H3>Routines</H3>
-            <p>Repeat a task every hour, day or week through a scheduler you control (GitHub Actions ping every 5 minutes). Failures are posted in chat.</p>
-          </Section>
-
-          <Section id="verification" eyebrow="Trust" title="Verification engine">
-            <p>When a request looks like “N items”, it becomes a <B>contract</B> that the runner enforces.</p>
-            <Steps items={[
-              ["Collect candidates", "About 1.6× the quota from real pages, each with its source URL."],
-              ["Verify with code", <><Pill>verify.leads</Pill> checks: website live and not parked, company/person found on the page, email syntax + MX/A record, duplicates.</>],
-              ["Gate the finish", "The agent cannot finish below quota (up to 8 gate rounds). Rejected items cannot be edited to pass."],
-              ["Deliver from code", "A CSV of verified rows and a CSV of rejects are built by the runner. The summary starts with VERIFIED: X of N requested."],
-            ]} />
-            <Callout tone="warn" title="What it cannot prove">A mailbox cannot be proven to exist without sending mail. The report says so explicitly.</Callout>
-          </Section>
-
-          <Section id="security" eyebrow="Trust" title="Security model">
-            <CardGrid items={[
-              { title: "Vault", body: "AES-256-GCM, ciphertext bound to user + slot. The browser only holds vault:… placeholders. Key rotation via VAULT_KEY_OLD." },
-              { title: "vPassword", body: "Host-matched logins, TOTP 2FA, saved sessions and cards with limits. Secrets can never be read back through the app." },
-              { title: "Job tokens", body: "Sandboxes get a short-lived signed token, never your connector tokens. Tokens are kept in memory only." },
-              { title: "Injection shield", body: "Outside content is wrapped as <untrusted>, scanned for hijack patterns, and taints the run so writes need a human." },
-              { title: "Network safety", body: "SSRF-safe fetch re-checks every redirect hop; private IPs and local hostnames are blocked, including in the headless browser." },
-              { title: "Audit trail", body: "Tool writes, vault changes, voice calls and missions are logged server-side." },
-            ]} />
-          </Section>
-
-          <Section id="compare" eyebrow="Compare" title="Comparison & ratings">
-            <p>How AgenticVenus compares with <B>OpenClaw</B>, <B>Hermes Agent</B>, <B>Grok-based bots</B> and <B>OpenAI agents</B>. Scores are 0–10, indicative and subjective.</p>
-            <Callout tone="warn" title="Read this first">
-              AgenticVenus scores come from this repository. Competitor scores come from general public knowledge and move fast — check each project’s own docs before deciding. The comparison is by category, so a lower score is not a flaw in a product built for a different job.
-            </Callout>
-            <Ratings />
-            <H3>Reading the numbers</H3>
-            <ul className="list-disc space-y-1.5 pl-5">
-              <li><B>OpenClaw</B> and <B>Hermes</B> are strongest in self-hosting, community and chat reach, and Hermes in self-learning. They win on maturity.</li>
-              <li><B>Grok bots</B> and <B>OpenAI agents</B> win on easy setup and polish, but you cannot bring your own models or self-host.</li>
-              <li><B>AgenticVenus</B> leads on verified output, a visible computer per job, team orchestration and the number of built-in studios — and loses on maturity and setup effort.</li>
-            </ul>
-          </Section>
-
-          <Section id="best" eyebrow="Compare" title="Where AgenticVenus is best">
-            <CardGrid items={BEST_AT} />
-          </Section>
-
-          <Section id="help" eyebrow="Compare" title="How it helps you">
-            <CardGrid items={HELPS.map((h) => ({ title: h.who, body: h.body }))} />
-            <p>A typical day: you describe the goal in chat (or Telegram) → the agent plans → it works on its own computer → you get one report with evidence, a replay link and any “needs you” items.</p>
-          </Section>
-
-          <Section id="architecture" eyebrow="Reference" title="Architecture">
-            <Code label="diagram">{`Browser (Next.js app)
-  ├─ Firebase Auth + Firestore (chats, memory, projects, jobs)
-  ├─ /api/*  (Vercel, Node runtime, 60 s limit)
-  │     vault · tools · chat · runner · voice · channels · missions
-  ├─ Supabase Storage (videos, proofs, backups)
-  └─ E2B sandboxes (one per chat per slot: pc / code / studio)
-        └─ detached runner (pc-runner / runner) ── job token ──> /api/*
-
-GitHub Actions every 5 min → /api/routines/run
-                           → /api/runner/tick   (finish unattended jobs, pause idle computers)
-                           → /api/missions/tick (keep missions moving)
-                           → /api/proactive/tick`}</Code>
-            <p>Why this shape: serverless functions are short, so anything long runs inside the sandbox or in 40-second mission slices, and the scheduler is the safety net.</p>
-          </Section>
-
-          <Section id="env" eyebrow="Reference" title="Environment variables">
-            <div className="overflow-x-auto rounded-xl border border-line">
-              <table className="w-full min-w-[560px] text-left text-[13px]">
-                <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint"><tr><th className="px-4 py-2.5">Name</th><th className="px-4 py-2.5">Need</th><th className="px-4 py-2.5">Purpose</th></tr></thead>
-                <tbody>
-                  {ENV_VARS.map((e) => (
-                    <tr key={e.name} className="border-t border-line">
-                      <td className="px-4 py-2.5 font-mono text-[12px] text-ink">{e.name}</td>
-                      <td className={`px-4 py-2.5 ${e.need === "required" ? "text-gold" : "text-faint"}`}>{e.need}</td>
-                      <td className="px-4 py-2.5">{e.note}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p>GitHub Actions needs two repository secrets: <Pill>APP_URL</Pill> and <Pill>ROUTINE_RUNNER_SECRET</Pill>. Firestore will print a link to create any missing collection-group index the first time a tick runs.</p>
-          </Section>
-
-          <Section id="limits" eyebrow="Reference" title="Honest limitations">
-            <ul className="space-y-2.5">
-              {LIMITS.map((l) => <li key={l} className="flex gap-3"><Minus size={16} className="mt-1 shrink-0 text-gold" /><span>{l}</span></li>)}
-            </ul>
-          </Section>
-
-          <Section id="faq" eyebrow="Reference" title="FAQ">
-            <div className="space-y-2">
-              {FAQ.map((f) => (
-                <details key={f.q} className="group rounded-xl border border-line bg-panel px-4 py-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-medium text-ink">
-                    {f.q}<ChevronRight size={15} className="text-faint transition-transform group-open:rotate-90" />
-                  </summary>
-                  <p className="mt-2 text-sm leading-relaxed text-muted">{f.a}</p>
-                </details>
-              ))}
-            </div>
-          </Section>
-
-          <div className="mt-6 rounded-2xl border border-line bg-panel p-6 text-center">
-            <p className="text-lg font-semibold text-ink">Ready to hand something off?</p>
-            <p className="mt-1 text-sm text-muted">Start with one teammate and one real task.</p>
-            <Link href="/dashboard" className="mt-4 inline-flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90">Open the app <ArrowRight size={15} /></Link>
-          </div>
-        </main>
-      </div>
-    </div>
-  );
+"patch" may contain ONLY: "fontScale" (0.5-1.2; smaller when text overflows), "transition" (fade|slide|zoom|wipe|blur), and shorter replacements for "headline", "subhead", "text", "label", "caption". For custom scenes leave "patch" empty and describe the problem precisely. If everything looks fine answer {"verdict":"good","issues":[]}.`;
 }
