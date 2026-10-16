@@ -36,7 +36,52 @@ export async function POST(req: Request) {
 
       case "prepare": {
         const pid = safeId(body.projectId);
-        const storyboard = sanitizeStoryboard(body.storyboard, { keepFiles: true });
+        let storyboard = sanitizeStoryboard(body.storyboard, { keepFiles: true });
+        // Build a deterministic, code-free SFX track from scene soundCue metadata.
+        // If FFmpeg/audio filters are unavailable, video preparation still succeeds.
+        try {
+          const sfxPath = `${DIR}/public/p/${pid}/sfx.mp3`;
+          const cues: Array<{ at: number; kind: string }> = [];
+          let cursor = 0;
+          const scenes = storyboard.scenes;
+          // A short typing sequence establishes the UI/product-demo feel.
+          if (scenes.length && scenes.some((scene) => ["typing", "soft-click"].includes(String(scene.soundCue || "")))) {
+            for (let n = 0; n < 10; n++) cues.push({ at: Math.min(1.7, n * 0.085), kind: "typing" });
+          }
+          scenes.forEach((scene, index) => {
+            const kind = String(scene.soundCue || (index === scenes.length - 1 ? "chime" : index === 0 ? "soft-click" : "whoosh"));
+            if (kind !== "none" && index > 0) cues.push({ at: Math.max(0, cursor - 0.08), kind });
+            cursor += Math.max(1.5, Number(scene.seconds) || 4) - 0.4;
+          });
+          if (cues.length) {
+            const safeCues = cues.filter((c) => Number.isFinite(c.at) && c.at >= 0 && c.at < 60).slice(0, 32);
+            await exec(sb, `mkdir -p ${DIR}/public/p/${pid}`, 10_000);
+            const inputs: string[] = [];
+            const filters: string[] = [];
+            safeCues.forEach((cue, i) => {
+              const at = Math.max(0, Math.round(cue.at * 1000));
+              let source = "sine=frequency=1500:sample_rate=44100";
+              let duration = 0.06;
+              let filter = "volume=0.12,afade=t=out:st=0.008:d=0.052";
+              if (cue.kind === "whoosh" || cue.kind === "riser") {
+                source = "anoisesrc=color=pink:amplitude=0.22:sample_rate=44100"; duration = cue.kind === "riser" ? 0.55 : 0.32;
+                filter = `highpass=f=450,lowpass=f=9000,afade=t=in:d=0.04,afade=t=out:st=${(duration * 0.45).toFixed(3)}:d=${(duration * 0.55).toFixed(3)},volume=0.16`;
+              } else if (cue.kind === "impact") {
+                source = "sine=frequency=95:sample_rate=44100"; duration = 0.24;
+                filter = "afade=t=in:d=0.004,afade=t=out:st=0.06:d=0.18,volume=0.22";
+              } else if (cue.kind === "chime") {
+                source = "sine=frequency=880:sample_rate=44100"; duration = 0.42;
+                filter = "afade=t=in:d=0.01,afade=t=out:st=0.12:d=0.3,volume=0.13";
+              }
+              inputs.push(`-f lavfi -t ${duration} -i '${source}'`);
+              filters.push(`[${i}:a]${filter},adelay=${at}|${at}[a${i}]`);
+            });
+            const mix = safeCues.map((_, i) => `[a${i}]`).join("");
+            const cmd = `ffmpeg -y -loglevel error ${inputs.join(" ")} -filter_complex '${filters.join(";")};${mix}amix=inputs=${safeCues.length}:duration=longest:normalize=0,alimiter=limit=0.85[out]' -map '[out]' -t ${Math.max(8, Math.ceil(cursor + 1))} -codec:a libmp3lame -b:a 128k '${sfxPath}'`;
+            const result = await exec(sb, cmd, 45_000);
+            if (result.exitCode === 0) storyboard = { ...storyboard, sfx: `p/${pid}/sfx.mp3` };
+          }
+        } catch { /* SFX are optional; never block the visual render. */ }
         return NextResponse.json(await prepareProject(sb, pid, storyboard));
       }
 
