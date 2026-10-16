@@ -388,8 +388,8 @@ export default function DocsView() {
           <Section id="video" eyebrow="Features" title="Venus Pro (video)">
             <p>A timeline editor with a live animatic, plus a Remotion render pipeline on its own studio computer.</p>
             <Steps items={[
-              ["Storyboard", "The model acts as art director: concept, palette, fonts and 6–12 scenes, each with camera moves and transitions. A random style seed keeps videos from looking alike."],
-              ["Design", "At least half the scenes are custom: the model writes a React scene, which is syntax-checked, repaired up to 3 times, and replaced with a clean fallback if it still fails."],
+              ["Storyboard", "The model chooses scene count dynamically from duration, story complexity, and pace; it also creates a topic-specific palette, typography, camera moves, transitions, and sound cues."],
+              ["Design", "Every scene is custom code-rendered motion graphics. Scene code is syntax-checked, repaired when possible, and paired with optional generated sound effects synchronized to scene beats."],
               ["Assets, voice, music", "Stock photos/footage (Pexels), OpenAI voice-over per scene, generated ambient music bed."],
               ["Review & render", "A contact sheet of frames is reviewed by the model, fixes are applied, then 720p or 1080p is rendered and uploaded."],
             ]} />
