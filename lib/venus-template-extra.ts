@@ -1,4 +1,4 @@
-export const TEMPLATE_VERSION_FINAL = "3";
+export const TEMPLATE_VERSION_FINAL = "4";
 
 export const EXTRA_FILES: Record<string, string> = {
   "src/theme.ts": String.raw`import {loadFont as loadInter} from "@remotion/google-fonts/Inter";
@@ -204,6 +204,7 @@ export const Main = (sb: any) => {
           volume={(f: number) => interpolate(f, [0, 30, Math.max(31, total - 45), total], [0, 0.16, 0.16, 0], {extrapolateLeft: "clamp", extrapolateRight: "clamp"})}
         />
       ) : null}
+      {sb.sfx ? <Audio src={staticFile(sb.sfx)} volume={0.9} /> : null}
     </AbsoluteFill>
   );
 };
