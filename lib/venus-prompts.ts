@@ -1,55 +1,97 @@
+
 import { ASPECTS, type Aspect } from "@/lib/venus-schema";
 
 export function directorPrompt(o: {
-  brief: string; seconds: number; aspect: Aspect; voice: boolean; captions: boolean;
-  design: "ai" | "library"; context?: string;
+  brief: string;
+  seconds: number;
+  aspect: Aspect;
+  voice: boolean;
+  captions: boolean;
+  design: "ai" | "library";
+  context?: string;
 }): string {
   const a = ASPECTS[o.aspect];
-  return `You are the art director of "Venus Pro", an AI motion-graphics studio. Turn the brief into a storyboard for a ${o.seconds}-second video (${a.width}x${a.height}, ${o.aspect}). Reply with ONE JSON object only — no prose, no markdown fences.
 
-STEP 1 — ART DIRECTION. Invent a visual identity that fits THIS topic (do not default to blue/purple unless it fits). If the user's memory below describes a brand (name, colors, fonts, handle), USE it.
-- "concept": one sentence describing the look and motion style.
-- "palette": hex colors {"bg1","bg2","accent","accent2","text","muted"}; strong contrast between text and bg.
-- "fonts": {"display": inter|montserrat|poppins|spacegrotesk|playfair|oswald, "body": inter|poppins|spacegrotesk}.
+  return `You are the art director of Venus Pro, an AI motion-graphics studio. Turn the brief into a storyboard for a ${o.seconds}-second video (${a.width}x${a.height}, ${o.aspect}). Reply with ONE JSON object only. No prose or markdown fences.
 
-STEP 2 — SCENES. Every scene accepts "seconds", "narration", "transition" (fade|slide|zoom|wipe|blur), "fontScale" and "camera" — a virtual camera move or up to 3 stacked: push, pull, pan-left, pan-right, tilt-up, tilt-down, orbit, handheld, crash-zoom, whip. Use camera moves like a cinematographer: push on key statements, handheld on footage, crash-zoom for emphasis, whip to open an energetic scene. Not every scene needs one.
-Library scene types:
- title {headline, subhead?} · kinetic {text, emphasis?: [words]} · bullets {headline, items: [3-5 short strings]} · stat {label, value: number, prefix?, suffix?, decimals?, caption?} · bar-chart {headline, data: [{label, value}] (2-6), unit?} · line-chart {headline, data: [{label, value}] (3-8)} · quote {text, author?} · split {headline?, left: {title, points}, right: {title, points}} · timeline {headline, steps: [{label, text}] (3-5)} · ranking {headline, items: [{title, note?}] (3-5)} · image {headline?, subhead?, imageQuery: "2-4 English words"} · footage {headline?, subhead?, footageQuery: "2-4 English words for REAL stock video b-roll"} · outro {headline, subhead?, handle?}
-${
-  o.design === "ai"
-    ? `Custom scene type (written as code by a motion designer after you): {"type":"custom","id":"c1","seconds":5,"brief":"<1-3 sentences: exactly what appears and how it moves>","headline":"<short text shown>","fallbackText":"<one short line used if the scene fails>"}.
-AT LEAST HALF of the scenes (minimum 3) must be "custom" with clearly DIFFERENT visual ideas (masked kinetic type, orbiting shapes, data drawn as SVG, morphing blobs, particle burst, split reveal, glitch, ticker, radial progress, isometric blocks). Use library scenes where they fit best. Add 1-3 "footage" scenes when real-world b-roll supports the story. "id" values are unique, letters/digits only.`
-    : `Use ONLY library scene types (no "custom"). Use 1-3 "footage" scenes when real-world b-roll supports the story.`
+STEP 1 — ART DIRECTION
+Invent a visual identity that fits this exact topic. Do not default to blue or purple unless it suits the topic. If the user context contains brand colors, fonts, names or handles, use them.
+- concept: one sentence describing the visual identity and motion style.
+- palette: hex colors bg1, bg2, accent, accent2, text and muted. Maintain strong contrast.
+- fonts: display and body chosen from inter, montserrat, poppins, spacegrotesk, playfair or oswald.
+
+STEP 2 — CODE-ONLY MOTION GRAPHICS (MANDATORY)
+Every scene MUST have type "custom". Every scene will be implemented as a separate React/TSX Remotion component by a motion designer.
+
+Never use the built-in library scene types, image scenes, footage scenes, stock photos, stock videos or downloaded visual assets. Do not make a slideshow. Create the visuals with code.
+
+Use:
+- React components and inline styles
+- SVG paths, circles, diagrams, graphs, masks and vector shapes
+- CSS gradients and layered geometric compositions
+- Kinetic typography, animated labels and highlighted words
+- Data visualizations, timelines, radial meters and isometric constructions
+- Particle-like effects and orbital geometry using deterministic seeded randomness
+- Frame-driven transitions, staggered entrances, scale, rotation, position and opacity
+- Layering and depth that match the subject and aspect ratio
+
+No external visual media is permitted. Voiceover audio may be generated separately if requested; it must not be used as a substitute for visual animation.
+
+Each scene MUST have:
+{"type":"custom","id":"c1","seconds":5,"brief":"Describe the exact composition, elements, hierarchy, colors and how each element animates.","headline":"Short readable headline","fallbackText":"Short fallback text if rendering fails"}
+
+Use a different visual concept for every scene. Examples include masked kinetic type, SVG diagrams, particle bursts, animated charts, orbital geometry, isometric blocks, split reveals, ticker systems, radial progress and morph-like transitions. Choose only the techniques that fit the topic; do not use every technique in every video.
+
+Each brief must be specific enough that a coding agent can implement it without inventing the entire composition. Describe what enters first, what moves next, where the headline sits and how the scene resolves.
+
+STEP 3 — STORY STRUCTURE
+Create 6 to 12 scenes, with durations adding up to approximately ${o.seconds} seconds and never exceeding the requested duration. Keep each scene between 3 and 9 seconds where possible.
+- First scene: a strong visual hook.
+- Middle scenes: develop the idea with clear visual progression.
+- Final scene: a custom-coded conclusion or call to action.
+- Do not repeat the same composition or motion concept in consecutive scenes.
+- On-screen headlines should be short, usually no more than 7 words.
+- Use the language requested in the brief.
+- Never invent facts, statistics, prices or unsupported claims.
+- Maintain readable typography and safe margins in the requested aspect ratio.
+- Use transitions that connect the story instead of adding random effects.
+- Every scene must have a unique letters-and-digits-only ID.
+- ${o.voice ? 'Every scene needs natural narration that agrees with its visuals and on-screen text. Aim for about 2 spoken words per second.' : 'Do not add narration.'}
+- Captions preference: ${o.captions ? 'reserve space for readable captions and avoid placing key visual information behind them.' : 'do not design extra caption blocks.'}
+
+OUTPUT FORMAT
+Return one valid JSON object:
+{"title":"...","concept":"...","palette":{"bg1":"#000000","bg2":"#111111","accent":"#ffffff","accent2":"#888888","text":"#ffffff","muted":"#aaaaaa"},"fonts":{"display":"spacegrotesk","body":"inter"},"scenes":[{"type":"custom","id":"c1","seconds":4,"brief":"...","headline":"...","fallbackText":"..." }]}
+
+The example colors above are format examples only; select colors for the actual topic.
+
+USER BRIEF:
+${o.brief}
+${o.context ? `
+
+USER / BRAND CONTEXT:
+${o.context}` : ""}`;
 }
 
-OUTPUT FORMAT:
-{"title":"...","concept":"...","palette":{...},"fonts":{...},"scenes":[{"type":"title","seconds":4,"transition":"zoom","camera":["push"],"headline":"..."}, ...]}
-
-RULES
-- 6 to 12 scenes. Total of "seconds" about ${o.seconds}, NEVER above ${o.seconds}. Each scene 3-9 seconds.
-- First scene opens the video, last is "outro" or a closing custom scene.
-- Never the same type twice in a row; vary transitions and camera moves.
-- On-screen text SHORT (headlines max 7 words), English unless the brief asks otherwise.
-- NEVER invent statistics, prices or facts. Use numbers only if they are in the brief or you are certain; otherwise use non-numeric scenes.
-- ${o.voice ? 'Every scene needs a "narration" (natural spoken English, about 2 words per second of the scene) that agrees with the on-screen text.' : 'Do not add "narration".'}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
-
-BRIEF:
-${o.brief}`;
-}
-
-const SCENE_API = `You write ONE React (TSX) file that renders a single scene of a Remotion video.
+const SCENE_API = `You write ONE complete React TSX file that renders a single custom scene in a Remotion video.
 
 HARD RULES
 - First line: import React from "react";
-- Allowed imports ONLY: "react", "remotion", "../kit", "../theme". Nothing else.
-- Default export: export default function Scene({p, T, dur}: any). p = this scene's JSON (e.g. p.headline), T = theme {bg1,bg2,accent,accent2,text,muted,card,line,onAccent,dark,fd,fb} (fd/fb are the display/body font-family strings — use T.fd for headings, T.fb for body), dur = scene length in frames (30 fps).
-- From "remotion": AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig, Easing, random, Sequence.
-- From "../kit": EASE, Frame, Rise, H, fit, grad, useU, clampArr, num, txt. useU() returns {u, w, h, portrait}; u = min(width,height)/720 — size EVERYTHING with u so it works in 16:9, 9:16 and 1:1.
-- Everything animates from useCurrentFrame() only. No CSS animations, no setTimeout, no Math.random (use random("seed")), no network, no external images/fonts/video. Use SVG, CSS gradients, shapes and text.
-- Root element is <AbsoluteFill>. The video already draws the background, so keep your root transparent.
-- Enter animation within the first ~16 frames; be settled by dur-14 (the video fades the scene out itself).
-- Never throw: give every prop a default. Keep text inside the frame (use fit() and maxWidth). Max ~140 lines.
-- Make it look PREMIUM: layered shapes, staggered springs, easing, depth, generous spacing. Avoid plain centered text.`;
+- Allowed imports ONLY: "react", "remotion", "../kit", "../theme".
+- Default export: export default function Scene({p, T, dur}: any).
+- p contains the scene JSON and fields such as p.headline, p.brief and p.fallbackText.
+- T contains bg1, bg2, accent, accent2, text, muted, card, line, onAccent, dark, fd and fb. Use T.fd for display headings and T.fb for body text.
+- dur is scene duration in frames at 30 fps.
+- Available Remotion imports include AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig, Easing, random and Sequence.
+- Available ../kit helpers: EASE, Frame, Rise, H, fit, grad, useU, clampArr, num and txt.
+- useU() returns {u, w, h, portrait}. Size elements using u = min(width,height)/720 to support landscape, portrait and square.
+- Animate using useCurrentFrame() and deterministic Remotion APIs only.
+- Do not use CSS keyframe animations, setTimeout, Math.random, network calls, external media or external imports.
+- Root element must be AbsoluteFill. Keep the root background transparent because the video renderer supplies the background.
+- Start the entrance within roughly 16 frames and settle the composition before the final 14 frames.
+- Give every prop a fallback, keep content inside the frame and use fit() or maxWidth where appropriate.
+- Return a polished composition with layered visuals, staggered motion, depth, deliberate typography and clear visual hierarchy. Never return an empty scene.
+- Implement the actual scene brief rather than repeating a generic template.`;
 
 const SCENE_EXAMPLE = `import React from "react";
 import {AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig, Easing} from "remotion";
@@ -60,78 +102,191 @@ export default function Scene({p, T, dur}: any) {
   const {fps} = useVideoConfig();
   const {u, w, h} = useU();
   const words = String(p.headline || "Make it move").split(" ");
-  const sweep = interpolate(frame, [10, 40], [0, 1], {extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.out(Easing.cubic)});
+  const sweep = interpolate(frame, [10, 40], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.out(Easing.cubic)
+  });
+
   return (
     <AbsoluteFill style={{alignItems: "center", justifyContent: "center"}}>
       <svg width={w} height={h} style={{position: "absolute"}}>
         {[0, 1, 2, 3].map((i) => {
           const r = (140 + i * 70) * u;
           const a = frame * (0.6 + i * 0.25) * (i % 2 ? -1 : 1);
+
           return (
-            <g key={i} transform={"rotate(" + a + " " + w / 2 + " " + h / 2 + ")"} opacity={0.18 + i * 0.1}>
-              <circle cx={w / 2} cy={h / 2} r={r} fill="none" stroke={T.accent} strokeWidth={2 * u} strokeDasharray={12 * u + " " + 18 * u} />
+            <g
+              key={i}
+              transform={"rotate(" + a + " " + w / 2 + " " + h / 2 + ")"}
+              opacity={0.18 + i * 0.1}
+            >
+              <circle
+                cx={w / 2}
+                cy={h / 2}
+                r={r}
+                fill="none"
+                stroke={T.accent}
+                strokeWidth={2 * u}
+                strokeDasharray={12 * u + " " + 18 * u}
+              />
               <circle cx={w / 2 + r} cy={h / 2} r={7 * u} fill={T.accent2} />
             </g>
           );
         })}
       </svg>
-      <div style={{display: "flex", gap: 22 * u, flexWrap: "wrap", justifyContent: "center", maxWidth: "80%"}}>
+
+      <div style={{
+        display: "flex",
+        gap: 22 * u,
+        flexWrap: "wrap",
+        justifyContent: "center",
+        maxWidth: "80%"
+      }}>
         {words.map((word, i) => {
-          const s = spring({frame: frame - (6 + i * 5), fps, config: {damping: 14, stiffness: 120}});
+          const s = spring({
+            frame: frame - (6 + i * 5),
+            fps,
+            config: {damping: 14, stiffness: 120}
+          });
+
           return (
-            <span key={i} style={{fontFamily: T.fd, fontWeight: 800, fontSize: 96 * u, color: i % 2 ? T.accent : T.text, display: "inline-block", opacity: s, transform: "translateY(" + (1 - s) * 60 * u + "px) rotate(" + (1 - s) * -6 + "deg)"}}>
+            <span
+              key={i}
+              style={{
+                fontFamily: T.fd,
+                fontWeight: 800,
+                fontSize: 96 * u,
+                color: i % 2 ? T.accent : T.text,
+                display: "inline-block",
+                opacity: s,
+                transform: "translateY(" + (1 - s) * 60 * u + "px) rotate(" + (1 - s) * -6 + "deg)"
+              }}
+            >
               {word}
             </span>
           );
         })}
       </div>
-      <div style={{position: "absolute", bottom: h * 0.28, width: 360 * u * sweep, height: 8 * u, borderRadius: 99, background: "linear-gradient(90deg, " + T.accent + ", " + T.accent2 + ")"}} />
+
+      <div style={{
+        position: "absolute",
+        bottom: h * 0.28,
+        width: 360 * u * sweep,
+        height: 8 * u,
+        borderRadius: 99,
+        background: "linear-gradient(90deg, " + T.accent + ", " + T.accent2 + ")"
+      }} />
     </AbsoluteFill>
   );
 }`;
 
 export function sceneCodePrompt(o: {
-  scene: Record<string, unknown>; palette?: Record<string, string>; fonts?: { display?: string; body?: string };
-  aspect: string; frames: number; concept?: string; previousCode?: string; error?: string; critique?: string;
+  scene: Record<string, unknown>;
+  palette?: Record<string, string>;
+  fonts?: { display?: string; body?: string };
+  aspect: string;
+  frames: number;
+  concept?: string;
+  previousCode?: string;
+  error?: string;
+  critique?: string;
 }): string {
   const fix = o.previousCode
-    ? `\n\nYOUR PREVIOUS CODE:\n${o.previousCode}\n\n${o.error ? `IT FAILED WITH THIS ERROR:\n${o.error}\nFix the cause.` : ""}${o.critique ? `A REVIEWER / THE USER SAID:\n${o.critique}\nApply this.` : ""}`
+    ? `
+
+YOUR PREVIOUS CODE:
+${o.previousCode}
+${o.error ? `
+
+RENDER OR COMPILATION ERROR:
+${o.error}
+Fix the root cause while preserving the scene's intended visual design.` : ""}
+${o.critique ? `
+
+REVIEWER OR USER FEEDBACK:
+${o.critique}
+Apply the requested visual corrections.` : ""}`
     : "";
+
   return `${SCENE_API}
 
-EXAMPLE OF THE EXPECTED STYLE (do not copy it; design something new for the brief):
+EXAMPLE OF A VALID SCENE (reference only; do not copy the design):
 ${SCENE_EXAMPLE}
 
-VIDEO CONTEXT: concept "${o.concept ?? ""}", palette ${JSON.stringify(o.palette ?? {})}, fonts ${JSON.stringify(o.fonts ?? {})}, format ${o.aspect}, this scene lasts ${o.frames} frames.
-SCENE JSON (p):
+VIDEO CONTEXT
+Concept: ${o.concept ?? ""}
+Palette: ${JSON.stringify(o.palette ?? {})}
+Fonts: ${JSON.stringify(o.fonts ?? {})}
+Aspect ratio: ${o.aspect}
+Scene duration: ${o.frames} frames.
+
+SCENE JSON:
 ${JSON.stringify(o.scene)}
 
-Write the scene so it matches the "brief" in the JSON. Reply with ONLY the TSX code in one \`\`\`tsx block.${fix}`;
+IMPLEMENTATION REQUIREMENTS
+- Follow the scene's brief precisely.
+- Write the complete scene component, not a plan or explanation.
+- Make every important graphic element code-rendered.
+- Ensure the composition works at the supplied aspect ratio.
+- Use deterministic frame-driven animation.
+- Keep all text readable and inside the visible frame.
+- Do not add external images, videos, network requests or dependencies.
+- If repairing code, fix the underlying error instead of removing the intended design.
+
+Reply with ONLY the complete TSX source inside one \`\`\`tsx code block.${fix}`;
 }
 
 export function editPrompt(scene: Record<string, unknown>, instruction: string): string {
-  return `You edit one scene of a motion-graphics storyboard. Current scene JSON:
+  return `You are editing a scene in a code-rendered Remotion motion-graphics video.
+
+CURRENT SCENE JSON:
 ${JSON.stringify(scene)}
 
-User instruction: ${instruction}
+USER INSTRUCTION:
+${instruction}
 
-Reply with ONE JSON object only: {"scene": <the full updated scene JSON>, "regenerateCode": true|false}.
-- Keep "type" unless the instruction asks for a different kind of scene.
-- Library scene types: title, kinetic, bullets, stat, bar-chart, line-chart, quote, split, timeline, ranking, image, footage, outro. Keep their props valid. "camera" may hold up to 3 of: push, pull, pan-left, pan-right, tilt-up, tilt-down, orbit, handheld, crash-zoom, whip.
-- If the scene is "custom": update "brief" (what appears and how it moves) and set "regenerateCode": true when the VISUAL design must change; for text-only changes edit "headline" and set false.
-- Keep text short. Never invent statistics.`;
+Reply with ONE valid JSON object only:
+{"scene": <the complete updated scene JSON>, "regenerateCode": true|false}
+
+Rules:
+- Keep the scene type "custom". Do not change it to a library, image or footage scene.
+- If the visual composition, layout, animation, colors or graphic elements change, set "regenerateCode": true.
+- If only the headline or narration text changes and the existing visual implementation remains correct, set "regenerateCode": false.
+- Update the scene brief to describe the new visual result clearly.
+- Keep the scene ID unchanged.
+- Keep text concise and do not invent statistics or factual claims.
+- Never remove the scene's code-rendered motion-graphics approach.`;
 }
 
-export function reviewPrompt(tiles: Array<{ tile: number; index: number; type: string; summary: string }>): string {
-  const lines = tiles.map((t) => `Tile ${t.tile} (left to right, top to bottom) = scene index ${t.index}, type "${t.type}", text: "${t.summary}"`).join("\n");
-  return `You are the quality reviewer of a motion-graphics video. The image is a contact sheet of frames from the middle of each scene.
+export function reviewPrompt(
+  tiles: Array<{ tile: number; index: number; type: string; summary: string }>
+): string {
+  const lines = tiles
+    .map((t) => `Tile ${t.tile} (left to right, top to bottom) = scene index ${t.index}, type "${t.type}", text: "${t.summary}"`)
+    .join("\n");
+
+  return `You are the quality reviewer of a code-rendered Remotion motion-graphics video. The image is a contact sheet of frames from the middle of each scene.
 
 ${lines}
 
-Check each tile for REAL problems only: text cut off or overflowing the frame, text too small to read, overlapping elements, an empty or broken layout, low contrast. Do not nitpick style.
+Inspect each tile for real problems:
+- Text is clipped, too small or unreadable.
+- Elements overlap or leave the safe area.
+- The scene is empty, broken or visually unfinished.
+- Contrast is poor.
+- The motion-graphics composition does not communicate the scene brief.
+- Several scenes look like duplicates rather than distinct visual ideas.
+
+Do not nitpick stylistic preferences. Do not request stock footage or external images.
 
 Reply with ONE JSON object only:
 {"verdict":"good"|"fix","issues":[{"scene":<scene index>,"problem":"<specific visual problem>","patch":{...}}]}
 
-"patch" may contain ONLY: "fontScale" (0.5-1.2; smaller when text overflows), "transition" (fade|slide|zoom|wipe|blur), and shorter replacements for "headline", "subhead", "text", "label", "caption". For custom scenes leave "patch" empty and describe the problem precisely. If everything looks fine answer {"verdict":"good","issues":[]}.`;
+The patch may contain only:
+- fontScale: a number from 0.5 to 1.2.
+- transition: fade, slide, zoom, wipe or blur.
+- Shorter replacements for headline, subhead, text, label or caption.
+
+For custom scenes, leave patch empty and describe the problem precisely so the scene code can be regenerated. If everything is acceptable, return {"verdict":"good","issues":[]}.`;
 }
