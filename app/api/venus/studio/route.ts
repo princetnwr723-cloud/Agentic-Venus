@@ -10,6 +10,57 @@ export const maxDuration = 60;
 
 const fail = (message: string, status = 500) => NextResponse.json({ error: message }, { status });
 
+// Use the same real-image sources as chat's image.search tool for Venus Pro still-image scenes.
+// Search results are downloaded server-side and copied into the E2B project's public assets.
+type WebImage = { url: string; width: number; height: number };
+const IMAGE_UA = "AgenticVenus/1.0 (https://agenticvenus.app; Venus Pro image search)";
+async function findWebImages(query: string): Promise<WebImage[]> {
+  const results: WebImage[] = [];
+  const [commons, openverse] = await Promise.allSettled([
+    fetch("https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=12&gsrsearch=" + encodeURIComponent(query) + "&prop=imageinfo&iiprop=url|mime|size&iiurlwidth=1600", {
+      headers: { "User-Agent": IMAGE_UA, Accept: "application/json" }, signal: AbortSignal.timeout(10_000),
+    }).then(async r => {
+      if (!r.ok) return [] as WebImage[];
+      const j = await r.json() as any;
+      return (Object.values(j?.query?.pages ?? {}) as any[]).flatMap(p => {
+        const ii = p.imageinfo?.[0];
+        const url = String(ii?.thumburl ?? ii?.url ?? "");
+        if (!/^https:\/\//.test(url) || !["image/jpeg", "image/png", "image/webp"].includes(String(ii?.mime)) || (ii?.width ?? 0) < 300) return [];
+        return [{ url, width: Number(ii.width) || 0, height: Number(ii.height) || 0 }];
+      });
+    }),
+    fetch("https://api.openverse.org/v1/images/?q=" + encodeURIComponent(query) + "&page_size=12&mature=false", {
+      headers: { "User-Agent": IMAGE_UA, Accept: "application/json" }, signal: AbortSignal.timeout(10_000),
+    }).then(async r => {
+      if (!r.ok) return [] as WebImage[];
+      const j = await r.json() as any;
+      return (j?.results ?? []).flatMap((x: any) => {
+        const url = String(x.url ?? "");
+        if (!/^https:\/\//.test(url)) return [];
+        return [{ url, width: Number(x.width) || 0, height: Number(x.height) || 0 }];
+      });
+    }),
+  ]);
+  if (commons.status === "fulfilled") results.push(...commons.value);
+  if (openverse.status === "fulfilled") results.push(...openverse.value);
+  return results;
+}
+
+async function downloadWebImage(url: string): Promise<{ bytes: Buffer; ext: string } | null> {
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": IMAGE_UA, Accept: "image/jpeg,image/png,image/webp" }, signal: AbortSignal.timeout(15_000) });
+    if (!r.ok) return null;
+    const type = (r.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (!["image/jpeg", "image/png", "image/webp"].includes(type)) return null;
+    const declared = Number(r.headers.get("content-length") ?? 0);
+    if (declared > 8 * 1024 * 1024) return null;
+    const bytes = Buffer.from(await r.arrayBuffer());
+    if (bytes.length < 2_000 || bytes.length > 8 * 1024 * 1024) return null;
+    const ext = type === "image/png" ? "png" : type === "image/webp" ? "webp" : "jpg";
+    return { bytes, ext };
+  } catch { return null; }
+}
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req);
@@ -89,7 +140,6 @@ export async function POST(req: Request) {
       case "assets": {
         const pid = safeId(body.projectId);
         const key = process.env.PEXELS_API_KEY;
-        if (!key) return NextResponse.json({ skipped: true });
         const sbd = sanitizeStoryboard(body.storyboard, { keepFiles: true });
         const i = Math.max(0, Math.min(sbd.scenes.length - 1, Number(body.index) || 0));
         const s = sbd.scenes[i];
@@ -97,27 +147,70 @@ export async function POST(req: Request) {
         const dir = `${DIR}/public/p/${pid}`;
 
         if (s.type === "image" && s.imageQuery) {
-          const r = await fetch(`https://api.pexels.com/v1/search?per_page=3&orientation=${orient}&query=${encodeURIComponent(String(s.imageQuery))}`, { headers: { Authorization: key }, signal: AbortSignal.timeout(12_000) });
-          const data = (await r.json()) as { photos?: Array<{ src?: { large2x?: string; large?: string } }> };
-          const src = data.photos?.[0]?.src?.large2x ?? data.photos?.[0]?.src?.large;
-          if (src && /^https:\/\/images\.pexels\.com\//.test(src)) {
-            const rel = `p/${pid}/img/scene-${i}.jpg`;
-            await exec(sb, `mkdir -p ${dir}/img`, 10_000);
-            const dl = await exec(sb, `curl -fsSL --max-time 30 -o '${DIR}/public/${rel}' '${src}'`, 40_000);
-            if (dl.exitCode === 0) return NextResponse.json({ image: rel });
+          const query = String(s.imageQuery).slice(0, 160);
+          const targetRatio = sbd.width / Math.max(1, sbd.height);
+
+          // First use the same Wikimedia Commons + Openverse image-search sources as chat.
+          // Rank by canvas aspect ratio and available resolution, then try candidates until one downloads.
+          const webImages = await findWebImages(query).catch(() => []);
+          webImages.sort((a, b) => {
+            const score = (x: WebImage) => Math.abs(Math.log(Math.max(0.01, x.width / Math.max(1, x.height)) / targetRatio)) * 3
+              - Math.min(1, x.width / 1600) - Math.min(1, x.height / 900);
+            return score(a) - score(b);
+          });
+          for (const candidate of webImages.slice(0, 8)) {
+            const downloaded = await downloadWebImage(candidate.url);
+            if (!downloaded) continue;
+            const rel = `p/${pid}/img/scene-${i}.${downloaded.ext}`;
+            await writeBinary(sb, `${DIR}/public/${rel}`, downloaded.bytes);
+            return NextResponse.json({ image: rel, source: "web-image-search" });
+          }
+
+          // If web-image search finds no usable image, retain Pexels as an optional fallback.
+          if (key) {
+            try {
+              const rel = `p/${pid}/img/scene-${i}.jpg`;
+              const r = await fetch(`https://api.pexels.com/v1/search?per_page=8&orientation=${orient}&query=${encodeURIComponent(query)}`, { headers: { Authorization: key }, signal: AbortSignal.timeout(12_000) });
+              if (r.ok) {
+                const data = (await r.json()) as { photos?: Array<{ width?: number; height?: number; src?: { large2x?: string; large?: string; original?: string } }> };
+                const photos = (data.photos ?? []).filter((p) => p.src?.large2x || p.src?.large || p.src?.original);
+                const picked = photos.sort((a, b) => {
+                  const ratioA = (a.width ?? 0) / Math.max(1, a.height ?? 1);
+                  const ratioB = (b.width ?? 0) / Math.max(1, b.height ?? 1);
+                  const scoreA = Math.abs(Math.log(Math.max(0.01, ratioA) / targetRatio)) * 3 - Math.min(1, (a.width ?? 0) / 1600) - Math.min(1, (a.height ?? 0) / 900);
+                  const scoreB = Math.abs(Math.log(Math.max(0.01, ratioB) / targetRatio)) * 3 - Math.min(1, (b.width ?? 0) / 1600) - Math.min(1, (b.height ?? 0) / 900);
+                  return scoreA - scoreB;
+                })[0];
+                const src = picked?.src?.large2x ?? picked?.src?.large ?? picked?.src?.original;
+                if (src && /^https:\/\/images\.pexels\.com\//.test(src)) {
+                  const dl = await exec(sb, `mkdir -p ${dir}/img && curl -fsSL --max-time 30 -o '${DIR}/public/${rel}' '${src}'`, 40_000);
+                  if (dl.exitCode === 0) return NextResponse.json({ image: rel, source: "pexels" });
+                }
+              }
+            } catch { /* Pexels is optional; continue to the normal visual fallback. */ }
           }
         }
 
-        if (s.type === "footage" && s.footageQuery) {
+        if (key && s.type === "footage" && s.footageQuery) {
           const r = await fetch(`https://api.pexels.com/videos/search?per_page=10&size=medium&orientation=${orient}&query=${encodeURIComponent(String(s.footageQuery))}`, { headers: { Authorization: key }, signal: AbortSignal.timeout(12_000) });
-          const data = (await r.json()) as { videos?: Array<{ duration?: number; video_files?: Array<{ link?: string; width?: number; height?: number; file_type?: string }> }> };
-          const need = Number(s.seconds) || 5;
-          const vids = (data.videos ?? []).filter((v) => (v.video_files ?? []).length > 0);
-          const pick = vids.find((v) => (v.duration ?? 0) >= need) ?? vids[0];
-          const target = 1280;
-          const file = (pick?.video_files ?? [])
+          const data = (await r.json()) as { videos?: Array<{ duration?: number; width?: number; height?: number; video_files?: Array<{ link?: string; width?: number; height?: number; file_type?: string; quality?: string }> }> };
+          const need = Math.max(1.5, Number(s.seconds) || 5);
+          const targetRatio = sbd.width / Math.max(1, sbd.height);
+          const candidates = (data.videos ?? []).flatMap((v) => (v.video_files ?? [])
             .filter((f) => f.file_type === "video/mp4" && f.link && /^https:\/\/[a-z0-9.-]*pexels\.com\//.test(f.link))
-            .sort((a, b) => Math.abs(Math.max(a.width ?? 0, a.height ?? 0) - target) - Math.abs(Math.max(b.width ?? 0, b.height ?? 0) - target))[0];
+            .map((f) => {
+              const w = f.width ?? v.width ?? 0;
+              const h = f.height ?? v.height ?? 0;
+              const ratio = w / Math.max(1, h);
+              const durationPenalty = (v.duration ?? 0) >= need ? Math.min(0.5, ((v.duration ?? 0) - need) / 40) : 2 + (need - (v.duration ?? 0));
+              const shapePenalty = Math.abs(Math.log(Math.max(0.01, ratio) / targetRatio)) * 2.5;
+              const resolutionBonus = Math.min(1.5, Math.min(w, h) / 900);
+              const qualityBonus = f.quality === "hd" ? 0.2 : 0;
+              return { file: f, score: durationPenalty + shapePenalty - resolutionBonus - qualityBonus };
+            }));
+          // Prefer clips long enough for the shot, matching the canvas shape and with usable resolution.
+          const best = candidates.sort((a, b) => a.score - b.score)[0];
+          const file = best?.file;
           if (file?.link) {
             const rel = `p/${pid}/vid/scene-${i}.mp4`;
             await exec(sb, `mkdir -p ${dir}/vid`, 10_000);
