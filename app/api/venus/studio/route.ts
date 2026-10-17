@@ -280,7 +280,7 @@ export async function POST(req: Request) {
           `  test -s 'out/${pid}-${kind}.mp4' || { echo '[Venus Pro] Render exited successfully but MP4 is missing/empty'; exit 1; }`,
           "else",
           "  first_code=$?",
-          "  echo "[Venus Pro] First render attempt failed (exit $first_code); retrying once with a fresh single-worker render."",
+          `  echo "[Venus Pro] First render attempt failed (exit $first_code); retrying once with a fresh single-worker render."`,
           `  rm -f 'out/${pid}-${kind}.mp4'`,
           `  npx remotion render ${renderArgs} --concurrency=1 || exit $?`,
           `  test -s 'out/${pid}-${kind}.mp4' || { echo '[Venus Pro] Retry finished but MP4 is missing/empty'; exit 1; }`,
