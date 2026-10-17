@@ -268,10 +268,24 @@ export async function POST(req: Request) {
         const crf = kind === "final" ? (scale > 1 ? 26 : 23) : 30;
         const frames = /^\d+-\d+$/.test(String(body.frames || "")) ? String(body.frames) : "";
         const jobId = "r" + Date.now().toString(36);
+        const renderArgs = `src/index.ts Main out/${pid}-${kind}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --codec=h264 --crf=${crf} --log=info --overwrite`;
+        // Low-memory E2B desktops can lose a Remotion browser worker under parallel rendering.
+        // Start conservatively, then retry once with an even safer single-worker render if it fails.
         const script = [
+          "set -u",
           `cd ${DIR}`,
           "mkdir -p out",
-          `npx remotion render src/index.ts Main out/${pid}-${kind}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --concurrency=2 --codec=h264 --crf=${crf} --log=info --overwrite`,
+          `echo '[Venus Pro] Starting Remotion render with concurrency=1'`,
+          `if npx remotion render ${renderArgs} --concurrency=1; then`,
+          `  test -s 'out/${pid}-${kind}.mp4' || { echo '[Venus Pro] Render exited successfully but MP4 is missing/empty'; exit 1; }`,
+          "else",
+          "  first_code=$?",
+          "  echo "[Venus Pro] First render attempt failed (exit $first_code); retrying once with a fresh single-worker render."",
+          `  rm -f 'out/${pid}-${kind}.mp4'`,
+          `  npx remotion render ${renderArgs} --concurrency=1 || exit $?`,
+          `  test -s 'out/${pid}-${kind}.mp4' || { echo '[Venus Pro] Retry finished but MP4 is missing/empty'; exit 1; }`,
+          "fi",
+          `echo '[Venus Pro] Render output verified: out/${pid}-${kind}.mp4'`,
         ].join("\n");
         await startJob(sb, jobId, script);
         return NextResponse.json({ jobId });
