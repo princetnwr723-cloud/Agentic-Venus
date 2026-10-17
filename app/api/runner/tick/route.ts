@@ -2,6 +2,8 @@
 // 1) keeps background jobs alive, 2) finishes jobs nobody is watching, posts the report in the chat and
 // switches the computer off, 3) pings you when an unattended job needs an approval,
 // 4) pauses idle computers (saves money).
+// Plans: it also counts the time of computer-agent jobs (even with the tab closed) and stops a job
+// when the plan's computer time for the current window is used up.
 import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
@@ -11,6 +13,7 @@ import { createSignedDownload } from "@/lib/supabase-server";
 import { resolveValue } from "@/lib/vault";
 import { http } from "@/lib/tools/net";
 import { unpack } from "@/lib/tools/catalog";
+import { pcExhausted, settlePcJob, touchPcSeen } from "@/lib/billing-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -152,12 +155,20 @@ export async function POST(req: Request) {
         let state: RunnerState & { pending?: { id: string; question?: string; site?: string; message?: string; kind?: string }; proof?: string | null } = {
           status: "error", summary: "The computer expired or was deleted while the task was running.",
         };
+        let pcSb: Awaited<ReturnType<typeof connect>> | null = null;
         try {
-          const sb = await connect(e2bKey, job.sandboxId); // keeps the computer alive while the job runs
-          state = (await runnerStatus(sb, job.id, 0)).state as typeof state;
+          pcSb = await connect(e2bKey, job.sandboxId); // keeps the computer alive while the job runs
+          state = (await runnerStatus(pcSb, job.id, 0)).state as typeof state;
         } catch { /* expired */ }
 
         if (state.status === "running") {
+          // plan: count the time even when the tab is closed, and stop the job when the plan's time is used up
+          await touchPcSeen(userRef.id, job.id).catch(() => {});
+          if (pcSb && (await pcExhausted(userRef.id).catch(() => false))) {
+            await stopRunner(pcSb, job.id).catch(() => {});
+            await postChat(userRef, d.id, "⏱️ The computer-agent time of your plan for this window is used up, so the task was stopped. It refreshes automatically — see Settings → Plans.").catch(() => {});
+          }
+
           const watched = Date.now() - (job.hb ?? 0) < 90_000;
           const pend = state.pending;
           if (!watched && pend && p.notified !== pend.id) {
@@ -184,6 +195,7 @@ export async function POST(req: Request) {
           finalized = true;
         });
         if (finalized) {
+          await settlePcJob(userRef.id, job.id, state.updatedAt ?? Date.now()).catch(() => {}); // plan: close the time of this job
           const msg = `${ok ? "✅ Your background task finished while you were away." : "⚠️ Your background task stopped:"}\n\n**${(p.task ?? "").slice(0, 120)}**\n\n${summary}${replay}\n\n🔌 The computer was switched off to save credits.`;
           await postChat(userRef, d.id, msg);
           await telegram(userRef, d.id, `${ok ? "✅" : "⚠️"} ${(p.task ?? "Task").slice(0, 100)}\n${summary.slice(0, 600)}`);
