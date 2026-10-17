@@ -6,6 +6,7 @@
 //   billingUnclaimed/{saleId}  -> paid sales we could not tie to a user (check by hand)
 //   billingEvents/*            -> small audit log
 import { createHmac, timingSafeEqual } from "crypto";
+import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { RequestError } from "@/lib/request";
 import { fmtDuration, fmtTokens, nextPlan, planById, type PlanDef, type PlanId } from "@/lib/plans";
@@ -147,16 +148,10 @@ export const settlePcJob = (uid: string, jobId: string, endMs: number) =>
       if (!o) return;
       const end = Math.min(endMs || c.now, o.since + MAX_JOB_MS);
       c.n.pcSeconds += Math.max(0, (end - Math.max(o.since, c.n.windowStart)) / 1000);
-      c.patch.pcOpen = { [jobId]: (await_delete()) };
+      c.patch.pcOpen = { [jobId]: FieldValue.delete() };
     }),
     undefined
   );
-
-// small helper kept separate so the import stays at the top of the file
-import { FieldValue } from "firebase-admin/firestore";
-function await_delete() {
-  return FieldValue.delete();
-}
 
 export const listOpenPcJobs = async (uid: string): Promise<Record<string, Open>> => {
   try {
@@ -207,16 +202,26 @@ function links(): Record<string, string> {
   }
 }
 export const checkoutLink = (plan: string): string => links()[plan] ?? "";
-const permalinkOf = (u: string) => {
+
+/** "https://x.gumroad.com/l/agv-pro?wanted=true" or "agv-pro" -> "agv-pro" (lowercase). */
+const slugOf = (u: string): string => {
+  const s = String(u ?? "").trim();
+  if (!s) return "";
   try {
-    return new URL(u).pathname.split("/").filter(Boolean).pop() ?? "";
+    return (new URL(s).pathname.split("/").filter(Boolean).pop() ?? "").toLowerCase();
   } catch {
-    return "";
+    return s.split("?")[0].split("/").filter(Boolean).pop()?.toLowerCase() ?? "";
   }
 };
-export const planOfPermalink = (perma: string): PlanId | null => {
-  const hit = Object.entries(links()).find(([, u]) => permalinkOf(u) === perma);
-  return hit ? (hit[0] as PlanId) : null;
+
+/** Gumroad names a product in several ways (URL, short slug, custom slug). Any of them may match. */
+export const planOfSlugs = (candidates: Array<string | undefined | null>): PlanId | null => {
+  const wanted = new Set(candidates.map((c) => slugOf(String(c ?? ""))).filter(Boolean));
+  if (!wanted.size) return null;
+  for (const [plan, url] of Object.entries(links())) {
+    if (wanted.has(slugOf(url))) return plan as PlanId;
+  }
+  return null;
 };
 
 async function gr(path: string): Promise<any> {
@@ -231,6 +236,7 @@ async function gr(path: string): Promise<any> {
 /** A ping is not signed, so every sale is confirmed again with Gumroad's own API before anyone gets a plan. */
 export const fetchSale = async (id: string) => (await gr(`/sales/${encodeURIComponent(id)}`)).sale as Record<string, any>;
 export const fetchSubscriber = async (id: string) => (await gr(`/subscribers/${encodeURIComponent(id)}`)).subscriber as Record<string, any>;
+export const fetchProduct = async (id: string) => (await gr(`/products/${encodeURIComponent(id)}`)).product as Record<string, any>;
 
 export async function logEvent(kind: string, data: Record<string, unknown>) {
   try {
