@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
+import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
 import { directorPrompt, editPrompt, reviewPrompt, sceneCodePrompt } from "@/lib/venus-prompts";
 import { checkCode, sanitizeScene, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
@@ -27,8 +28,15 @@ export async function POST(req: Request) {
     const apiKey = String(body.apiKey || "");
     const model = String(body.model || "");
     if (!provider || !apiKey || !model) return NextResponse.json({ error: "Provider, API key and model are required." }, { status: 400 });
-    const ask = (content: string, image?: { mediaType: string; data: string }) =>
-      callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }] });
+
+    const uid = String(body.uid);
+    await assertTokens(uid); // plan limit (HTTP 402 when used up)
+
+    const ask = async (content: string, image?: { mediaType: string; data: string }) => {
+      const out = await callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }] });
+      await addTokens(uid, estTokens(content.length + out.length));
+      return out;
+    };
 
     if (body.kind === "storyboard") {
       const seconds = Math.min(60, Math.max(10, Number(body.seconds) || 45));
