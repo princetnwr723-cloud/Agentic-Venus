@@ -5,6 +5,7 @@ import { X, ExternalLink } from "lucide-react";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { useKeys } from "@/lib/keys-context";
 import VaultHealth from "@/components/dashboard/VaultHealth";
+import PlansPanel from "@/components/dashboard/PlansPanel";
 
 function mask(key?: string | null) {
   if (!key) return null;
@@ -17,6 +18,7 @@ function mask(key?: string | null) {
 
 export default function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { apiKeys, e2bKey, saveProviderKey, saveE2bKey } = useKeys();
+  const [tab, setTab] = useState<"keys" | "plans">("keys");
   const [drafts, setDrafts] = useState<Partial<Record<ProviderId, string>>>({});
   const [e2bDraft, setE2bDraft] = useState("");
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
@@ -52,59 +54,70 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl2 border border-line bg-panel p-6" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-1 flex items-center justify-between">
-          <h2 className="text-sm font-medium text-ink">API keys</h2>
+      <div className={`max-h-[88vh] w-full overflow-y-auto rounded-xl2 border border-line bg-panel p-6 ${tab === "plans" ? "max-w-3xl" : "max-w-lg"}`} onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex rounded-full border border-line bg-panel2 p-1 text-xs">
+            {([["keys", "API keys"], ["plans", "Plans"]] as const).map(([k, l]) => (
+              <button key={k} onClick={() => setTab(k)} className={`rounded-full px-4 py-1.5 transition-colors ${tab === k ? "bg-white font-medium text-bg" : "text-muted"}`}>{l}</button>
+            ))}
+          </div>
           <button onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
-        <p className="mb-5 text-xs leading-relaxed text-muted">
-          Add at least one AI provider to start chatting. Keys are encrypted on the server — your browser only keeps a masked reference, so a key can&apos;t be read back, only replaced.
-        </p>
-        <VaultHealth />
-        {error && <p className="mb-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{error}</p>}
 
-        <div className="space-y-3">
-          {PROVIDERS.map((p) => (
-            <div key={p.id} className="rounded-lg border border-line p-3">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="text-sm text-ink">{p.label}</span>
-                <div className="flex items-center gap-2">
-                  {apiKeys[p.id] && <span className="text-[11px] text-avatar-teal">Connected · {mask(apiKeys[p.id])}</span>}
-                  <a href={p.keysUrl} target="_blank" rel="noreferrer" className="text-faint hover:text-muted" title="Get a key"><ExternalLink size={13} /></a>
+        {tab === "plans" ? (
+          <PlansPanel onNavigate={onClose} />
+        ) : (
+          <>
+            <p className="mb-5 text-xs leading-relaxed text-muted">
+              Add at least one AI provider to start chatting. Keys are encrypted on the server — your browser only keeps a masked reference, so a key can&apos;t be read back, only replaced.
+            </p>
+            <VaultHealth />
+            {error && <p className="mb-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{error}</p>}
+
+            <div className="space-y-3">
+              {PROVIDERS.map((p) => (
+                <div key={p.id} className="rounded-lg border border-line p-3">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-sm text-ink">{p.label}</span>
+                    <div className="flex items-center gap-2">
+                      {apiKeys[p.id] && <span className="text-[11px] text-avatar-teal">Connected · {mask(apiKeys[p.id])}</span>}
+                      <a href={p.keysUrl} target="_blank" rel="noreferrer" className="text-faint hover:text-muted" title="Get a key"><ExternalLink size={13} /></a>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="password" placeholder={apiKeys[p.id] ? "Paste a new key to replace it" : p.placeholder}
+                      value={drafts[p.id] ?? ""} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
+                      className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
+                    />
+                    <button onClick={() => handleSaveProvider(p.id)} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90">
+                      {savedFlash === p.id ? "Saved" : "Save"}
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="password" placeholder={apiKeys[p.id] ? "Paste a new key to replace it" : p.placeholder}
-                  value={drafts[p.id] ?? ""} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
-                  className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
-                />
-                <button onClick={() => handleSaveProvider(p.id)} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90">
-                  {savedFlash === p.id ? "Saved" : "Save"}
-                </button>
-              </div>
+              ))}
             </div>
-          ))}
-        </div>
 
-        <div className="my-5 h-px bg-line" />
+            <div className="my-5 h-px bg-line" />
 
-        <h3 className="mb-1.5 text-sm text-ink">Computer (E2B)</h3>
-        <p className="mb-3 text-xs leading-relaxed text-muted">
-          One shared computer for the whole account — every chat can use it. Add your key once — get one at{" "}
-          <a href="https://e2b.dev/dashboard" target="_blank" rel="noreferrer" className="underline">e2b.dev</a> (no credit card needed).
-        </p>
-        <div className="flex gap-2">
-          <input
-            type="password" placeholder={e2bKey ? "Paste a new key to replace it" : "e2b_..."}
-            value={e2bDraft} onChange={(e) => setE2bDraft(e.target.value)}
-            className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
-          />
-          <button onClick={handleSaveE2b} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90">
-            {savedFlash === "e2b" ? "Saved" : "Save"}
-          </button>
-        </div>
-        {e2bKey && <p className="mt-1.5 text-[11px] text-avatar-teal">Connected · {mask(e2bKey)}</p>}
+            <h3 className="mb-1.5 text-sm text-ink">Computer (E2B)</h3>
+            <p className="mb-3 text-xs leading-relaxed text-muted">
+              One shared computer for the whole account — every chat can use it. Add your key once — get one at{" "}
+              <a href="https://e2b.dev/dashboard" target="_blank" rel="noreferrer" className="underline">e2b.dev</a> (no credit card needed).
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="password" placeholder={e2bKey ? "Paste a new key to replace it" : "e2b_..."}
+                value={e2bDraft} onChange={(e) => setE2bDraft(e.target.value)}
+                className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
+              />
+              <button onClick={handleSaveE2b} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90">
+                {savedFlash === "e2b" ? "Saved" : "Save"}
+              </button>
+            </div>
+            {e2bKey && <p className="mt-1.5 text-[11px] text-avatar-teal">Connected · {mask(e2bKey)}</p>}
+          </>
+        )}
       </div>
     </div>
   );
