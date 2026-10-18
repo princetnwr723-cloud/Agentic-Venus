@@ -34,7 +34,7 @@ export type PlanDoc = {
 type Open = { sandboxId: string; since: number; seen: number };
 type UsageDoc = { windowStart?: number; tokens?: number; pcSeconds?: number; pcOpen?: Record<string, Open> };
 type Norm = { windowStart: number; tokens: number; pcSeconds: number; pcOpen: Record<string, Open> };
-type Ctx = { plan: PlanDef; n: Norm; now: number; patch: Record<string, unknown>; doc: PlanDoc | undefined };
+type Ctx = { plan: PlanDef; n: Norm; now: number; patch: Record<string, unknown>; doc: PlanDoc | undefined; dirty: boolean };
 
 export const estTokens = (chars: number) => Math.ceil(Math.max(0, chars) / 4);
 
@@ -61,16 +61,21 @@ function liveSeconds(open: Record<string, Open>, ws: number, now: number): numbe
 }
 const pcUsed = (c: Ctx) => c.n.pcSeconds + liveSeconds(c.n.pcOpen, c.n.windowStart, c.now);
 
+/** Reads plan + usage in one transaction. It only WRITES when something really changed (faster, no write contention). */
 async function tx<T>(uid: string, fn: (c: Ctx) => T): Promise<T> {
   return db().runTransaction(async (t) => {
     const [ps, us] = await Promise.all([t.get(planRef(uid)), t.get(usageRef(uid))]);
     const now = Date.now();
     const doc = ps.data() as PlanDoc | undefined;
     const plan = planById(effectivePlan(doc, now));
-    const n = norm(us.data() as UsageDoc | undefined, plan, now);
-    const c: Ctx = { plan, n, now, patch: {}, doc };
+    const stored = us.data() as UsageDoc | undefined;
+    const n = norm(stored, plan, now);
+    const c: Ctx = { plan, n, now, patch: {}, doc, dirty: false };
     const out = fn(c);
-    t.set(usageRef(uid), { windowStart: n.windowStart, tokens: n.tokens, pcSeconds: n.pcSeconds, ...c.patch }, { merge: true });
+    const rolled = !stored || n.windowStart !== Number(stored.windowStart);
+    if (rolled || c.dirty || Object.keys(c.patch).length > 0) {
+      t.set(usageRef(uid), { windowStart: n.windowStart, tokens: n.tokens, pcSeconds: n.pcSeconds, ...c.patch }, { merge: true });
+    }
     return out;
   });
 }
@@ -107,6 +112,7 @@ export const addTokens = (uid: string, tokens: number) =>
   failOpen(
     tx(uid, (c) => {
       c.n.tokens += Math.max(0, Math.round(tokens));
+      c.dirty = true;
     }),
     undefined
   );
@@ -120,38 +126,61 @@ export const assertPcAllowed = (uid: string) =>
     undefined
   );
 
-export const pcExhausted = (uid: string) =>
-  failOpen(tx(uid, (c) => c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds), false);
+// "not used up yet" is remembered for 20 seconds, so a status poll does not hit the database every time
+const notExhaustedAt = new Map<string, number>();
+export const pcExhausted = async (uid: string): Promise<boolean> => {
+  const hit = notExhaustedAt.get(uid);
+  if (hit && Date.now() - hit < 20_000) return false;
+  const r = await failOpen(tx(uid, (c) => c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds), false);
+  if (!r) {
+    if (notExhaustedAt.size > 500) notExhaustedAt.clear();
+    notExhaustedAt.set(uid, Date.now());
+  }
+  return r;
+};
 
-export const openPcJob = (uid: string, jobId: string, sandboxId: string) =>
-  failOpen(
+export const openPcJob = (uid: string, jobId: string, sandboxId: string) => {
+  notExhaustedAt.delete(uid);
+  return failOpen(
     tx(uid, (c) => {
       c.patch.pcOpen = { [jobId]: { sandboxId, since: c.now, seen: c.now } };
     }),
     undefined
   );
+};
 
-export const touchPcSeen = (uid: string, jobId: string) =>
-  failOpen(
+// "I saw this job running" is written at most every 25 seconds per job
+const lastTouch = new Map<string, number>();
+export const touchPcSeen = async (uid: string, jobId: string): Promise<void> => {
+  const k = `${uid}:${jobId}`;
+  const now = Date.now();
+  if (now - (lastTouch.get(k) ?? 0) < 25_000) return;
+  if (lastTouch.size > 500) lastTouch.clear();
+  lastTouch.set(k, now);
+  await failOpen(
     tx(uid, (c) => {
       const o = c.n.pcOpen[jobId];
       if (o) c.patch.pcOpen = { [jobId]: { ...o, seen: c.now } };
     }),
     undefined
   );
+};
 
 /** Idempotent: closing a job twice adds its time only once. */
-export const settlePcJob = (uid: string, jobId: string, endMs: number) =>
-  failOpen(
+export const settlePcJob = (uid: string, jobId: string, endMs: number) => {
+  notExhaustedAt.delete(uid);
+  return failOpen(
     tx(uid, (c) => {
       const o = c.n.pcOpen[jobId];
       if (!o) return;
       const end = Math.min(endMs || c.now, o.since + MAX_JOB_MS);
       c.n.pcSeconds += Math.max(0, (end - Math.max(o.since, c.n.windowStart)) / 1000);
       c.patch.pcOpen = { [jobId]: FieldValue.delete() };
+      c.dirty = true;
     }),
     undefined
   );
+};
 
 export const listOpenPcJobs = async (uid: string): Promise<Record<string, Open>> => {
   try {
