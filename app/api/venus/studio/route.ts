@@ -2,16 +2,17 @@ import { NextResponse } from "next/server";
 import { connect, createSandbox, exec } from "@/lib/e2b-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { createSignedUpload } from "@/lib/supabase-server";
-import { DIR, jobStatus, prepareProject, safeId, setupStudio, startJob, studioState, writeBinary } from "@/lib/venus-server";
-import { sanitizeStoryboard } from "@/lib/venus-schema";
+import { DIR, jobStatus, prepareProject, safeId, setupStudio, startJob, studioState, writeBinary, writeFiles } from "@/lib/venus-server";
+import { AUDIO_MOODS, sanitizeStoryboard, sceneLayout, totalFramesOf, type Storyboard } from "@/lib/venus-schema";
+import { MAIN_SOURCE, SYNTH_SOURCE, UI_SOURCE } from "@/lib/venus-kit";
+import { getAdminDb } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const fail = (message: string, status = 500) => NextResponse.json({ error: message }, { status });
 
-// Use the same real-image sources as chat's image.search tool for Venus Pro still-image scenes.
-// Search results are downloaded server-side and copied into the E2B project's public assets.
+// ---------- real-image search (same sources as chat's image.search) ----------
 type WebImage = { url: string; width: number; height: number };
 const IMAGE_UA = "AgenticVenus/1.0 (https://agenticvenus.app; Venus Pro image search)";
 async function findWebImages(query: string): Promise<WebImage[]> {
@@ -61,6 +62,44 @@ async function downloadWebImage(url: string): Promise<{ bytes: Buffer; ext: stri
   } catch { return null; }
 }
 
+// ---------- sound design: scene metadata -> a timed list of cues (the audio itself is synthesized by code) ----------
+const CUE_KINDS = new Set(["typing", "soft-click", "click", "whoosh", "impact", "chime", "riser", "pop", "tick", "swell", "none"]);
+type Cue = { at: number; kind: string; g?: number; dur?: number };
+
+function buildCues(sb: Storyboard): Cue[] {
+  const L = sceneLayout(sb);
+  const n = sb.scenes.length;
+  const cues: Cue[] = [];
+  sb.scenes.forEach((s, i) => {
+    const at = L[i].from / 30;
+    const type = String(s.type);
+    const declared = typeof s.soundCue === "string" ? s.soundCue.trim() : "";
+    let kind = declared || (i === 0 ? "impact" : i === n - 1 ? "chime" : "whoosh");
+    if (!CUE_KINDS.has(kind)) kind = "whoosh";
+    if (kind !== "none") {
+      const when = i === 0 ? 0.2 : kind === "whoosh" || kind === "riser" ? Math.max(0, at - 0.12) : at + 0.05;
+      cues.push({ at: when, kind, ...(kind === "typing" ? { dur: Math.min(2.2, Math.max(0.6, Number(s.seconds) * 0.4)) } : {}) });
+    }
+    if (declared === "none") return;
+    const count = (v: unknown, max: number) => Math.min(max, Array.isArray(v) ? v.length : 0);
+    if (type === "bullets") for (let k = 0; k < count(s.items, 5); k++) cues.push({ at: at + (14 + k * 9) / 30, kind: "pop", g: 0.5 });
+    else if (type === "ranking") for (let k = 0; k < count(s.items, 5); k++) cues.push({ at: at + (12 + k * 10) / 30, kind: "pop", g: 0.5 });
+    else if (type === "timeline") for (let k = 0; k < count(s.steps, 5); k++) cues.push({ at: at + (12 + k * 12) / 30, kind: "pop", g: 0.5 });
+    else if (type === "bar-chart") for (let k = 0; k < count(s.data, 6); k++) cues.push({ at: at + (12 + k * 8) / 30, kind: "tick", g: 0.6 });
+    else if (type === "stat") {
+      cues.push({ at: at + 0.15, kind: "riser", dur: 1.0, g: 0.5 });
+      cues.push({ at: at + Math.min(64, L[i].dur - 24) / 30, kind: "pop", g: 0.7 });
+    } else if (type === "custom") {
+      (Array.isArray(s.sounds) ? s.sounds : []).slice(0, 8).forEach((x: any) => {
+        const k = String(x?.kind);
+        const t = Number(x?.at);
+        if (CUE_KINDS.has(k) && k !== "none" && Number.isFinite(t) && t >= 0 && t < Number(s.seconds)) cues.push({ at: at + t, kind: k, g: 0.8 });
+      });
+    }
+  });
+  return cues.filter((c) => Number.isFinite(c.at) && c.at >= 0).slice(0, 150);
+}
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req);
@@ -88,51 +127,30 @@ export async function POST(req: Request) {
       case "prepare": {
         const pid = safeId(body.projectId);
         let storyboard = sanitizeStoryboard(body.storyboard, { keepFiles: true });
-        // Build a deterministic, code-free SFX track from scene soundCue metadata.
-        // If FFmpeg/audio filters are unavailable, video preparation still succeeds.
+
+        // The Venus Pro UI kit, the Main composition and the audio engine are (re)written on every prepare,
+        // so old studio computers get them without any reinstall.
+        await writeFiles(sb, {
+          [`${DIR}/src/ui.tsx`]: UI_SOURCE,
+          [`${DIR}/src/Main.tsx`]: MAIN_SOURCE,
+          [`${DIR}/synth.cjs`]: SYNTH_SOURCE,
+        });
+
+        // Sound effects are synthesized by code from the scene cues. Optional: a failure never blocks the render.
         try {
-          const sfxPath = `${DIR}/public/p/${pid}/sfx.mp3`;
-          const cues: Array<{ at: number; kind: string }> = [];
-          let cursor = 0;
-          const scenes = storyboard.scenes;
-          // A short typing sequence establishes the UI/product-demo feel.
-          if (scenes.length && scenes.some((scene) => ["typing", "soft-click"].includes(String(scene.soundCue || "")))) {
-            for (let n = 0; n < 10; n++) cues.push({ at: Math.min(1.7, n * 0.085), kind: "typing" });
-          }
-          scenes.forEach((scene, index) => {
-            const kind = String(scene.soundCue || (index === scenes.length - 1 ? "chime" : index === 0 ? "soft-click" : "whoosh"));
-            if (kind !== "none" && index > 0) cues.push({ at: Math.max(0, cursor - 0.08), kind });
-            cursor += Math.max(1.5, Number(scene.seconds) || 4) - 0.4;
-          });
+          const cues = buildCues(storyboard);
           if (cues.length) {
-            const safeCues = cues.filter((c) => Number.isFinite(c.at) && c.at >= 0 && c.at < 60).slice(0, 32);
-            await exec(sb, `mkdir -p ${DIR}/public/p/${pid}`, 10_000);
-            const inputs: string[] = [];
-            const filters: string[] = [];
-            safeCues.forEach((cue, i) => {
-              const at = Math.max(0, Math.round(cue.at * 1000));
-              let source = "sine=frequency=1500:sample_rate=44100";
-              let duration = 0.06;
-              let filter = "volume=0.12,afade=t=out:st=0.008:d=0.052";
-              if (cue.kind === "whoosh" || cue.kind === "riser") {
-                source = "anoisesrc=color=pink:amplitude=0.22:sample_rate=44100"; duration = cue.kind === "riser" ? 0.55 : 0.32;
-                filter = `highpass=f=450,lowpass=f=9000,afade=t=in:d=0.04,afade=t=out:st=${(duration * 0.45).toFixed(3)}:d=${(duration * 0.55).toFixed(3)},volume=0.16`;
-              } else if (cue.kind === "impact") {
-                source = "sine=frequency=95:sample_rate=44100"; duration = 0.24;
-                filter = "afade=t=in:d=0.004,afade=t=out:st=0.06:d=0.18,volume=0.22";
-              } else if (cue.kind === "chime") {
-                source = "sine=frequency=880:sample_rate=44100"; duration = 0.42;
-                filter = "afade=t=in:d=0.01,afade=t=out:st=0.12:d=0.3,volume=0.13";
-              }
-              inputs.push(`-f lavfi -t ${duration} -i '${source}'`);
-              filters.push(`[${i}:a]${filter},adelay=${at}|${at}[a${i}]`);
-            });
-            const mix = safeCues.map((_, i) => `[a${i}]`).join("");
-            const cmd = `ffmpeg -y -loglevel error ${inputs.join(" ")} -filter_complex '${filters.join(";")};${mix}amix=inputs=${safeCues.length}:duration=longest:normalize=0,alimiter=limit=0.85[out]' -map '[out]' -t ${Math.max(8, Math.ceil(cursor + 1))} -codec:a libmp3lame -b:a 128k '${sfxPath}'`;
-            const result = await exec(sb, cmd, 45_000);
-            if (result.exitCode === 0) storyboard = { ...storyboard, sfx: `p/${pid}/sfx.mp3` };
+            const total = totalFramesOf(storyboard) / 30 + 1;
+            await writeFiles(sb, { [`${DIR}/work/${pid}/sfx.json`]: JSON.stringify({ total, cues }) });
+            const r = await exec(
+              sb,
+              `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs sfx work/${pid}/sfx.json public/p/${pid}/sfx.wav && ffmpeg -y -loglevel error -i public/p/${pid}/sfx.wav -codec:a libmp3lame -b:a 160k public/p/${pid}/sfx.mp3 && rm -f public/p/${pid}/sfx.wav`,
+              50_000
+            );
+            if (r.exitCode === 0) storyboard = { ...storyboard, sfx: `p/${pid}/sfx.mp3` };
           }
-        } catch { /* SFX are optional; never block the visual render. */ }
+        } catch { /* SFX are optional */ }
+
         return NextResponse.json(await prepareProject(sb, pid, storyboard));
       }
 
@@ -150,8 +168,6 @@ export async function POST(req: Request) {
           const query = String(s.imageQuery).slice(0, 160);
           const targetRatio = sbd.width / Math.max(1, sbd.height);
 
-          // First use the same Wikimedia Commons + Openverse image-search sources as chat.
-          // Rank by canvas aspect ratio and available resolution, then try candidates until one downloads.
           const webImages = await findWebImages(query).catch(() => []);
           webImages.sort((a, b) => {
             const score = (x: WebImage) => Math.abs(Math.log(Math.max(0.01, x.width / Math.max(1, x.height)) / targetRatio)) * 3
@@ -166,7 +182,6 @@ export async function POST(req: Request) {
             return NextResponse.json({ image: rel, source: "web-image-search" });
           }
 
-          // If web-image search finds no usable image, retain Pexels as an optional fallback.
           if (key) {
             try {
               const rel = `p/${pid}/img/scene-${i}.jpg`;
@@ -187,7 +202,7 @@ export async function POST(req: Request) {
                   if (dl.exitCode === 0) return NextResponse.json({ image: rel, source: "pexels" });
                 }
               }
-            } catch { /* Pexels is optional; continue to the normal visual fallback. */ }
+            } catch { /* Pexels is optional */ }
           }
         }
 
@@ -208,7 +223,6 @@ export async function POST(req: Request) {
               const qualityBonus = f.quality === "hd" ? 0.2 : 0;
               return { file: f, score: durationPenalty + shapePenalty - resolutionBonus - qualityBonus };
             }));
-          // Prefer clips long enough for the shot, matching the canvas shape and with usable resolution.
           const best = candidates.sort((a, b) => a.score - b.score)[0];
           const file = best?.file;
           if (file?.link) {
@@ -246,19 +260,34 @@ export async function POST(req: Request) {
         return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0 });
       }
 
-      // A simple generated ambient bed (layered sine chord with slow tremolo and echo).
+      // Background music composed by code (pads, bass, arpeggio, drums that build up, an ending).
+      // The mood and tempo come from the director's "audio" field of this project.
       case "music": {
         const pid = safeId(body.projectId);
         const secs = Math.min(75, Math.max(8, Math.ceil(Number(body.seconds) || 30)));
-        const minor = Boolean(body.dark);
-        const f = minor ? [110, 130.81, 164.81, 220] : [110, 138.59, 164.81, 207.65];
+        let mood = AUDIO_MOODS.includes(body.mood) ? String(body.mood) : body.dark ? "dark" : "bright";
+        let bpm = Number(body.bpm) || 0;
+        if (!body.mood) {
+          try {
+            const snap = await getAdminDb().collection("users").doc(String(body.uid)).collection("venusProjects").doc(pid).get();
+            const raw = (snap.data() as { storyboardJson?: string } | undefined)?.storyboardJson;
+            const a = raw ? JSON.parse(raw)?.audio : null;
+            if (a && (AUDIO_MOODS as readonly string[]).includes(String(a.mood))) mood = String(a.mood);
+            if (a && Number(a.bpm) >= 70 && Number(a.bpm) <= 140) bpm = Number(a.bpm);
+          } catch { /* the dark/bright fallback is used */ }
+        }
         const rel = `p/${pid}/music.mp3`;
-        await exec(sb, `mkdir -p ${DIR}/public/p/${pid}`, 10_000);
-        const inputs = f.map((hz) => `-f lavfi -i "sine=frequency=${hz}:sample_rate=44100"`).join(" ");
-        const cmd = `ffmpeg -y -loglevel error ${inputs} -filter_complex "[0][1][2][3]amix=inputs=4:normalize=0,tremolo=f=0.18:d=0.45,lowpass=f=1400,aecho=0.8:0.7:60|120:0.35|0.25,volume=0.5,afade=t=in:d=2,afade=t=out:st=${secs - 3}:d=3" -t ${secs} -b:a 128k '${DIR}/public/${rel}'`;
-        const r = await exec(sb, cmd, 50_000);
+        await writeFiles(sb, {
+          [`${DIR}/synth.cjs`]: SYNTH_SOURCE,
+          [`${DIR}/work/${pid}/music.json`]: JSON.stringify({ seconds: secs, mood, ...(bpm ? { bpm } : {}), seed: pid.length * 31 + secs }),
+        });
+        const r = await exec(
+          sb,
+          `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs music work/${pid}/music.json public/p/${pid}/music.wav && ffmpeg -y -loglevel error -i public/p/${pid}/music.wav -codec:a libmp3lame -b:a 160k public/${rel} && rm -f public/p/${pid}/music.wav`,
+          55_000
+        );
         if (r.exitCode !== 0) return fail("Music generation failed: " + (r.stderr || r.stdout).slice(0, 200));
-        return NextResponse.json({ file: rel });
+        return NextResponse.json({ file: rel, mood });
       }
 
       case "render": {
@@ -269,8 +298,6 @@ export async function POST(req: Request) {
         const frames = /^\d+-\d+$/.test(String(body.frames || "")) ? String(body.frames) : "";
         const jobId = "r" + Date.now().toString(36);
         const renderArgs = `src/index.ts Main out/${pid}-${kind}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --codec=h264 --crf=${crf} --log=info --overwrite`;
-        // Low-memory E2B desktops can lose a Remotion browser worker under parallel rendering.
-        // Start conservatively, then retry once with an even safer single-worker render if it fails.
         const script = [
           "set -u",
           `cd ${DIR}`,
