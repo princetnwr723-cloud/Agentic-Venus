@@ -18,7 +18,17 @@ const usageRef = (uid: string) => base(uid).doc("usage");
 
 const DAY = 86_400_000;
 const GRACE_MS = 3 * DAY; // late renewal payments do not cut access instantly
-const MAX_JOB_MS = 130 * 60_000; // a computer job never runs longer than ~2h
+const MAX_JOB_MS = 130 * 60_000; // hard safety cap: a single computer job never runs longer than ~2h
+
+/**
+ * Local testing escape hatch. It bypasses subscription token/computer-time quotas
+ * only when explicitly enabled AND running outside production. Provider API limits,
+ * E2B account limits, and the per-job safety cap still apply.
+ * Set VENUS_UNLIMITED_TEST_MODE=true in a local .env.local to enable.
+ */
+const UNLIMITED_TEST_MODE =
+  process.env.NODE_ENV !== "production" &&
+  process.env.VENUS_UNLIMITED_TEST_MODE === "true";
 
 export type PlanDoc = {
   plan?: PlanId;
@@ -67,7 +77,10 @@ async function tx<T>(uid: string, fn: (c: Ctx) => T): Promise<T> {
     const [ps, us] = await Promise.all([t.get(planRef(uid)), t.get(usageRef(uid))]);
     const now = Date.now();
     const doc = ps.data() as PlanDoc | undefined;
-    const plan = planById(effectivePlan(doc, now));
+    const effective = planById(effectivePlan(doc, now));
+    const plan: PlanDef = UNLIMITED_TEST_MODE
+      ? { ...effective, tokens: null, pcSeconds: null }
+      : effective;
     const stored = us.data() as UsageDoc | undefined;
     const n = norm(stored, plan, now);
     const c: Ctx = { plan, n, now, patch: {}, doc, dirty: false };
