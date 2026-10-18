@@ -18,17 +18,21 @@ const usageRef = (uid: string) => base(uid).doc("usage");
 
 const DAY = 86_400_000;
 const GRACE_MS = 3 * DAY; // late renewal payments do not cut access instantly
-const MAX_JOB_MS = 130 * 60_000; // hard safety cap: a single computer job never runs longer than ~2h
+const MAX_JOB_MS = 130 * 60_000; // a computer job never runs longer than ~2h
 
 /**
- * Local testing escape hatch. It bypasses subscription token/computer-time quotas
- * only when explicitly enabled AND running outside production. Provider API limits,
- * E2B account limits, and the per-job safety cap still apply.
- * Set VENUS_UNLIMITED_TEST_MODE=true in a local .env.local to enable.
+ * Temporary testing bypass, restricted to explicitly listed Firebase UIDs.
+ * Set VENUS_UNLIMITED_TEST_MODE=true and VENUS_UNLIMITED_TEST_UIDS=<uid1,uid2>
+ * in the server environment. Never enable this for every user on a public deployment.
  */
-const UNLIMITED_TEST_MODE =
-  process.env.NODE_ENV !== "production" &&
-  process.env.VENUS_UNLIMITED_TEST_MODE === "true";
+function isUnlimitedTestUser(uid: string): boolean {
+  if (process.env.VENUS_UNLIMITED_TEST_MODE !== "true" || !uid) return false;
+  const allowed = (process.env.VENUS_UNLIMITED_TEST_UIDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return allowed.includes(uid);
+}
 
 export type PlanDoc = {
   plan?: PlanId;
@@ -77,10 +81,7 @@ async function tx<T>(uid: string, fn: (c: Ctx) => T): Promise<T> {
     const [ps, us] = await Promise.all([t.get(planRef(uid)), t.get(usageRef(uid))]);
     const now = Date.now();
     const doc = ps.data() as PlanDoc | undefined;
-    const effective = planById(effectivePlan(doc, now));
-    const plan: PlanDef = UNLIMITED_TEST_MODE
-      ? { ...effective, tokens: null, pcSeconds: null }
-      : effective;
+    const plan = planById(effectivePlan(doc, now));
     const stored = us.data() as UsageDoc | undefined;
     const n = norm(stored, plan, now);
     const c: Ctx = { plan, n, now, patch: {}, doc, dirty: false };
@@ -114,7 +115,7 @@ function limitError(what: string, c: Ctx) {
 
 // ---------------- tokens ----------------
 export const assertTokens = (uid: string) =>
-  failOpen(
+  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : failOpen(
     tx(uid, (c) => {
       if (c.plan.tokens !== null && c.n.tokens >= c.plan.tokens) throw limitError("AI token", c);
     }),
@@ -132,7 +133,7 @@ export const addTokens = (uid: string, tokens: number) =>
 
 // ---------------- computer time ----------------
 export const assertPcAllowed = (uid: string) =>
-  failOpen(
+  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : failOpen(
     tx(uid, (c) => {
       if (c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds) throw limitError("Computer agent time", c);
     }),
@@ -142,6 +143,7 @@ export const assertPcAllowed = (uid: string) =>
 // "not used up yet" is remembered for 20 seconds, so a status poll does not hit the database every time
 const notExhaustedAt = new Map<string, number>();
 export const pcExhausted = async (uid: string): Promise<boolean> => {
+  if (isUnlimitedTestUser(uid)) return false;
   const hit = notExhaustedAt.get(uid);
   if (hit && Date.now() - hit < 20_000) return false;
   const r = await failOpen(tx(uid, (c) => c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds), false);
@@ -205,6 +207,15 @@ export const listOpenPcJobs = async (uid: string): Promise<Record<string, Open>>
 
 // ---------------- what the UI shows ----------------
 export async function billingSummary(uid: string) {
+  if (isUnlimitedTestUser(uid)) {
+    return tx(uid, (c) => ({
+      plan: c.plan.id, status: c.doc?.status ?? "none", cancelled: Boolean(c.doc?.cancelled),
+      renewsAt: c.doc?.renewsAt ?? null, windowHours: c.plan.windowHours,
+      windowEndsAt: c.n.windowStart + c.plan.windowHours * 3600_000,
+      tokens: { used: Math.round(c.n.tokens), limit: null },
+      pc: { usedSeconds: Math.round(pcUsed(c)), limitSeconds: null }, label: "Unlimited testing",
+    }));
+  }
   return tx(uid, (c) => ({
     plan: c.plan.id,
     status: c.doc?.status ?? "none",
