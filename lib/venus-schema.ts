@@ -6,6 +6,7 @@ export type SceneType = (typeof SCENE_TYPES)[number];
 
 export const FONT_NAMES = ["inter", "montserrat", "poppins", "spacegrotesk", "playfair", "oswald"];
 export const CAMERA_MOVES = ["push", "pull", "pan-left", "pan-right", "tilt-up", "tilt-down", "orbit", "handheld", "crash-zoom", "whip"];
+export const AUDIO_MOODS = ["dark", "epic", "bright", "tech", "calm", "playful"] as const;
 
 export const THEMES = [
   { id: "midnight", label: "Midnight", colors: ["#070b1f", "#5b8cff", "#a66bff"] },
@@ -32,17 +33,19 @@ export type Scene = { type: SceneType; seconds: number; [k: string]: unknown };
 export type Storyboard = {
   title: string; concept?: string; fps: number; width: number; height: number; theme: string;
   palette?: Record<string, string>; fonts?: { display?: string; body?: string };
+  audio?: { mood: string; bpm?: number };
   music?: string; sfx?: string; captions: boolean; scenes: Scene[];
 };
 
-const ALLOWED_IMPORTS = ["react", "remotion", "../kit", "../theme"];
+const ALLOWED_IMPORTS = ["react", "remotion", "../kit", "../theme", "../ui"];
+const MAX_CODE = 16000;
 
 export function checkCode(code: string): string | null {
   if (!code || code.length < 40) return "The scene code is empty.";
-  if (code.length > 12000) return "The scene code is too long (max ~140 lines).";
+  if (code.length > MAX_CODE) return "The scene code is too long (max ~220 lines).";
   if (!/export\s+default/.test(code)) return "Missing `export default` component.";
   for (const m of code.matchAll(/(?:from\s+|import\s+)["']([^"']+)["']/g)) {
-    if (!ALLOWED_IMPORTS.includes(m[1])) return `Import "${m[1]}" is not allowed (only react, remotion, ../kit, ../theme).`;
+    if (!ALLOWED_IMPORTS.includes(m[1])) return `Import "${m[1]}" is not allowed (only react, remotion, ../kit, ../theme, ../ui).`;
   }
   const bad = /(require\s*\(|import\s*\(|\beval\s*\(|new\s+Function|\bfetch\s*\(|XMLHttpRequest|WebSocket|process\.|child_process|document\.|window\.|localStorage|Math\.random)/.exec(code);
   if (bad) return `Forbidden usage: ${bad[1]}. Use random("seed") from remotion instead of Math.random.`;
@@ -50,7 +53,7 @@ export function checkCode(code: string): string | null {
 }
 
 function clean(v: unknown, depth = 0): unknown {
-  if (typeof v === "string") return v.replace(/\s+/g, " ").trim().slice(0, 400);
+  if (typeof v === "string") return v.replace(/\s+/g, " ").trim().slice(0, 1200);
   if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
   if (typeof v === "boolean") return v;
   if (depth >= 3) return undefined;
@@ -73,7 +76,7 @@ const SFX_RE = /^p\/[A-Za-z0-9_-]+\/sfx\.mp3$/;
 
 export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
   const rawObj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const code = typeof rawObj.code === "string" ? rawObj.code.slice(0, 12000) : undefined;
+  const code = typeof rawObj.code === "string" ? rawObj.code.slice(0, MAX_CODE) : undefined;
   const base = (clean({ ...rawObj, code: undefined }) as Record<string, unknown>) ?? {};
   const type = SCENE_TYPES.includes(base.type as SceneType) ? (base.type as SceneType) : "title";
   const seconds = Math.min(14, Math.max(1.5, Number(base.seconds) || 4));
@@ -86,6 +89,14 @@ export function sanitizeScene(raw: unknown, keepFiles: boolean): Scene {
   if (out.camera !== undefined) {
     const list = (Array.isArray(out.camera) ? out.camera : [out.camera]).map(String).filter((c) => CAMERA_MOVES.includes(c)).slice(0, 3);
     if (list.length) out.camera = list; else delete out.camera;
+  }
+  if (out.sounds !== undefined) {
+    const list = (Array.isArray(out.sounds) ? out.sounds : [])
+      .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : null))
+      .filter((x): x is Record<string, unknown> => Boolean(x) && Number.isFinite(Number(x!.at)) && typeof x!.kind === "string")
+      .map((x) => ({ at: Math.max(0, Math.min(14, Number(x.at))), kind: String(x.kind) }))
+      .slice(0, 8);
+    if (list.length) out.sounds = list; else delete out.sounds;
   }
   if (type === "custom") {
     out.id = String(base.id ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12) || "c" + Date.now().toString(36).slice(-5);
@@ -136,12 +147,18 @@ export function sanitizeStoryboard(
   if (FONT_NAMES.includes(String(rf.display))) fonts.display = String(rf.display);
   if (FONT_NAMES.includes(String(rf.body))) fonts.body = String(rf.body);
 
+  const ra = (r.audio && typeof r.audio === "object" ? r.audio : {}) as Record<string, unknown>;
+  const audio = (AUDIO_MOODS as readonly string[]).includes(String(ra.mood))
+    ? { mood: String(ra.mood), ...(Number(ra.bpm) >= 70 && Number(ra.bpm) <= 140 ? { bpm: Math.round(Number(ra.bpm)) } : {}) }
+    : undefined;
+
   return {
     title: String(clean(r.title) ?? "Untitled").slice(0, 80),
-    concept: typeof r.concept === "string" ? r.concept.slice(0, 300) : undefined,
+    concept: typeof r.concept === "string" ? r.concept.slice(0, 600) : undefined,
     fps: 30, width, height, theme,
     ...(Object.keys(palette).length >= 4 ? { palette } : {}),
     ...(fonts.display || fonts.body ? { fonts } : {}),
+    ...(audio ? { audio } : {}),
     ...(opts.keepFiles && typeof r.music === "string" && MUSIC_RE.test(r.music) ? { music: r.music } : {}),
     ...(opts.keepFiles && typeof r.sfx === "string" && SFX_RE.test(r.sfx) ? { sfx: r.sfx } : {}),
     captions: opts.captions ?? Boolean(r.captions),
