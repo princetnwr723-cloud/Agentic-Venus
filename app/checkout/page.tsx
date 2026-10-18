@@ -35,6 +35,8 @@ export default function CheckoutPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [url, setUrl] = useState("");
   const [err, setErr] = useState("");
+  const [timedOut, setTimedOut] = useState(false);
+  const [checking, setChecking] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { if (!loading && !user) router.replace("/"); }, [loading, user, router]);
@@ -48,17 +50,38 @@ export default function CheckoutPage() {
   if (!user || !planId) return <div className="flex h-screen items-center justify-center bg-bg text-sm text-muted">Loading…</div>;
   const plan = planById(planId);
 
+  /** Asks the server once whether the plan is active. Returns true when it is. */
+  async function check(): Promise<boolean> {
+    try {
+      const r = await fetch("/api/billing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const d = await r.json();
+      if (d.plan === planId) {
+        if (timer.current) clearInterval(timer.current);
+        setPhase("done");
+        return true;
+      }
+    } catch { /* try again later */ }
+    return false;
+  }
+
   function watch() {
     if (timer.current) clearInterval(timer.current);
+    setTimedOut(false);
     const until = Date.now() + 10 * 60_000;
     timer.current = setInterval(async () => {
-      try {
-        const r = await fetch("/api/billing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-        const d = await r.json();
-        if (d.plan === planId) { if (timer.current) clearInterval(timer.current); setPhase("done"); }
-      } catch { /* try again on the next tick */ }
-      if (Date.now() > until && timer.current) { clearInterval(timer.current); }
-    }, 3000);
+      if (await check()) return;
+      if (Date.now() > until) {
+        if (timer.current) clearInterval(timer.current);
+        setTimedOut(true);
+      }
+    }, 5000);
+  }
+
+  async function checkNow() {
+    setChecking(true);
+    const done = await check();
+    setChecking(false);
+    if (!done) setTimedOut(true);
   }
 
   async function pay() {
@@ -117,15 +140,28 @@ export default function CheckoutPage() {
               <div className="flex items-center justify-between"><span className="text-sm font-medium text-ink">Total today</span><span className="text-xl font-semibold text-ink">${plan.price}</span></div>
               <p className="mt-1 text-[11px] text-faint">Renews every month until you cancel.</p>
 
-              <button onClick={pay} disabled={phase === "opening" || phase === "waiting"} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-white py-3 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-60">
-                {phase === "opening" || phase === "waiting" ? <Loader2 size={15} className="animate-spin" /> : <Lock size={14} />}
-                {phase === "waiting" ? "Waiting for payment…" : phase === "opening" ? "Opening…" : `Pay $${plan.price} securely`}
+              <button onClick={pay} disabled={phase === "opening" || (phase === "waiting" && !timedOut)} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-white py-3 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-60">
+                {phase === "opening" || (phase === "waiting" && !timedOut) ? <Loader2 size={15} className="animate-spin" /> : <Lock size={14} />}
+                {phase === "waiting" && !timedOut ? "Waiting for payment…" : phase === "opening" ? "Opening…" : `Pay $${plan.price} securely`}
               </button>
-              {phase === "waiting" && (
+
+              {phase === "waiting" && !timedOut && (
                 <p className="mt-3 text-[11px] leading-relaxed text-muted">
                   Finish the payment in the window that opened. This page updates by itself once it is confirmed.{" "}
                   <a href={url} target="_blank" rel="noreferrer" className="text-gold underline">Window did not open? Click here.</a>
                 </p>
+              )}
+              {phase === "waiting" && (
+                <div className="mt-3 rounded-lg border border-line bg-bg p-3">
+                  <p className="text-[11px] leading-relaxed text-muted">
+                    {timedOut
+                      ? "Still not confirmed. If you already paid, it can take a few minutes. Your plan is never lost: check again, or open Settings → Plans."
+                      : "Already paid? You can check right now."}
+                  </p>
+                  <button onClick={checkNow} disabled={checking} className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-line py-2 text-xs text-ink hover:bg-panel2 disabled:opacity-60">
+                    {checking && <Loader2 size={12} className="animate-spin" />} I already paid, check again
+                  </button>
+                </div>
               )}
               {err && <p className="mt-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{err}</p>}
               <p className="mt-4 text-[11px] leading-relaxed text-faint">Payment is processed securely by Gumroad. Your card details never touch our servers. Cancel any time from the link in your Gumroad receipt email.</p>
