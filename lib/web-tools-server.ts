@@ -1,4 +1,5 @@
-// Server-only. Lets the computer agent search the web and read pages as plain text.
+// Server-only. Lets the agent search the web and read pages as plain text.
+// Search order: keyed providers first (Tavily, Brave, Serper: reliable), free HTML scrapers only as a fallback.
 import { safeFetch } from "@/lib/tools/net";
 
 const UA =
@@ -44,6 +45,32 @@ function htmlToText(html: string): string {
     .trim();
 }
 
+// ---------------- small cache + retry ----------------
+
+const cache = new Map<string, { t: number; ttl: number; v: string }>();
+function cacheGet(k: string): string | null {
+  const h = cache.get(k);
+  if (!h) return null;
+  if (Date.now() - h.t < h.ttl) return h.v;
+  cache.delete(k);
+  return null;
+}
+function cacheSet(k: string, v: string, ttl: number) {
+  if (cache.size > 250) cache.clear();
+  cache.set(k, { t: Date.now(), ttl, v });
+}
+
+const RETRYABLE = /(\b429\b|\b5\d\d\b|timeout|timed out|fetch failed|ECONN|socket|aborted)/i;
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (!RETRYABLE.test(e instanceof Error ? e.message : String(e))) throw e;
+    await new Promise((r) => setTimeout(r, 700));
+    return fn();
+  }
+}
+
 async function getText(url: string, extra: Record<string, string> = {}): Promise<string> {
   const res = await fetch(url, {
     headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", ...extra },
@@ -67,12 +94,14 @@ export async function webRead(url: string, maxChars = 4500): Promise<string> {
     throw new Error("Only public http(s) pages can be read.");
   }
 
+  const ck = `read:${u.toString()}:${maxChars}`;
+  const hit = cacheGet(ck);
+  if (hit) return hit;
+
   try {
     // safeFetch resolves the host and re-checks it on every redirect, so a page can't lead into a private network.
-    const res = await safeFetch(
-      u.toString(),
-      { headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,text/plain" } },
-      15_000
+    const res = await withRetry(() =>
+      safeFetch(u.toString(), { headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,text/plain" } }, 15_000)
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const type = res.headers.get("content-type") ?? "";
@@ -81,7 +110,9 @@ export async function webRead(url: string, maxChars = 4500): Promise<string> {
     const title = isHtml ? stripTags(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(raw)?.[1] ?? "") : "";
     const body = isHtml ? htmlToText(raw) : raw;
     if (body.trim().length > 200) {
-      return `${title ? `TITLE: ${title}\n` : ""}URL: ${u.toString()}\n\n${body.slice(0, maxChars)}`;
+      const out = `${title ? `TITLE: ${title}\n` : ""}URL: ${u.toString()}\n\n${body.slice(0, maxChars)}`;
+      cacheSet(ck, out, 5 * 60_000);
+      return out;
     }
     throw new Error("Page had almost no readable text");
   } catch (firstErr) {
@@ -89,7 +120,9 @@ export async function webRead(url: string, maxChars = 4500): Promise<string> {
     try {
       const text = await getText(`https://r.jina.ai/${u.toString()}`, { Accept: "text/plain" });
       if (text.trim().length > 100) {
-        return `URL: ${u.toString()} (read through a reader proxy)\n\n${text.slice(0, maxChars)}`;
+        const out = `URL: ${u.toString()} (read through a reader proxy)\n\n${text.slice(0, maxChars)}`;
+        cacheSet(ck, out, 5 * 60_000);
+        return out;
       }
     } catch {
       // ignore — report the original problem below
@@ -100,15 +133,25 @@ export async function webRead(url: string, maxChars = 4500): Promise<string> {
 
 // ---------------- Searching ----------------
 
-type SearchFn = (q: string) => Promise<string | null>;
+type SearchFn = (q: string, newsy: boolean) => Promise<string | null>;
 
-const searchTavily: SearchFn = async (q) => {
+const numbered = (rows: Array<{ title?: string; url?: string; text?: string }>, max = 8): string =>
+  rows
+    .filter((r) => r.url && /^https?:\/\//.test(r.url))
+    .filter((r, i, a) => a.findIndex((x) => x.url === r.url) === i)
+    .slice(0, max)
+    .map((r, i) => `${i + 1}. ${stripTags(r.title ?? "")}\n   ${r.url}\n   ${stripTags(r.text ?? "").slice(0, 300)}`)
+    .join("\n");
+
+// ----- keyed providers (reliable) -----
+
+const searchTavily: SearchFn = async (q, newsy) => {
   const key = process.env.TAVILY_API_KEY;
-  if (!key) return null; // not configured — skip silently
+  if (!key) return null; // not configured: skip silently
   const res = await fetch("https://api.tavily.com/search", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ query: q, max_results: 6, include_answer: true }),
+    body: JSON.stringify({ query: q, max_results: 7, include_answer: true, search_depth: "basic", ...(newsy ? { topic: "news" } : {}) }),
     signal: AbortSignal.timeout(20_000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -116,19 +159,55 @@ const searchTavily: SearchFn = async (q) => {
     answer?: string;
     results?: Array<{ title?: string; url?: string; content?: string }>;
   };
-  const lines = (data.results ?? []).map(
-    (r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${(r.content ?? "").slice(0, 300)}`
-  );
-  if (lines.length === 0) throw new Error("no results");
-  return `${data.answer ? `QUICK ANSWER: ${data.answer}\n\n` : ""}${lines.join("\n")}`;
+  const lines = numbered((data.results ?? []).map((r) => ({ title: r.title, url: r.url, text: r.content })));
+  if (!lines) throw new Error("no results");
+  return `${data.answer ? `QUICK ANSWER: ${data.answer}\n\n` : ""}${lines}`;
 };
 
+const searchBrave: SearchFn = async (q, newsy) => {
+  const key = process.env.BRAVE_API_KEY;
+  if (!key) return null;
+  const url = `https://api.search.brave.com/res/v1/${newsy ? "news" : "web"}/search?q=${encodeURIComponent(q)}&count=8`;
+  const res = await fetch(url, {
+    headers: { Accept: "application/json", "X-Subscription-Token": key },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = (await res.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> }; results?: Array<{ title?: string; url?: string; description?: string }> };
+  const rows = (newsy ? data.results : data.web?.results) ?? [];
+  const lines = numbered(rows.map((r) => ({ title: r.title, url: r.url, text: r.description })));
+  if (!lines) throw new Error("no results");
+  return lines;
+};
+
+const searchSerper: SearchFn = async (q, newsy) => {
+  const key = process.env.SERPER_API_KEY;
+  if (!key) return null;
+  const res = await fetch(`https://google.serper.dev/${newsy ? "news" : "search"}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-API-KEY": key },
+    body: JSON.stringify({ q, num: 8 }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = (await res.json()) as {
+    answerBox?: { answer?: string; snippet?: string };
+    organic?: Array<{ title?: string; link?: string; snippet?: string }>;
+    news?: Array<{ title?: string; link?: string; snippet?: string; source?: string }>;
+  };
+  const rows = (newsy ? data.news : data.organic) ?? [];
+  const lines = numbered(rows.map((r) => ({ title: r.title, url: r.link, text: r.snippet })));
+  if (!lines) throw new Error("no results");
+  const box = data.answerBox?.answer || data.answerBox?.snippet;
+  return `${box ? `QUICK ANSWER: ${box}\n\n` : ""}${lines}`;
+};
+
+// ----- free scrapers (fallback only) -----
+
 const searchBing: SearchFn = async (q) => {
-  const html = await getText(
-    `https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=en-US&cc=US`
-  );
+  const html = await getText(`https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=en-US&cc=US`);
   const blocks = html.split('<li class="b_algo"').slice(1, 9);
-  const lines: string[] = [];
+  const rows: Array<{ title: string; url: string; text: string }> = [];
   for (const b of blocks) {
     const link = /<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(b);
     if (!link) continue;
@@ -143,10 +222,11 @@ const searchBing: SearchFn = async (q) => {
       }
     }
     const snip = /<p[^>]*>([\s\S]*?)<\/p>/.exec(b);
-    lines.push(`${lines.length + 1}. ${stripTags(link[2])}\n   ${href}\n   ${snip ? stripTags(snip[1]) : ""}`);
+    rows.push({ title: link[2], url: href, text: snip ? snip[1] : "" });
   }
-  if (lines.length === 0) throw new Error("no results");
-  return lines.join("\n");
+  const lines = numbered(rows);
+  if (!lines) throw new Error("no results");
+  return lines;
 };
 
 function xmlTag(xml: string, name: string): string {
@@ -174,27 +254,34 @@ const searchDdg: SearchFn = async (q) => {
   const html = await getText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`);
   const links = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
   const snippets = [...html.matchAll(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)];
-  const lines: string[] = [];
+  const rows: Array<{ title: string; url: string; text: string }> = [];
   links.slice(0, 8).forEach((m, i) => {
     let href = decodeEntities(m[1]);
     const uddg = /[?&]uddg=([^&]+)/.exec(href);
     if (uddg) href = decodeURIComponent(uddg[1]);
     if (href.startsWith("//")) href = `https:${href}`;
-    lines.push(
-      `${i + 1}. ${stripTags(m[2])}\n   ${href}\n   ${snippets[i] ? stripTags(snippets[i][1]) : ""}`
-    );
+    rows.push({ title: m[2], url: href, text: snippets[i] ? snippets[i][1] : "" });
   });
-  if (lines.length === 0) throw new Error("no results");
-  return lines.join("\n");
+  const lines = numbered(rows);
+  if (!lines) throw new Error("no results");
+  return lines;
 };
 
 export async function webSearch(query: string): Promise<string> {
-  const q = query.trim();
+  const q = query.replace(/\s+/g, " ").trim().slice(0, 300);
   if (!q) throw new Error("web_search needs a query.");
 
   const newsy = /\b(news|latest|today|headline|headlines|breaking|update|updates|khabar|samachar)\b/i.test(q);
-  const sources: Array<[string, SearchFn]> = [
+  const ck = `search:${newsy ? "n" : "w"}:${q.toLowerCase()}`;
+  const hit = cacheGet(ck);
+  if (hit) return hit;
+
+  const keyed: Array<[string, SearchFn]> = [
     ["tavily", searchTavily],
+    ["brave", searchBrave],
+    ["serper", searchSerper],
+  ];
+  const free: Array<[string, SearchFn]> = [
     ...(newsy ? ([["google-news", searchNews]] as Array<[string, SearchFn]>) : []),
     ["bing", searchBing],
     ["duckduckgo", searchDdg],
@@ -202,13 +289,20 @@ export async function webSearch(query: string): Promise<string> {
   ];
 
   const errors: string[] = [];
-  for (const [name, fn] of sources) {
+  const configured = Boolean(process.env.TAVILY_API_KEY || process.env.BRAVE_API_KEY || process.env.SERPER_API_KEY);
+  for (const [name, fn] of [...keyed, ...free]) {
     try {
-      const out = await fn(q);
-      if (out) return `(results from ${name})\n${out}`;
+      const out = await withRetry(() => fn(q, newsy));
+      if (out) {
+        const text = `(results from ${name})\n${out}`;
+        cacheSet(ck, text, newsy ? 2 * 60_000 : 10 * 60_000);
+        return text;
+      }
     } catch (err) {
       errors.push(`${name}: ${err instanceof Error ? err.message : "failed"}`);
     }
   }
-  throw new Error(`All search sources failed (${errors.join("; ")}).`);
+  throw new Error(
+    `All search sources failed (${errors.join("; ")}).${configured ? "" : " Tip: set TAVILY_API_KEY (or BRAVE_API_KEY / SERPER_API_KEY) on the server for reliable search."}`
+  );
 }
