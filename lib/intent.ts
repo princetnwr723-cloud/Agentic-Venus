@@ -15,10 +15,10 @@ INTENTS
 - set_role: the user tells you WHO you are or gives your job ("you are my CEO", "from now on you are the lead developer of this project", "tum meri company ke head ho"). Put the role in one sentence in "role". If the same message ALSO asks for work (read the repo, assign a team...), put those steps in "then" and the remaining work as ONE self-contained instruction in "task".
 - assemble: the user asks you to hire / assemble / assign / set up a team. Nothing is started.
 - chat: questions, discussion, advice, writing, brainstorming, opinions, simple status, small lookups, AND every action a connected tool can do directly: sending, reading or searching email (gmail.*, email.*), messages (whatsapp/sms/telegram/slack), Google Sheets/Calendar/Drive (oauth_google), and adding / editing / deleting files in a GitHub repo (github.put_files, or repo.write_file + repo.push when the repo is cloned). This stays "chat" even for MANY recipients or files: the chat calls the tool. NEVER "pc" or "code" for these. Leave "reply" empty.
-- pc: any TASK that needs a live computer (see above). If no tool call can do it, it is pc.
-- code: the user explicitly wants SOFTWARE built or changed in a project (website, app, script, bug fix, new feature). NEVER for research, leads, reading, writing, plans, company/role setup, sending email, or adding a file to a repo.
-- video: a motion-graphics video or reel.
-- team: ONE clear goal that needs 2+ different areas of work.
+- pc: ONE job that needs a live computer (see above). If no tool call can do it, it is pc.
+- code: ONE job that is software to build or change (website, app, script, bug fix, new feature). NEVER for research, leads, reading, writing, plans, company/role setup, sending email, or adding a file to a repo.
+- video: ONE motion-graphics video or reel.
+- team: the request has 2 or more steps (listed 1,2,3 or sequenced with "then / phir / uske baad") or needs 2+ different areas of work (for example website + video + leads). The agent splits it into steps by itself, brings the right specialists in automatically, and runs independent steps in parallel and dependent steps one after the other. The user NEVER has to say "team" or "assemble".
 - remember / forget: the user states a lasting fact or preference / asks to forget something.
 - clarify: the user wants work done but an essential detail is missing. "reply" = ONE short question.
 
@@ -28,6 +28,7 @@ FIELDS
 
 RULES
 - Between chat and pc for a TASK (not a question): choose chat if a connected tool in the list can do it, otherwise pc. Between code and pc: code ONLY if software must be written.
+- One single job = pc / code / video. Two or more steps or areas = team.
 - Introductions, role statements and "what would you do" are never work orders by themselves.
 - "task" must be self-contained (resolve "do it", "haan kar do" from the recent messages).
 - "reply" is short (max 2 lines) for non-chat intents, in clear English. Never claim the work is done.`;
@@ -44,6 +45,32 @@ const TEAM_ASSIGN = /\bteam\b[\s\S]{0,30}\b(assign|assemble|bana\w*|set up|hire|
 const MAILY = /\b(e-?mails?|mails?)\b/i;
 const MAIL_ACT = /\b(send|bhej\w*|write|draft|reply|follow\s?-?up|forward)\b/i;
 const FINDY = /\b(find|collect|gather|scrape|extract|research|generate|compile|list|dhund\w*|dhoond\w*|nikal\w*)\b/i;
+
+// ---------- multi-step detection: the agent decides by itself when a team is needed ----------
+const D_CODE = /\b(website|web ?site|landing|app|script|api|bot|extension|game|dashboard|component|bug|code|frontend|backend)\b/i;
+const D_VIDEO = /\b(video|reel|reels|shorts?|animation|motion graphics?)\b/i;
+const D_PC = /\b(leads?|prospects?|scrape|scraping|crawl|research|download|login|log in|linkedin|google maps|competitors?|audit)\b/i;
+const D_ACTION = /\b(build|create|make|find|collect|gather|scrape|research|write|banao|bana|dhund\w*|nikal\w*|karo|kar do|kardo|generate|design|download|fix|develop|prepare|compile|audit)\b/i;
+const D_QUESTION = /^\s*(what|kya|how|why|explain|kaise|kyu|kyun|which|kaun)\b/i;
+const SEQ = /\b(?:and then|after that|uske baad|uske bad|phir|fir|then)\b/gi;
+
+export function stepCount(t: string): number {
+  const listed = t.split("\n").filter((l) => /^\s*(?:\d{1,2}\s*[.)]|[-*•]|step\s*\d+)/i.test(l)).length;
+  const seq = (t.match(SEQ) ?? []).length + 1;
+  return Math.max(listed, seq);
+}
+
+/** True when the request has several steps / areas of work, so the agent plans them itself and brings in the right specialists. */
+export function needsTeam(t: string, _tools: string[] = []): boolean {
+  const text = String(t ?? "").trim();
+  if (!text || text.startsWith("/") || text.length > 4000) return false;
+  if (repoFileIntent(text)) return false;
+  if (D_QUESTION.test(text) && /\?\s*$/.test(text)) return false;
+  if (!D_ACTION.test(text)) return false;
+  const heavy = [D_CODE, D_VIDEO, D_PC].filter((r) => r.test(text)).length;
+  if (heavy >= 2) return true;
+  return heavy >= 1 && stepCount(text) >= 2;
+}
 
 /**
  * Work that MUST go to the computer. Sending email / messages with a connected tool and adding files to a repo are NOT such work:
@@ -62,7 +89,7 @@ export function forcePc(t: string, tools: string[] = []): boolean {
 }
 
 // Used ONLY when the model call fails or answers nothing usable.
-function heuristic(text: string): Understanding | null {
+function heuristic(text: string, hasComputer: boolean): Understanding | null {
   const base = { task: text, reply: "", role: "", why: "keyword fallback (the model step failed)", facts: [] as string[], then: [] as Then[] };
   if (repoFileIntent(text)) return null; // plain chat with tools
   if (SET_ROLE.test(text) && !CODE_RE.test(text)) {
@@ -71,6 +98,7 @@ function heuristic(text: string): Understanding | null {
     if (TEAM_ASSIGN.test(text)) then.push("assemble");
     return { ...base, intent: "set_role", role: text.slice(0, 300), then };
   }
+  if (hasComputer && needsTeam(text)) return { ...base, intent: "team" };
   if (CODE_RE.test(text)) return { ...base, intent: "code" };
   if (forcePc(text)) return { ...base, intent: "pc" };
   return null;
@@ -81,7 +109,7 @@ export async function understand(
   a: { text: string; recent: Array<{ role: "user" | "assistant"; content: string }>; role: string; tools: string[]; hasComputer: boolean }
 ): Promise<Understanding> {
   const forced = forcePc(a.text, a.tools);
-  const fallback: Understanding = heuristic(a.text) ?? { intent: "chat", task: "", reply: "", role: "", why: "fallback", facts: [], then: [] };
+  const fallback: Understanding = heuristic(a.text, a.hasComputer) ?? { intent: "chat", task: "", reply: "", role: "", why: "fallback", facts: [], then: [] };
   try {
     const ctx = a.recent.slice(-6).map((m) => `${m.role === "user" ? "USER" : "YOU"}: ${m.content.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
     const raw = await llm(
@@ -105,6 +133,14 @@ ${a.text.slice(0, 1500)}`
       facts: (Array.isArray(p.facts) ? p.facts : []).map((x) => String(x).trim()).filter((x) => x.length >= 6 && x.length <= 300).slice(0, 3),
       then: (Array.isArray(p.then) ? p.then : []).map(String).filter((x): x is Then => ["pc", "assemble", "team", "code"].includes(x)).slice(0, 3),
     };
+
+    // Several steps / several areas of work: the agent plans the steps and brings in the specialists by itself.
+    if (a.hasComputer && ["chat", "pc", "code", "video"].includes(intent) && needsTeam(a.text, a.tools)) {
+      u.intent = intent = "team";
+      u.task = u.task || a.text;
+      u.why = "multi-step task: split into steps, specialists join automatically, independent steps run in parallel";
+    }
+
     // A work order must never be answered as plain chat (that is how fake "verified leads" appeared).
     if (forced && (intent === "chat" || intent === "clarify")) { u.intent = intent = "pc"; u.why = "work order: forced to the computer"; }
     // ...and a job a connected tool does in a call must never open the computer or Venus Code.
