@@ -76,6 +76,12 @@ type AgentInfo = { id: string; name: string; role: string; last: string; code: b
 
 const normName = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, "");
 
+/** What the model sees for a message: a user message that replies to an earlier agent reply carries that reply with it. */
+const histText = (m: ChatMessage) => {
+  const body = splitSuggestions(m.content).body;
+  return m.role === "user" && m.replyTo ? `[In reply to this earlier message of yours: "${m.replyTo.preview}"]\n${body}` : body;
+};
+
 type Work = { label: string; startedAt: number; steps: string[]; owner: string };
 
 export default function DashboardPage() {
@@ -109,6 +115,8 @@ export default function DashboardPage() {
   const [work, setWork] = useState<Record<string, Work>>({});
   const [, setBrainTick] = useState(0);
   const [approval, setApproval] = useState<{ summary: string; warn: string; resolve: (ok: boolean) => void } | null>(null);
+  // the agent reply the owner clicked the reply icon on (the next message is about THAT reply)
+  const [replyTo, setReplyTo] = useState<{ at: number; preview: string } | null>(null);
 
   const sessionsRef = useRef<Record<string, PcSession>>({});
   const sandboxRef = useRef<Record<string, string | null>>({});
@@ -154,7 +162,7 @@ export default function DashboardPage() {
     });
 
   useEffect(() => { chatsRef.current = chats; for (const c of chats) if (!(c.id in sandboxRef.current)) sandboxRef.current[c.id] = c.pcSandboxId ?? null; }, [chats]);
-  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => { activeIdRef.current = activeId; setReplyTo(null); }, [activeId]);
 
   // Messages posted by the server (agent updates, mission reports, call summaries) appear live and are never overwritten.
   useEffect(() => {
@@ -186,11 +194,19 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!user) return;
-    Promise.all([listChats(user.uid), listCustomAgents(user.uid)]).then(([loadedChats, loadedAgents]) => {
-      setChats(loadedChats); setCustomAgents(loadedAgents); setChatsLoaded(true);
-      if (loadedChats.length > 0) setActiveId(loadedChats[0].id);
-      for (const c of loadedChats) if (c.pcSandboxId && c.pcPaused) patchSession(c.id, { status: "paused" });
-    });
+    const timeout = new Promise<never>((_, rej) =>
+      setTimeout(() => rej(new Error("Firestore did not answer in 12s (database missing, rules, or wrong env vars).")), 12000)
+    );
+    Promise.race([Promise.all([listChats(user.uid), listCustomAgents(user.uid)]), timeout])
+      .then(([loadedChats, loadedAgents]) => {
+        setChats(loadedChats); setCustomAgents(loadedAgents); setChatsLoaded(true);
+        if (loadedChats.length > 0) setActiveId(loadedChats[0].id);
+        for (const c of loadedChats) if (c.pcSandboxId && c.pcPaused) patchSession(c.id, { status: "paused" });
+      })
+      .catch((err) => {
+        setChatsLoaded(true);
+        setPcMessage(`⚠️ Could not load chats: ${err?.code ?? ""} ${err?.message ?? err}`);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
@@ -1211,6 +1227,7 @@ export default function DashboardPage() {
   async function submitText(text: string) {
     if (!text || !user || !activeChat || sending) return;
     const chat = activeChat;
+    const reply = replyTo; // the agent reply this message is about (null when the owner did not use the reply icon)
     const video = /^\/video\s+([\s\S]+)/i.exec(text);
     const code = /^\/code\s+([\s\S]+)/i.exec(text);
     const team = /^\/team\s+([\s\S]+)/i.exec(text);
@@ -1225,8 +1242,13 @@ export default function DashboardPage() {
     if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !key) { setSettingsOpen(true); return; }
 
     const payload = attach && !slash ? `${text}\n\n📎 File: ${attach.name}\n\`\`\`\n${attach.text}\n\`\`\`` : text;
-    appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now() }]);
-    setDraft(""); setAttach(null);
+    appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now(), ...(reply ? { replyTo: reply } : {}) }]);
+    setDraft(""); setAttach(null); setReplyTo(null);
+
+    // the reply the owner pointed at travels with the task into chat, computer, Venus Code, Venus Pro and the team
+    const replyCtx = reply
+      ? `\n\nREPLY CONTEXT: the owner is replying to THIS exact earlier message of yours (they clicked its reply icon). Words like "this", "it", "that" and "the above" refer to it. Answer about it and act on it:\n"""\n${reply.preview}\n"""`
+      : "";
 
     // @agent mentions: read the work of those agents first; "Agent cooperation" tells the agent about its colleagues
     const targets = resolveMentions(chat, text);
@@ -1241,7 +1263,7 @@ export default function DashboardPage() {
         if (coop) coopText = await coopPrompt(chat);
       } finally { workEnd(chat.id, "collab"); setSending(false); }
     }
-    const extra = collab + coopText;
+    const extra = collab + coopText + replyCtx;
 
     // explicit commands: the user chose them, no guessing
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
@@ -1255,18 +1277,18 @@ export default function DashboardPage() {
 
     if (analysis.pureCommand) {
       setSending(true);
-      let reply: string;
+      let replyText: string;
       try {
         if (analysis.pureCommand === "start") {
           const id = await startOrResumePc(chat.id);
-          reply = id ? "✅ Computer is on — its screen is in the panel." : `⚠️ The computer could not be turned on: ${sessionsRef.current[chat.id]?.error ?? "unknown error"}`;
+          replyText = id ? "✅ Computer is on — its screen is in the panel." : `⚠️ The computer could not be turned on: ${sessionsRef.current[chat.id]?.error ?? "unknown error"}`;
         } else {
           const r = await pausePc(chat.id);
-          reply = r.ok ? (sandboxRef.current[chat.id] ? "✅ Computer turned off. Files, apps and logins are saved — turn it on again and it continues where it stopped." : "✅ This chat's computer is already off or expired.") : `⚠️ ${r.error ?? "Could not turn the computer off."}`;
+          replyText = r.ok ? (sandboxRef.current[chat.id] ? "✅ Computer turned off. Files, apps and logins are saved — turn it on again and it continues where it stopped." : "✅ This chat's computer is already off or expired.") : `⚠️ ${r.error ?? "Could not turn the computer off."}`;
         }
-      } catch (err) { reply = `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`; }
+      } catch (err) { replyText = `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`; }
       finally { setSending(false); }
-      say(chat.id, reply);
+      say(chat.id, replyText);
       return;
     }
 
@@ -1293,7 +1315,7 @@ export default function DashboardPage() {
     workStart(chat.id, "Tools aur memory dekh raha hoon…", "chat");
     try {
       if (!brains.current[chat.id]) await loadChatBrain(chat.id);
-      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: splitSuggestions(m.content).body }));
+      const history = (chatsRef.current.find((c) => c.id === chat.id)?.messages ?? []).map((m) => ({ role: m.role, content: histText(m) }));
       const specs = await loadTools(chat);
       const planNote = await openPlanNote(chat);
 
@@ -1306,13 +1328,16 @@ export default function DashboardPage() {
       } else {
         // 1) UNDERSTAND FIRST (with the chat's own model, so it cannot fail because of a helper model)
         workSet(chat.id, "Samajh raha hoon aap kya chahte ho…", "chat");
+        const recent = history.slice(0, -1);
         const u = await understand((s, p) => callLLM(chat, s, p, [], "act"), {
-          text, recent: history.slice(0, -1), role: roleOf(chat.id), tools: specs.map((s) => s.name), hasComputer: Boolean(e2bKey),
+          text,
+          recent: reply ? [...recent, { role: "assistant" as const, content: `(The owner is replying to THIS exact message of yours: "${reply.preview}")` }] : recent,
+          role: roleOf(chat.id), tools: specs.map((s) => s.name), hasComputer: Boolean(e2bKey),
         });
         traceOf(chat.id)?.add("intent", `${u.intent}: ${u.why}`);
         workSet(chat.id, `Samajh gaya: ${INTENT_LABEL[u.intent] ?? u.intent}${u.why.startsWith("keyword") ? " (keyword se)" : ""}`, "chat");
         if (u.intent !== "chat") {
-          // the mentioned agents' work travels with the task into the computer / Venus Code / Venus Pro / team
+          // the mentioned agents' work and the reply the owner pointed at travel with the task
           if (extra && ["pc", "code", "video", "team"].includes(u.intent)) u.task = (u.task || text) + extra;
           await routeIntent(chat, u, text);
           return;
@@ -1329,7 +1354,7 @@ export default function DashboardPage() {
 
       workSet(chat.id, "Jawab likh raha hoon…", "chat");
       setStreaming(true);
-      let reply = await streamLLM(chat, system, userPrompt, history, (t) => {
+      let replyOut = await streamLLM(chat, system, userPrompt, history, (t) => {
         patchChat(chat.id, { messages: [...base, { role: "assistant", content: t.replace(/\[\[[\s\S]*$/, "").trim() || "…", at }] });
       });
 
@@ -1345,7 +1370,7 @@ export default function DashboardPage() {
         return [{ role: "user", content: "(earlier steps were trimmed: rely on the plan and on the results below)" }, ...list.slice(s)];
       };
       for (let round = 0; round < 40; round++) {
-        const tc = extractToolCalls(reply);
+        const tc = extractToolCalls(replyOut);
         if (!tc.calls.length) {
           // the agent wants to stop: if its checklist still has open steps, send it back to work
           if (!planActive || gates >= 6) break;
@@ -1354,8 +1379,8 @@ export default function DashboardPage() {
           gates++;
           workSet(chat.id, "Bacha hua kaam poora kar raha hoon…", "chat");
           const nudge = `NOT FINISHED. Your plan still has open steps:\n${st.text}\n\nDo the next open step NOW with the right tool, then call plan.done with proof from the tool result. If a step fails, try another route first; only if truly impossible mark it done with note "skipped: reason". If the owner changed the subject, call plan.clear. Do not give the final answer until every step is done or explicitly skipped.`;
-          const before = reply;
-          reply = await callLLM(chat, system, nudge, [...convo, { role: "assistant", content: before }]);
+          const before = replyOut;
+          replyOut = await callLLM(chat, system, nudge, [...convo, { role: "assistant", content: before }]);
           convo = compact([...convo, { role: "assistant", content: before }, { role: "user", content: nudge }]);
           continue;
         }
@@ -1370,16 +1395,16 @@ export default function DashboardPage() {
         }
         workSet(chat.id, "Tool ke result se agla step dekh raha hoon…", "chat");
         const resultsMsg = `TOOL RESULTS:\n${results.join("\n\n")}\n\nCheck: is the owner's WHOLE request done and confirmed by these results? If not, or if a tool failed or returned nothing useful, do NOT stop: fix the arguments and retry, or use a different tool or route, and continue now. If you have a plan, call plan.done for the steps these results confirm. Answer only when everything is done and proven, or when you are truly blocked (then say exactly what is blocked, what you tried, and what you need from the owner).`;
-        const prev = reply;
-        reply = await callLLM(chat, system, resultsMsg, [...convo, { role: "assistant", content: prev }]);
+        const prev = replyOut;
+        replyOut = await callLLM(chat, system, resultsMsg, [...convo, { role: "assistant", content: prev }]);
         convo = compact([...convo, { role: "assistant", content: prev }, { role: "user", content: resultsMsg }]);
       }
       if (planActive) {
         const st = await execTool(chat, "plan.status", {}, tainted);
-        if (/PLAN OPEN:\s*\d+/.test(st.text)) reply = `${extractToolCalls(reply).clean}\n\n⏸️ Kuch steps abhi bache hain. "continue" bolo, main wahin se aage badhunga.`;
+        if (/PLAN OPEN:\s*\d+/.test(st.text)) replyOut = `${extractToolCalls(replyOut).clean}\n\n⏸️ Kuch steps abhi bache hain. "continue" bolo, main wahin se aage badhunga.`;
       }
 
-      const parsed = extractCommands(extractToolCalls(reply).clean);
+      const parsed = extractCommands(extractToolCalls(replyOut).clean);
       cmds = parsed.cmds.filter((c) => c.cmd === "memory" || c.cmd === "skill" || c.cmd === "deploy"); // chat can never start heavy work by itself
       const body = parsed.clean || (cmds.length ? "Done." : "…");
       if (splitSuggestions(body).next.length) say(chat.id, body);
@@ -1412,10 +1437,10 @@ export default function DashboardPage() {
     if (!apiKeys[activeChat.provider]) { setSettingsOpen(true); return; }
     setRunningRoutineId(routine.id);
     try {
-      const reply = await callLLM(activeChat, "", routine.instructions);
-      appendMessages(activeChat.id, [{ role: "user", content: `🔁 Routine: ${routine.name}`, at: Date.now() }, { role: "assistant", content: reply, at: Date.now() }]);
-      await recordManualRun(user.uid, routine.id, reply);
-      setRoutines((prev) => prev.map((r) => (r.id === routine.id ? { ...r, lastRunAt: Date.now(), lastResult: reply.slice(0, 200) } : r)));
+      const replyText = await callLLM(activeChat, "", routine.instructions);
+      appendMessages(activeChat.id, [{ role: "user", content: `🔁 Routine: ${routine.name}`, at: Date.now() }, { role: "assistant", content: replyText, at: Date.now() }]);
+      await recordManualRun(user.uid, routine.id, replyText);
+      setRoutines((prev) => prev.map((r) => (r.id === routine.id ? { ...r, lastRunAt: Date.now(), lastResult: replyText.slice(0, 200) } : r)));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Routine run failed.";
       await recordManualRun(user.uid, routine.id, `⚠️ ${message}`);
@@ -1471,6 +1496,9 @@ export default function DashboardPage() {
                     busy={sending || Boolean(activeWork)}
                     onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }}
                     onSuggest={(t) => void submitText(t)}
+                    onReply={(preview, at) => setReplyTo({ at, preview })}
+                    onRetry={(t) => void submitText(t)}
+                    replyingAt={replyTo?.at ?? null}
                   />
                 </div>
               </div>
@@ -1482,6 +1510,7 @@ export default function DashboardPage() {
                 hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
                 attach={attach} onPickFile={(f) => void handleAttach(f)} onClearAttach={() => setAttach(null)}
                 mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
+                replyTo={replyTo} onClearReply={() => setReplyTo(null)}
               />
             </>
           )}
