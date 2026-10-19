@@ -4,8 +4,14 @@ import { readBody, requestStatus } from "@/lib/request";
 import { createSignedUpload } from "@/lib/supabase-server";
 import { DIR, jobStatus, prepareProject, safeId, setupStudio, startJob, studioState, writeBinary, writeFiles } from "@/lib/venus-server";
 import { AUDIO_MOODS, sanitizeStoryboard, sceneLayout, totalFramesOf, type Storyboard } from "@/lib/venus-schema";
-import { MAIN_SOURCE, SYNTH_SOURCE, UI_SOURCE } from "@/lib/venus-kit";
+import { MAIN_SOURCE, UI_SOURCE } from "@/lib/venus-kit";
+import { SYNTH_V2_SOURCE } from "@/lib/venus-audio";
+import { audioCodePrompt, checkAudioCode, extractAudioCode, timelineOf } from "@/lib/venus-audio-prompts";
 import { getAdminDb } from "@/lib/firebase-admin";
+import { callProvider } from "@/lib/ai-providers-server";
+import { resolveValue } from "@/lib/vault";
+import { addTokens, estTokens } from "@/lib/billing-server";
+import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -62,7 +68,7 @@ async function downloadWebImage(url: string): Promise<{ bytes: Buffer; ext: stri
   } catch { return null; }
 }
 
-// ---------- sound design: scene metadata -> a timed list of cues (the audio itself is synthesized by code) ----------
+// ---------- sound design: preset cue list (used as the fallback of the agent's own audio code) ----------
 const CUE_KINDS = new Set(["typing", "soft-click", "click", "whoosh", "impact", "chime", "riser", "pop", "tick", "swell", "none"]);
 type Cue = { at: number; kind: string; g?: number; dur?: number };
 
@@ -100,6 +106,41 @@ function buildCues(sb: Storyboard): Cue[] {
   return cues.filter((c) => Number.isFinite(c.at) && c.at >= 0).slice(0, 150);
 }
 
+// ---------- the agent writes the music and the sound design as code ----------
+const userDoc = (uid: string) => getAdminDb().collection("users").doc(uid);
+// the audio code lives in its OWN document: saving the project from the browser can never wipe it
+const audioDoc = (uid: string, pid: string) => userDoc(uid).collection("venusAudio").doc(pid);
+
+async function readProject(uid: string, pid: string): Promise<any | null> {
+  try { return (await userDoc(uid).collection("venusProjects").doc(pid).get()).data() ?? null; } catch { return null; }
+}
+async function readAudioCode(uid: string, pid: string): Promise<{ music?: string; sfx?: string }> {
+  try {
+    const d = ((await audioDoc(uid, pid).get()).data() ?? {}) as { music?: string; sfx?: string };
+    return { music: d.music && !checkAudioCode(d.music) ? d.music : undefined, sfx: d.sfx && !checkAudioCode(d.sfx) ? d.sfx : undefined };
+  } catch { return {}; }
+}
+
+async function composeCode(uid: string, project: any, part: "music" | "sfx", info: Parameters<typeof audioCodePrompt>[1]): Promise<string | null> {
+  try {
+    const provider = project?.provider as ProviderId;
+    const model = String(project?.model || "");
+    if (!provider || !model) return null;
+    const udata = (await userDoc(uid).get()).data() as { apiKeys?: Record<string, string> } | undefined;
+    const ph = udata?.apiKeys?.[provider];
+    if (!ph) return null;
+    const apiKey = await resolveValue(uid, ph);
+    const prompt = audioCodePrompt(part, info);
+    const reply = await Promise.race([
+      callProvider({ provider, apiKey, model, maxTokens: 5000, messages: [{ role: "user", content: prompt }] }),
+      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("slow")), 34_000)),
+    ]);
+    addTokens(uid, estTokens(prompt.length + reply.length)).catch(() => {});
+    const code = extractAudioCode(reply);
+    return checkAudioCode(code) ? null : code;
+  } catch { return null; }
+}
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req);
@@ -125,26 +166,32 @@ export async function POST(req: Request) {
         return NextResponse.json(await studioState(sb));
 
       case "prepare": {
+        const uid = String(body.uid);
         const pid = safeId(body.projectId);
         let storyboard = sanitizeStoryboard(body.storyboard, { keepFiles: true });
 
-        // The Venus Pro UI kit, the Main composition and the audio engine are (re)written on every prepare,
+        // The UI kit, the Main composition and the audio engine are (re)written on every prepare,
         // so old studio computers get them without any reinstall.
         await writeFiles(sb, {
           [`${DIR}/src/ui.tsx`]: UI_SOURCE,
           [`${DIR}/src/Main.tsx`]: MAIN_SOURCE,
-          [`${DIR}/synth.cjs`]: SYNTH_SOURCE,
+          [`${DIR}/synth.cjs`]: SYNTH_V2_SOURCE,
         });
 
-        // Sound effects are synthesized by code from the scene cues. Optional: a failure never blocks the render.
+        // Sound effects: the agent's own sound-design code when it exists, otherwise the preset cue list.
+        // Optional: a failure never blocks the render.
         try {
           const cues = buildCues(storyboard);
-          if (cues.length) {
-            const total = totalFramesOf(storyboard) / 30 + 1;
-            await writeFiles(sb, { [`${DIR}/work/${pid}/sfx.json`]: JSON.stringify({ total, cues }) });
+          const total = totalFramesOf(storyboard) / 30 + 1;
+          const code = (await readAudioCode(uid, pid)).sfx;
+          if (code || cues.length) {
+            const job = code
+              ? { kind: "sfx", code, seconds: total - 1, scenes: timelineOf(storyboard), seed: 5, fallback: { total, cues } }
+              : { total, cues };
+            await writeFiles(sb, { [`${DIR}/work/${pid}/sfx.json`]: JSON.stringify(job) });
             const r = await exec(
               sb,
-              `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs sfx work/${pid}/sfx.json public/p/${pid}/sfx.wav && ffmpeg -y -loglevel error -i public/p/${pid}/sfx.wav -codec:a libmp3lame -b:a 160k public/p/${pid}/sfx.mp3 && rm -f public/p/${pid}/sfx.wav`,
+              `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs ${code ? "code" : "sfx"} work/${pid}/sfx.json public/p/${pid}/sfx.wav && ffmpeg -y -loglevel error -i public/p/${pid}/sfx.wav -codec:a libmp3lame -b:a 160k public/p/${pid}/sfx.mp3 && rm -f public/p/${pid}/sfx.wav`,
               50_000
             );
             if (r.exitCode === 0) storyboard = { ...storyboard, sfx: `p/${pid}/sfx.mp3` };
@@ -260,34 +307,44 @@ export async function POST(req: Request) {
         return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0 });
       }
 
-      // Background music composed by code (pads, bass, arpeggio, drums that build up, an ending).
-      // The mood and tempo come from the director's "audio" field of this project.
+      // Music: the AGENT writes the music as code (and the sound-design code in parallel, used at the next prepare).
+      // If the model is slow or the code fails, the built-in composer is the fallback. Every call writes a NEW composition.
       case "music": {
+        const uid = String(body.uid);
         const pid = safeId(body.projectId);
         const secs = Math.min(75, Math.max(8, Math.ceil(Number(body.seconds) || 30)));
+        const project = await readProject(uid, pid);
+        let sbNow: Storyboard | null = null;
+        try { sbNow = project?.storyboardJson ? sanitizeStoryboard(JSON.parse(project.storyboardJson), { keepFiles: true }) : null; } catch { /* no storyboard yet */ }
+
         let mood = AUDIO_MOODS.includes(body.mood) ? String(body.mood) : body.dark ? "dark" : "bright";
         let bpm = Number(body.bpm) || 0;
-        if (!body.mood) {
-          try {
-            const snap = await getAdminDb().collection("users").doc(String(body.uid)).collection("venusProjects").doc(pid).get();
-            const raw = (snap.data() as { storyboardJson?: string } | undefined)?.storyboardJson;
-            const a = raw ? JSON.parse(raw)?.audio : null;
-            if (a && (AUDIO_MOODS as readonly string[]).includes(String(a.mood))) mood = String(a.mood);
-            if (a && Number(a.bpm) >= 70 && Number(a.bpm) <= 140) bpm = Number(a.bpm);
-          } catch { /* the dark/bright fallback is used */ }
-        }
+        const a = sbNow?.audio;
+        if (!body.mood && a && (AUDIO_MOODS as readonly string[]).includes(a.mood)) { mood = a.mood; if (Number(a.bpm) >= 70 && Number(a.bpm) <= 140) bpm = Number(a.bpm); }
+
+        const scenes = sbNow ? timelineOf(sbNow) : [];
+        const info = { brief: String(project?.brief ?? sbNow?.title ?? ""), concept: sbNow?.concept, mood, bpm, seconds: secs, scenes };
+        const [mc, sc] = await Promise.all([composeCode(uid, project, "music", info), composeCode(uid, project, "sfx", { ...info, seconds: Math.round(secs) })]);
+        const old = await readAudioCode(uid, pid);
+        if (mc || sc) await audioDoc(uid, pid).set({ ...(mc ? { music: mc } : {}), ...(sc ? { sfx: sc } : {}), at: Date.now() }, { merge: true }).catch(() => {});
+        const code = mc ?? old.music ?? null;
+
         const rel = `p/${pid}/music.mp3`;
+        const seed = pid.length * 31 + secs + (Date.now() % 997);
+        const preset = { seconds: secs, mood, ...(bpm ? { bpm } : {}), seed };
+        const job = code ? { kind: "music", code, seconds: secs, mood, bpm, scenes, seed, fallback: preset } : preset;
         await writeFiles(sb, {
-          [`${DIR}/synth.cjs`]: SYNTH_SOURCE,
-          [`${DIR}/work/${pid}/music.json`]: JSON.stringify({ seconds: secs, mood, ...(bpm ? { bpm } : {}), seed: pid.length * 31 + secs }),
+          [`${DIR}/synth.cjs`]: SYNTH_V2_SOURCE,
+          [`${DIR}/work/${pid}/music.json`]: JSON.stringify(job),
         });
         const r = await exec(
           sb,
-          `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs music work/${pid}/music.json public/p/${pid}/music.wav && ffmpeg -y -loglevel error -i public/p/${pid}/music.wav -codec:a libmp3lame -b:a 160k public/${rel} && rm -f public/p/${pid}/music.wav`,
+          `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs ${code ? "code" : "music"} work/${pid}/music.json public/p/${pid}/music.wav && ffmpeg -y -loglevel error -i public/p/${pid}/music.wav -codec:a libmp3lame -b:a 160k public/${rel} && rm -f public/p/${pid}/music.wav`,
           55_000
         );
         if (r.exitCode !== 0) return fail("Music generation failed: " + (r.stderr || r.stdout).slice(0, 200));
-        return NextResponse.json({ file: rel, mood });
+        const fell = /AUDIO_FALLBACK/.test(r.stdout);
+        return NextResponse.json({ file: rel, mood, source: code && !fell ? "agent-code" : "preset", note: fell ? r.stdout.split("\n").find((l) => l.startsWith("AUDIO_FALLBACK")) : undefined });
       }
 
       case "render": {
