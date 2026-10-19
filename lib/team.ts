@@ -1,5 +1,8 @@
 import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
+import { acquire, releaseNow } from "@/lib/computers";
+import { ensureNode, followPcJob, proofUrl, startPcJob, type PcPending } from "@/lib/pc-agent";
+import { providerMeta, PROVIDERS, type ProviderId } from "@/lib/providers";
 import { CATALOG, byId, personaOf, type Member } from "@/lib/team-catalog";
 
 export type TMsg = { role: "user" | "assistant"; content: string; at: number };
@@ -74,43 +77,45 @@ export async function assembleTeam(a: { uid: string; chatId: string; brief: stri
 
 export type Step = { member: string; task: string; after: number[] };
 
+// A step needs the live browser only when the work itself is about real websites, lists, downloads or logins.
+const LIVE = /\b(website|web ?site|webpage|url|directory|directories|linkedin|google maps|listing|listings|scrape|scraping|crawl|download|upload|login|log in|sign ?in|sign ?up|form|forms|booking|csv|spreadsheet|verify|verified|contact details|email addresses|phone numbers?|leads?|prospects?)\b/i;
+// "find / collect / verify N leads|companies|contacts": always real browsing, even if the planner gave it to a writer.
+const LIST_JOB = /\b(find|collect|gather|scrape|extract|verify|enrich|compile|dhund\w*|nikal\w*)\b[\s\S]{0,60}\b(leads?|prospects?|contacts?|companies|clinics?|businesses|emails?|profiles?|listings?)\b/i;
+const WRITING = /\b(write|draft|compose|rewrite|edit|proofread|summari[sz]e|translate|subject line|copy)\b/i;
+
+function pcMemberFor(task: string, planned: string[]): string {
+  const t = task.toLowerCase();
+  const pick = /\b(login|log in|sign in|form|booking|book|upload|fill)\b/.test(t) ? "errand"
+    : /\b(scrape|crawl|table|dataset|csv)\b/.test(t) ? "scrape"
+    : /\b(verify|enrich|details|company size|public contact)\b/.test(t) ? "intel"
+    : "hunter";
+  return planned.includes(pick) ? pick : planned[0] ?? pick;
+}
+
 /**
- * Keep team routing deterministic for high-impact workflows. The LLM is still
- * responsible for the plan and wording, but it must not accidentally send a
- * computer job through the lightweight research runner. This also keeps the
- * existing PC/code/video workspaces from being raced by multiple steps.
+ * Routing by NEED, not by blanket rule. Research steps that really need live websites go to a computer member;
+ * writing / analysis / email-draft / coding / video steps stay with the member the planner chose.
  */
-function enforceToolRouting(goal: string, steps: Step[]): Step[] {
-  const g = goal.toLowerCase();
-  const needsPc =
-    /\b(lead|leads|prospect|prospects|clinic|clinics|dentist|dentists|contact|contacts|crm|spreadsheet|scrape|scraping|download|downloads|browser|website|web site|login|log in|form|forms|booking|book|upload|uploading|file|files|desktop|computer|terminal)\b/.test(g) &&
-    /\b(find|search|research|collect|gather|verify|verified|validate|cross[- ]?check|enrich|scrape|download|upload|open|login|log in|book|fill|create|update|clean|dedupe|duplicate|contact|contacts|send|reply|read)\b/.test(g);
-
-  if (!needsPc || !steps.length) return steps;
-
-  const pcIds = steps.filter((s) => byId(s.member)?.tool === "pc").map((s) => s.member);
-  const preferred = pcIds[0] ?? "hunter";
-  const secondary = pcIds[1] ?? "intel";
-  let pcCount = 0;
-
+function enforceToolRouting(steps: Step[]): Step[] {
+  if (!steps.length) return steps;
+  const planned = steps.filter((s) => byId(s.member)?.tool === "pc").map((s) => s.member);
   return steps.map((s) => {
     const tool = byId(s.member)?.tool;
-    if (tool === "research" || tool === "think") {
-      const member = pcCount++ === 0 ? preferred : secondary;
-      return { ...s, member };
-    }
+    if (tool === "research" && LIVE.test(s.task)) return { ...s, member: pcMemberFor(s.task, planned) };
+    if (tool === "think" && LIST_JOB.test(s.task) && !WRITING.test(s.task.slice(0, 80))) return { ...s, member: pcMemberFor(s.task, planned) };
     return s;
   });
 }
+
 export async function planTeam(llm: LlmFn, goal: string, ctx: string): Promise<Step[]> {
   const roster = CATALOG.map((x) => `${x.id}|${x.name}|${x.title}|${x.tool}`).join("\n");
   const reply = await llm(
     personaOf(byId("chief")!),
     `Assemble the SMALLEST team (2-5 members) from this roster to achieve the goal, and plan the steps.
-Roster (id|name|title|tool): tool "pc" = this chat's persistent real computer with browser + terminal; "code" = Venus Code coding workspace; "video" = Venus Pro motion-graphics video; "research" = web research; "think" = writing/analysis; "email" = drafts emails (sending needs the Gmail connector, not connected yet).
+Roster (id|name|title|tool): tool "pc" = a real computer with browser + terminal (each pc member gets its OWN computer, so pc members run in parallel); "code" = Venus Code coding workspace; "video" = Venus Pro motion-graphics video; "research" = quick web research; "think" = writing/analysis; "email" = drafts emails (sending needs the Gmail connector, not connected yet).
 ${roster}
 
-Rules: each step = {"member": id, "task": complete self-contained instruction incl. every detail the member needs, "after": [indices of EARLIER steps whose results this step needs]}. Steps that do not depend on each other must have an empty "after" so they run in parallel. Maximum 7 steps. Use the tool that fits the job (find leads → pc; build a website → code; emails → email; video → video).
+Rules: each step = {"member": id, "task": complete self-contained instruction incl. every detail the member needs, "after": [indices of EARLIER steps whose results this step needs]}. Steps that do not depend on each other must have an empty "after" so they run in parallel. Maximum 7 steps. Use the tool that fits the job: lists of leads / live websites / downloads / logins → pc; build a website → code; writing → think; emails → email; video → video. Use a member ONLY if the goal needs that skill; never add members just to look busy.
 Reply with JSON only: {"steps":[...]}${ctx ? `\n\nKnown about the user:${ctx.slice(0, 1200)}` : ""}
 
 GOAL: ${goal}`
@@ -121,15 +126,100 @@ GOAL: ${goal}`
     task: String(s?.task ?? "").slice(0, 2500),
     after: (Array.isArray(s?.after) ? s.after : []).map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < i),
   })).filter((s: Step) => s.task);
-  const planned = steps.length ? steps : [{ member: "chief", task: goal, after: [] }];
-  const routed = enforceToolRouting(goal, planned);
+  const planned: Step[] = steps.length ? steps : [{ member: "chief", task: goal, after: [] }];
+  const routed = enforceToolRouting(planned);
+  return routed.map((s, i) => ({ ...s, after: s.after.filter((n) => Number.isInteger(n) && n >= 0 && n < i) }));
+}
 
-  // A routing replacement must never create a dependency cycle or invalid
-  // indexes; preserve the planner's dependency graph exactly as returned.
-  return routed.map((s, i) => ({
-    ...s,
-    after: s.after.filter((n) => Number.isInteger(n) && n >= 0 && n < i),
-  }));
+// ---------- every computer member gets its OWN computer ----------
+
+type WorkerEnv = { e2bKey: string; provider: ProviderId; model: string; apiKey: string; creds: Record<string, unknown> };
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+const hasCred = (creds: Record<string, unknown>, site: string) => {
+  const n = norm(site);
+  if (n.length < 2) return false;
+  return Object.keys(creds).some((k) => k === n || (k.length >= 3 && n.includes(k)) || (n.length >= 3 && k.includes(n)));
+};
+
+/** Values are vault placeholders ("vault:..."): the server resolves them, the browser never sees real secrets. */
+async function loadWorkerEnv(uid: string, chatId: string): Promise<WorkerEnv | null> {
+  try {
+    const u = (await getDoc(doc(db, "users", uid))).data() as { e2bKey?: string; apiKeys?: Partial<Record<ProviderId, string>>; pcCredentials?: Record<string, unknown> } | undefined;
+    const c = (await getDoc(doc(db, "users", uid, "chats", chatId))).data() as { provider?: ProviderId; model?: string } | undefined;
+    const keys = u?.apiKeys ?? {};
+    if (!u?.e2bKey) return null;
+    let provider = c?.provider as ProviderId | undefined;
+    let model = c?.model;
+    if (!provider || !keys[provider]) {
+      const alt = PROVIDERS.find((p) => keys[p.id]);
+      if (!alt) return null;
+      provider = alt.id;
+      model = providerMeta(alt.id).models[0];
+    }
+    if (!model) model = providerMeta(provider).models[0];
+    return { e2bKey: u.e2bKey, provider, model, apiKey: keys[provider] as string, creds: u.pcCredentials ?? {} };
+  } catch { return null; }
+}
+
+// at most 3 computers work at the same time (keeps E2B cost and rate limits under control)
+let active = 0;
+const waiters: Array<() => void> = [];
+async function takeSlot(max = 3) {
+  while (active >= max) await new Promise<void>((r) => waiters.push(r));
+  active++;
+}
+function freeSlot() {
+  active = Math.max(0, active - 1);
+  waiters.shift()?.();
+}
+
+async function runWorkerPc(a: { uid: string; chatId: string; who: Member; task: string; ctx: string; env: WorkerEnv; onLine: (l: string) => void }): Promise<string> {
+  const { uid, chatId, who, env: w } = a;
+  const env = { uid, token: async () => (await auth.currentUser?.getIdToken()) ?? "", e2bKey: w.e2bKey };
+  let abort = "";
+  const onAsk = async (p: PcPending): Promise<Record<string, unknown>> => {
+    if (p.kind === "login") {
+      if (hasCred(w.creds, p.site ?? "")) return { type: "login_saved", site: p.site ?? "" };
+      abort = `a login for ${p.site || "a site"} (save it in vPassword or run this step yourself on the computer panel)`;
+      return { type: "self" };
+    }
+    if (p.kind === "choice") {
+      const opts = p.options ?? [];
+      const cancel = opts.find((o) => /^(cancel|no|decline)/i.test(o));
+      if (cancel) return { type: "answer", text: cancel }; // the owner is not here to approve anything risky
+      return { type: "answer", text: opts[0] ?? "" };
+    }
+    if (p.kind === "handoff") { abort = abort || "a manual step on the computer"; return { type: "handoff_done" }; }
+    return { type: "answer", text: "The owner is not available. Use your best judgment, and list anything that needs the owner under 'Needs you'." };
+  };
+
+  await takeSlot();
+  let sid = "";
+  try {
+    sid = await acquire({ uid, e2bKey: w.e2bKey }, chatId, "worker_" + who.id.replace(/[^A-Za-z0-9]/g, ""));
+    a.onLine(`🖥️ ${who.name} is working on its own computer`);
+    await ensureNode(env, sid, a.onLine);
+    const context = `${personaOf(who)}\n${a.ctx}`.slice(0, 9000);
+    const jobKey = `${chatId}_w_${who.id}`;
+    const jobId = await startPcJob(env, { sandboxId: sid, chatId, jobKey, task: a.task, provider: w.provider, model: w.model, apiKey: w.apiKey, context });
+    const out = await followPcJob({
+      env, chatId, jobKey, sandboxId: sid, jobId,
+      onStep: a.onLine, onAsk, cancelled: () => Boolean(abort),
+    });
+    if (abort) return `⚠️ ${who.name} needs you: ${abort}. Nothing was invented. Do that, then run the goal again.`;
+    if (out.status === "stopped") return "⚠️ Stopped before finishing.";
+    if (out.status !== "done") return `⚠️ ${out.summary}`;
+    let replay = "";
+    if (out.proof) {
+      const url = await proofUrl(env, out.proof).catch(() => "");
+      if (url) replay = `\n\n🎥 [Watch ${who.name}'s replay](${url}) (link works for 6 hours)`;
+    }
+    return out.summary + replay;
+  } finally {
+    freeSlot();
+    if (sid) void releaseNow(w.e2bKey, sid); // work is over: switch this member's computer off
+  }
 }
 
 // ---------- running a member's step ----------
@@ -146,12 +236,14 @@ async function research(task: string, who: Member, llm: LlmFn): Promise<string> 
   const hits = await webCall({ action: "web", query: q }).catch(() => "");
   const urls = (hits.match(/https?:\/\/[^\s)]+/g) ?? []).slice(0, 3);
   const pages = await Promise.all(urls.map((u) => webCall({ action: "web", url: u }).then((x) => x.slice(0, 2500)).catch(() => "")));
-  return llm(personaOf(who), `${task}\n\nSEARCH RESULTS:\n${hits.slice(0, 2500)}\n\nPAGES:\n${pages.join("\n---\n")}\n\nWrite your findings with source links. Do not invent facts.`);
+  return llm(personaOf(who), `${task}\n\nSEARCH RESULTS:\n${hits.slice(0, 2500)}\n\nPAGES:\n${pages.join("\n---\n")}\n\nWrite your findings with source links (one claim per line, each line ending with its source URL). Do not invent facts.`);
 }
 
-async function execMember(who: Member, task: string, host: TeamHost, onLine: (l: string) => void): Promise<string> {
+type Worker = { uid: string; chatId: string; ctx: string; env: WorkerEnv };
+
+async function execMember(who: Member, task: string, host: TeamHost, onLine: (l: string) => void, wk: Worker | null): Promise<string> {
   switch (who.tool) {
-    case "pc": return host.runPc(task, who, onLine);
+    case "pc": return wk ? runWorkerPc({ uid: wk.uid, chatId: wk.chatId, who, task, ctx: wk.ctx, env: wk.env, onLine }) : host.runPc(task, who, onLine);
     case "code": return host.runCode(task, who);
     case "video": return host.runVideo(task, who);
     case "research": return research(task, who, host.llm);
@@ -175,21 +267,25 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
   await feed("Chief", "Team", planText, "note");
   await say("chief", "assistant", `${planText}\n\n${steps.map((s, i) => `${i + 1}. ${byId(s.member)?.name}: ${s.task.slice(0, 160)}`).join("\n")}`);
 
+  // Own computers per member when the account has an E2B key and a model key; otherwise the chat's shared computer (one at a time).
+  const needsPc = steps.some((s) => byId(s.member)?.tool === "pc");
+  const wenv = needsPc ? await loadWorkerEnv(uid, chatId) : null;
+  const wk: Worker | null = wenv ? { uid, chatId, ctx: a.ctx, env: wenv } : null;
+  if (needsPc) await feed("Chief", "Team", wk ? "Each computer member works on its own computer, in parallel (max 3 at once)." : "Using this chat's shared computer, one step at a time.", "note");
+
   const results: string[] = new Array(steps.length).fill("");
   const level: number[] = [];
   steps.forEach((s, i) => { level[i] = s.after.length ? 1 + Math.max(...s.after.map((k) => level[k] ?? 0)) : 0; });
 
   for (let lv = 0; lv <= Math.max(...level); lv++) {
     const idxs = steps.map((_, i) => i).filter((i) => level[i] === lv);
-    // The coding workspace and Venus Pro are single per chat → one after another.
-    // Research/think steps can run in parallel; this chat has one shared PC workspace, so PC work is serialized.
+    // Same member = one after another. Different computer members = parallel (own computers).
+    // Without own computers, all PC work shares one computer and is serialized. Code and video have one workspace per chat.
     const groups = new Map<string, number[]>();
     for (const i of idxs) {
-      const tool = byId(steps[i].member)!.tool;
-      // All PC members currently share this chat's single persistent computer.
-      // Serialize PC work to prevent competing jobs from starting on the same
-      // sandbox. Code and video also have one workspace per chat.
-      const k = tool === "pc" || tool === "code" || tool === "video" ? tool : "s" + i;
+      const who = byId(steps[i].member)!;
+      const tool = who.tool;
+      const k = tool === "pc" ? (wk ? "pc:" + who.id : "pc") : tool === "code" || tool === "video" ? tool : "s" + i;
       groups.set(k, [...(groups.get(k) ?? []), i]);
     }
     await Promise.all(Array.from(groups.values()).map(async (list) => {
@@ -213,7 +309,7 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
             results[i] = "Skipped: a required earlier step failed, so this step was not run with incomplete inputs.";
             await say(who.id, "assistant", results[i]);
           } else {
-            results[i] = await execMember(who, deps ? `${s.task}\n\n${deps}` : s.task, host, onLine);
+            results[i] = await execMember(who, deps ? `${s.task}\n\n${deps}` : s.task, host, onLine, wk);
           }
         } catch (e) {
           results[i] = `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
@@ -228,7 +324,7 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
   const failures = results.filter((r) => /^Failed:|^⚠️|^❌|^Skipped:/i.test(r.trim())).length;
   const report = await host.llm(
     personaOf(byId("chief")!),
-    `Write the final report to the user in clear English (markdown). Start with one outcome line (use ❌ failed if the core goal failed, ⚠️ partly if any required step failed or was skipped, otherwise ✅ done), then what each member did, concrete results (links, names, files) and what still needs the user. Never invent anything and NEVER claim a skipped/failed step was completed.\n\nGOAL: ${a.goal}\nSTEPS WITH FAILURE/SKIP SIGNALS: ${failures}\n\n${steps.map((s, i) => `STEP ${i + 1} — ${byId(s.member)?.name} (${s.task.slice(0, 160)}):\n${results[i].slice(0, 1800)}`).join("\n\n")}`
+    `Write the final report to the user in clear English (markdown). Start with one outcome line (use ❌ failed if the core goal failed, ⚠️ partly if any required step failed or was skipped, otherwise ✅ done), then what each member did, concrete results (links, names, files) and what still needs the user. Keep every "UNVERIFIED", "UNCHECKED", "FACT CHECK" and "VERIFIED:" line from the members exactly as written. Never invent anything and NEVER claim a skipped/failed step was completed.\n\nGOAL: ${a.goal}\nSTEPS WITH FAILURE/SKIP SIGNALS: ${failures}\n\n${steps.map((s, i) => `STEP ${i + 1} — ${byId(s.member)?.name} (${s.task.slice(0, 160)}):\n${results[i].slice(0, 1800)}`).join("\n\n")}`
   );
   await say("chief", "assistant", report);
   return report;
