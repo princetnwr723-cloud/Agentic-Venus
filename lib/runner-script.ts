@@ -1,11 +1,13 @@
 // The background worker that runs INSIDE the E2B computer as a detached Node process.
-// v4: native tool-calling (with automatic fallback to the text format), permission modes (plan / strict / auto),
+// v5: fixes + new gates (task/earlier-context split, read-only tasks may finish, auto dependency install, typecheck gate,
+//     secret scan, project rules from AGENTS.md / CLAUDE.md / package scripts, change summary) on top of v4:
+//     native tool-calling (with automatic fallback to the text format), permission modes (plan / strict / auto),
 //     project hooks (.venus/hooks.json), connected tools (GitHub, MCP...) through the server with a job token,
 //     parallel writer sub-agents in git worktrees, milestone-based fresh contexts + saved state for long projects,
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "6";
+export const RUNNER_VERSION = "7";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -30,7 +32,12 @@ let INSTR = String(job.instruction || "");
 let MODE = "auto";
 const mm = /^\s*\[mode:(plan|strict|auto)\]\s*/i.exec(INSTR);
 if (mm) { MODE = mm[1].toLowerCase(); INSTR = INSTR.slice(mm[0].length); }
-const COMPLEX = INSTR.length > 180;
+// TASK = what the user asked THIS time. The "Earlier work" block that is appended for context must never decide
+// how complex the task is, or whether it needs real implementation files.
+const EARLIER_AT = INSTR.indexOf("\n\n# Earlier work in this codespace");
+const TASK = (EARLIER_AT >= 0 ? INSTR.slice(0, EARLIER_AT) : INSTR).trim();
+const COMPLEX = TASK.length > 180;
+const READONLY = /^\s*(please\s+)?(read|explain|analy[sz]e|review|summari[sz]e|understand|audit|investigate|describe|explore|tell me|show me|what|how|why)\b/i;
 const BUDGET = job.budgetChars || 9000000;
 let USED = 0, BASE_SHA = "", MEM0 = 0, HOOKS = {}, TOOLS_TXT = "", tainted = false;
 
@@ -695,7 +702,18 @@ async function runWriter(prompt, files) {
 }
 
 // ---------------- finish gates ----------------
-function verifyProject() {
+// installs dependencies once, so tests/build can really be verified (before v5 a missing node_modules silently skipped verification)
+function ensureDeps(ctx) {
+  if (ctx.depsTried || !fs.existsSync(ROOT + "/package.json") || fs.existsSync(ROOT + "/node_modules")) return null;
+  ctx.depsTried = true;
+  let pj = {};
+  try { pj = JSON.parse(fs.readFileSync(ROOT + "/package.json", "utf8")); } catch (e) { return null; }
+  if (!Object.keys(pj.dependencies || {}).length && !Object.keys(pj.devDependencies || {}).length) return null;
+  emit("info", "Installing dependencies so the project can be verified...");
+  const r = sh("set -o pipefail; cd " + q(ROOT) + " && export CI=1 && timeout 240 npm install --no-audit --no-fund --loglevel=error 2>&1 | tail -c 2500", 260000);
+  return r.status === 0 ? null : String(r.stdout || "npm install failed");
+}
+function verifyProject(ctx) {
   let cmd = "";
   const pj = ROOT + "/package.json";
   if (fs.existsSync(pj)) {
@@ -705,11 +723,32 @@ function verifyProject() {
       else if (s.build) cmd = "npm run build --silent";
       else if (s.lint) cmd = "npm run lint --silent";
     } catch (e) {}
-    if (cmd && !fs.existsSync(ROOT + "/node_modules")) return null;
+    if (cmd) {
+      const bad = ensureDeps(ctx);
+      if (bad) return {ok: false, cmd: "npm install", out: bad};
+    }
   } else if (fs.existsSync(ROOT + "/pytest.ini") || fs.existsSync(ROOT + "/tests")) cmd = "python3 -m pytest -q";
   if (!cmd) return null;
   const r = sh("set -o pipefail; cd " + q(ROOT) + " && export CI=1 && timeout 170 " + cmd + " 2>&1 | tail -c 4000", 180000);
-  return {ok: r.status === 0, cmd: cmd, out: String(r.stdout || "")};
+  if (r.status !== 0) return {ok: false, cmd: cmd, out: String(r.stdout || "")};
+  // type errors that the test command does not catch
+  if (fs.existsSync(ROOT + "/tsconfig.json") && fs.existsSync(ROOT + "/node_modules/.bin/tsc") && !/build/.test(cmd)) {
+    const t = sh("set -o pipefail; cd " + q(ROOT) + " && timeout 120 node_modules/.bin/tsc --noEmit -p . 2>&1 | head -c 3000", 130000);
+    if (t.status !== 0) return {ok: false, cmd: "tsc --noEmit", out: String(t.stdout || "")};
+  }
+  return {ok: true, cmd: cmd, out: String(r.stdout || "")};
+}
+const SECRET_RE = [/AKIA[0-9A-Z]{16}/, /sk-ant-[A-Za-z0-9_-]{20,}/, /\bsk-[A-Za-z0-9]{32,}/, /gh[pousr]_[A-Za-z0-9]{30,}/, /github_pat_[A-Za-z0-9_]{40,}/, /xox[bpas]-[A-Za-z0-9-]{20,}/, /AIza[0-9A-Za-z_-]{35}/, /-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/];
+function secretScan() {
+  if (!BASE_SHA) return [];
+  const added = String(sh("cd " + q(ROOT) + " && git diff " + BASE_SHA + " HEAD -U0 -- . ':!.venus' ':!package-lock.json' 2>/dev/null | grep '^+' | grep -v '^+++' | head -c 400000", 25000).stdout || "");
+  const hits = [];
+  for (const line of added.split("\n")) {
+    for (const re of SECRET_RE) {
+      if (re.test(line)) { hits.push(line.slice(0, 90).replace(/[A-Za-z0-9_-]{24,}/g, "[redacted]")); break; }
+    }
+  }
+  return hits.slice(0, 5);
 }
 function initBase() {
   BASE_SHA = String(sh("cd " + q(ROOT) + " && git rev-parse HEAD 2>/dev/null", 10000).stdout || "").trim();
@@ -720,6 +759,12 @@ function changedFiles() {
   if (!BASE_SHA) return [];
   return String(sh("cd " + q(ROOT) + " && git diff --name-only " + BASE_SHA + " HEAD 2>/dev/null | head -200", 15000).stdout || "").split("\n").filter((f) => f && f.indexOf(".venus/") !== 0);
 }
+function statLine() {
+  if (!BASE_SHA) return "";
+  const s = String(sh("cd " + q(ROOT) + " && git diff --shortstat " + BASE_SHA + " HEAD -- . ':!.venus' 2>/dev/null", 15000).stdout || "").trim();
+  const files = changedFiles();
+  return s ? "Changes: " + s + (files.length ? " (" + files.slice(0, 12).join(", ") + (files.length > 12 ? ", ..." : "") + ")" : "") : "";
+}
 function memUnchanged() { try { return (fs.existsSync(ROOT + "/VENUS.md") ? fs.statSync(ROOT + "/VENUS.md").mtimeMs : 0) === MEM0; } catch (e) { return true; } }
 async function review(summary) {
   if (!BASE_SHA) return null;
@@ -728,7 +773,7 @@ async function review(summary) {
   const scan = String(sh("cd " + q(ROOT) + " && git diff " + BASE_SHA + " HEAD -- . ':!.venus' 2>/dev/null | grep '^+' | grep -v '^+++' | grep -niE 'TODO|FIXME|rest of (the )?file|lorem ipsum|your code here|implement me' | head -8", 20000).stdout || "").trim();
   let issues = [];
   try {
-    const raw = await llm([{role: "user", content: "You are a strict senior code reviewer. Review the diff of a coding agent's work.\n\nTASK GIVEN TO THE AGENT:\n" + INSTR.slice(0, 1200) + "\n\nAGENT'S SUMMARY:\n" + String(summary).slice(0, 600) + "\n\nDIFF:\n" + diff + "\n\nReply with ONE JSON object only: {\"verdict\":\"ok\"|\"fix\",\"issues\":[\"specific problem: file + what to change\"]}\nReport ONLY real problems: bugs, requirements of the task that are missing, broken imports or paths, files referenced but never created, security problems (secrets in code, injection), placeholders left in. No style nitpicks. At most 6 issues."}]);
+    const raw = await llm([{role: "user", content: "You are a strict senior code reviewer. Review the diff of a coding agent's work.\n\nTASK GIVEN TO THE AGENT:\n" + TASK.slice(0, 1200) + "\n\nAGENT'S SUMMARY:\n" + String(summary).slice(0, 600) + "\n\nDIFF:\n" + diff + "\n\nReply with ONE JSON object only: {\"verdict\":\"ok\"|\"fix\",\"issues\":[\"specific problem: file + what to change\"]}\nReport ONLY real problems: bugs, requirements of the task that are missing, broken imports or paths, files referenced but never created, security problems (secrets in code, injection), placeholders left in. No style nitpicks. At most 6 issues."}]);
     const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
     const j = a >= 0 && b > a ? JSON.parse(raw.slice(a, b + 1)) : null;
     if (j && j.verdict === "fix" && Array.isArray(j.issues)) issues = j.issues.map((x) => String(x).slice(0, 300)).slice(0, 6);
@@ -738,7 +783,7 @@ async function review(summary) {
 }
 async function gates(fin, ctx) {
   if (ctx.gates.tests < 3) {
-    const v = verifyProject();
+    const v = verifyProject(ctx);
     if (v && !v.ok) {
       ctx.gates.tests++;
       emit("info", "Verification failed - fixing it (" + ctx.gates.tests + "/3): " + v.cmd);
@@ -759,12 +804,21 @@ async function gates(fin, ctx) {
     return "You changed UI files but have not LOOKED at the result. Open it with the look tool (path index.html, or url http://localhost:3000 for a dev server), check layout, text and images, fix what is wrong, then finish again.";
   }
   const changed = changedFiles();
-  const requiresImplementation = /\b(build|create|make|implement|develop|website|web\s*app|webpage|landing\s*page|application|app|site|page|component|feature)\b/i.test(INSTR);
+  // only for build/create tasks: questions, analysis and read-only tasks may finish without changing any file
+  const requiresImplementation = /\b(build|create|make|implement|develop|website|web\s*app|webpage|landing\s*page|application|app|site|page|component|feature)\b/i.test(TASK) && !READONLY.test(TASK);
   const deliverables = changed.filter((f) => !/\.(md|mdx|mmd|txt|rst|adoc)$/i.test(f) && !/(^|\/)(LICENSE|CHANGELOG|CONTRIBUTING)(\.|$)/i.test(f));
-  if (requiresImplementation && deliverables.length === 0) {
-    ctx.gates.impl = (ctx.gates.impl || 0) + 1;
-    emit("info", "Gate: no implementation files changed; documentation-only completion blocked.");
-    return "IMPLEMENTATION REQUIRED: You have not changed any real implementation/output files. Do not finish after writing DESIGN.md, design.mmd, README.md, or VENUS.md. Create or update the actual source files requested by the user (for a static website: index.html, style.css, script.js; for a framework: the real app/source components), then inspect the files and verify the result. If a write/tool call failed, diagnose and retry it.";
+  if (requiresImplementation && deliverables.length === 0 && ctx.gates.impl < 3) {
+    ctx.gates.impl++;
+    emit("info", "Gate: no implementation files changed; documentation-only completion blocked (" + ctx.gates.impl + "/3).");
+    return "IMPLEMENTATION REQUIRED: You have not changed any real implementation/output files. Do not finish after writing DESIGN.md, design.mmd, README.md, or VENUS.md. Create or update the actual source files requested by the user (for a static website: index.html, style.css, script.js; for a framework: the real app/source components), then inspect the files and verify the result. If the task was only a question or an analysis and needs no file change, say so in finish. If a write/tool call failed, diagnose and retry it.";
+  }
+  if (changed.length && ctx.gates.secrets < 2) {
+    const hits = secretScan();
+    if (hits.length) {
+      ctx.gates.secrets++;
+      emit("info", "Secret scan: " + hits.length + " possible secret(s) in the diff - sent back to remove them.");
+      return "SECRET SCAN: the code you added contains what looks like a real secret (API key, token or private key):\n- " + hits.join("\n- ") + "\nRemove it from the code. Read it from an environment variable, add a placeholder to .env.example, and never commit real keys. If the key was already committed, tell the user to rotate it in your final summary. Then finish again.";
+    }
   }
   if (changed.length >= 2 && ctx.gates.mem < 1 && memUnchanged()) {
     ctx.gates.mem++;
@@ -812,6 +866,22 @@ function savedState() {
     return [plan, ch, notes].filter(Boolean).join("\n");
   } catch (e) { return ""; }
 }
+// the rules of the project itself (cloned repos bring their own AGENTS.md / CLAUDE.md / scripts)
+function projectContext() {
+  const parts = [];
+  for (const f of ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONTRIBUTING.md"]) {
+    try { const t = fs.readFileSync(ROOT + "/" + f, "utf8").trim(); if (t) parts.push("### " + f + "\n" + t.slice(0, 2500)); } catch (e) {}
+  }
+  try {
+    const pj = JSON.parse(fs.readFileSync(ROOT + "/package.json", "utf8"));
+    const sc = pj.scripts || {};
+    const deps = Object.keys(Object.assign({}, pj.dependencies, pj.devDependencies));
+    const fw = ["next", "vite", "react", "vue", "svelte", "express", "@nestjs/core", "astro", "remix"].filter((x) => deps.indexOf(x) >= 0);
+    parts.push("### Project facts\nPackage: " + (pj.name || "?") + (fw.length ? " - uses " + fw.join(", ") : "") + "\nScripts: " + (Object.keys(sc).map((k) => k + "=" + String(sc[k]).slice(0, 60)).join("; ") || "none") + "\nDependencies installed: " + (fs.existsSync(ROOT + "/node_modules") ? "yes" : "NO (run npm install before running tests or builds)"));
+  } catch (e) {}
+  if (!parts.length) { try { const r = fs.readFileSync(ROOT + "/README.md", "utf8").trim(); if (r) parts.push("### README.md\n" + r.slice(0, 1500)); } catch (e) {} }
+  return parts.length ? "\n\n## Project rules and facts (follow them)\n" + parts.join("\n\n") : "";
+}
 function buildFirst(resume) {
   const sys = String(job.system || "");
   const cut = sys.indexOf("\n## VENUS.md");
@@ -821,7 +891,7 @@ function buildFirst(resume) {
   const modeNote = MODE === "plan" ? "\n\nMODE: PLAN. You may only explore. Finish with a concrete step-by-step plan (files to change, order, risks). Do not change anything." : MODE === "strict" ? "\n\nMODE: STRICT. Shell commands are limited to a safe allowlist (tests, builds, git status/diff/add/commit, file inspection)." : "";
   const toolsNote = TOOLS_TXT ? "\n\nCONNECTED TOOLS (use the tool function, or in the text format <tool name=\"...\">{json}</tool>). Write actions need the user's approval; when the user is away they are NOT done, so list them under 'Needs you':\n" + TOOLS_TXT : "";
   const hookNote = HOOKS && (HOOKS.deny_paths || HOOKS.pre_finish || HOOKS.post_edit || HOOKS.pre_bash_deny) ? "\n\nPROJECT HOOKS (.venus/hooks.json) are active and enforced by the system." : "";
-  return head + "\n## VENUS.md\n" + (md || "(none yet)") + "\n\n## Files\n" + treeText(ROOT) + "\n\n# TASK\n" + INSTR + modeNote + toolsNote + hookNote + (resume ? "\n\n# STATE (you are continuing your own earlier work)\n" + resume : "");
+  return head + "\n## VENUS.md\n" + (md || "(none yet)") + "\n\n## Files\n" + treeText(ROOT) + projectContext() + "\n\n# TASK\n" + INSTR + modeNote + toolsNote + hookNote + (resume ? "\n\n# STATE (you are continuing your own earlier work)\n" + resume : "");
 }
 function resetContext(ctx, why) {
   writeState(ctx);
@@ -833,14 +903,14 @@ function resetContext(ctx, why) {
 
 // ---------------- main loop ----------------
 async function main() {
-  emit("info", "Background runner v4 started (" + (NATIVE ? "native tool-calling" : "text tool format") + ", mode: " + MODE + ").");
+  emit("info", "Background runner v5 started (" + (NATIVE ? "native tool-calling" : "text tool format") + ", mode: " + MODE + ").");
   initBase();
   HOOKS = loadHooks();
   const tl = await api("/api/tools", {action: "list"});
   if (tl.ok && Array.isArray(tl.d.specs)) {
     TOOLS_TXT = tl.d.specs.filter((s) => !/^(web|verify|identity)\./.test(s.name)).slice(0, 40).map((s) => "- " + s.name + "(" + s.params + ")" + (s.risk === "write" ? " (write) " : " ") + "- " + s.description).join("\n");
   }
-  const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, nativeOk: false, gates: {tests: 0, ui: 0, mem: 0, review: 0}};
+  const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, nativeOk: false, depsTried: false, gates: {tests: 0, ui: 0, mem: 0, review: 0, impl: 0, secrets: 0}};
   const first = buildFirst(savedState());
   if (NATIVE) nmsgs = [nUserMsg(first)]; else xmsgs = [{role: "user", content: first}];
   const maxSteps = job.maxSteps || 250;
@@ -980,7 +1050,9 @@ async function main() {
       if (again) { out[calls.findIndex((c) => c.name === "finish")] = "Finish not accepted yet."; addResults(calls, out, null, again); continue; }
       finalCommit(fin);
       writeState(ctx);
-      return end("done", fin + (ctx.checks.length ? "\n\n---\nChecks: " + ctx.checks.join(" · ") : ""), ctx.memories);
+      const stat = statLine();
+      const tailInfo = [stat, ctx.checks.length ? "Checks: " + ctx.checks.join(" · ") : ""].filter(Boolean).join("\n");
+      return end("done", fin + (tailInfo ? "\n\n---\n" + tailInfo : ""), ctx.memories);
     }
 
     let tail = diag + "\nContinue. Call finish when the task is complete and verified.";
