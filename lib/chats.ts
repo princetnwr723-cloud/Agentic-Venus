@@ -5,7 +5,8 @@ import { db } from "@/lib/firebase";
 import type { AvatarColor } from "@/lib/bots";
 import type { ProviderId } from "@/lib/providers";
 
-export type ChatMessage = { role: "user" | "assistant"; content: string; at: number };
+/** replyTo = the earlier agent reply (or the selected part of it) the owner clicked the reply icon on. */
+export type ChatMessage = { role: "user" | "assistant"; content: string; at: number; replyTo?: { at: number; preview: string } };
 
 export type Chat = {
   id: string;
