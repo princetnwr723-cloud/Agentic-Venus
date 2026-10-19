@@ -73,7 +73,7 @@ export async function assembleTeam(a: { uid: string; chatId: string; brief: stri
   return members;
 }
 
-// ---------- planning ----------
+// ---------- planning: split the task into steps, decide parallel or series ----------
 
 export type Step = { member: string; task: string; after: number[] };
 
@@ -82,6 +82,10 @@ const LIVE = /\b(website|web ?site|webpage|url|directory|directories|linkedin|go
 // "find / collect / verify N leads|companies|contacts": always real browsing, even if the planner gave it to a writer.
 const LIST_JOB = /\b(find|collect|gather|scrape|extract|verify|enrich|compile|dhund\w*|nikal\w*)\b[\s\S]{0,60}\b(leads?|prospects?|contacts?|companies|clinics?|businesses|emails?|profiles?|listings?)\b/i;
 const WRITING = /\b(write|draft|compose|rewrite|edit|proofread|summari[sz]e|translate|subject line|copy)\b/i;
+// Venus Pro downloads assets on the chat's computer when the brief asks for them.
+const ASSET = /\b(assets?|footage|stock|photos?|images?|logos?|clips?|b-?roll|download)\b/i;
+// A step that talks about the result of an earlier step.
+const DEPENDS = /\b(them|those|these|uske|unhe|inhe|usse|us ?ko|is ?ko|result|results|above|previous|earlier|same|ye sab|wahi|jo mila|jo nikla)\b/i;
 
 function pcMemberFor(task: string, planned: string[]): string {
   const t = task.toLowerCase();
@@ -107,28 +111,78 @@ function enforceToolRouting(steps: Step[]): Step[] {
   });
 }
 
+/** The steps the user wrote down themselves (1. 2. 3. lines, or "pehle X phir Y then Z"). */
+export function splitSteps(goal: string): Array<{ task: string; serial: boolean }> {
+  const lines = goal.split("\n").map((l) => l.trim()).filter(Boolean);
+  const listed = lines
+    .map((l) => /^(?:\d{1,2}\s*[.)]|[-*•]|step\s*\d+\s*[:.)-]?)\s*(.+)$/i.exec(l))
+    .filter((m): m is RegExpExecArray => Boolean(m));
+  if (listed.length >= 2) return listed.slice(0, 7).map((m) => ({ task: m[1].trim(), serial: false }));
+  const parts = goal
+    .split(/\s*,?\s*\b(?:and then|after that|uske baad|uske bad|phir|fir|then|next)\b\s*/i)
+    .map((s) => s.trim().replace(/^(?:pehle|first)\s+/i, ""))
+    .filter((s) => s.length > 8);
+  if (parts.length >= 2 && parts.length <= 7) return parts.map((task, i) => ({ task, serial: i > 0 }));
+  return [];
+}
+
+function memberFor(task: string): string {
+  if (/\b(video|reel|reels|shorts?|animation|motion graphics?)\b/i.test(task)) return /9:16|reel|shorts?|vertical/i.test(task) ? "reel" : "frame";
+  if (/\b(website|web ?site|landing|app|script|api|bug|code|component|page|dashboard)\b/i.test(task) && !LIST_JOB.test(task)) return "forge";
+  if (LIST_JOB.test(task) || LIVE.test(task)) return "hunter";
+  if (/\b(e-?mails?|outreach|newsletter)\b/i.test(task)) return "mailer";
+  if (/\b(research|compare|analy[sz]e|market|competitors?)\b/i.test(task)) return "sage";
+  if (WRITING.test(task)) return "quill";
+  return "chief";
+}
+
+function stepsFromExplicit(goal: string, list: Array<{ task: string; serial: boolean }>): Step[] {
+  return list.map((e, i) => ({
+    member: memberFor(e.task),
+    task: `${e.task}\n\n(Overall goal: ${goal.slice(0, 400)})`,
+    after: i > 0 && (e.serial || DEPENDS.test(e.task)) ? [i - 1] : [],
+  }));
+}
+
 export async function planTeam(llm: LlmFn, goal: string, ctx: string): Promise<Step[]> {
   const roster = CATALOG.map((x) => `${x.id}|${x.name}|${x.title}|${x.tool}`).join("\n");
-  const reply = await llm(
-    personaOf(byId("chief")!),
-    `Assemble the SMALLEST team (2-5 members) from this roster to achieve the goal, and plan the steps.
-Roster (id|name|title|tool): tool "pc" = a real computer with browser + terminal (each pc member gets its OWN computer, so pc members run in parallel); "code" = Venus Code coding workspace; "video" = Venus Pro motion-graphics video; "research" = quick web research; "think" = writing/analysis; "email" = drafts emails (sending needs the Gmail connector, not connected yet).
+  const explicit = splitSteps(goal);
+  let steps: Step[] = [];
+  try {
+    const reply = await llm(
+      personaOf(byId("chief")!),
+      `You are the planner of an agent. Split the goal into STEPS, pick the right specialist for each step from the roster, and decide what can run in parallel.
+Roster (id|name|title|tool): tool "pc" = a real computer with browser + terminal (each pc member gets its OWN computer, so pc members run in parallel); "code" = Venus Code coding workspace; "video" = Venus Pro motion-graphics video; "research" = quick web research; "think" = writing/analysis; "email" = drafts emails (sending needs the Gmail connector).
 ${roster}
 
-Rules: each step = {"member": id, "task": complete self-contained instruction incl. every detail the member needs, "after": [indices of EARLIER steps whose results this step needs]}. Steps that do not depend on each other must have an empty "after" so they run in parallel. Maximum 7 steps. Use the tool that fits the job: lists of leads / live websites / downloads / logins → pc; build a website → code; writing → think; emails → email; video → video. Use a member ONLY if the goal needs that skill; never add members just to look busy.
+HOW TO SPLIT
+- If the user listed steps (1, 2, 3 / pehle... phir... / then), keep EXACTLY those steps in that order: one step per item, none merged, none dropped. Example: 3 listed steps = 3 steps.
+- Otherwise split by distinct pieces of work. A single small job stays ONE step.
+- Each step = {"member": id, "task": complete self-contained instruction with every detail the member needs, "after": [indices of EARLIER steps whose RESULT this step needs]}.
+- PARALLEL: steps that do not need each other's output get an empty "after" and run at the same time (for example a website with Venus Code and a video with Venus Pro, or two research jobs).
+- SERIES: a step that uses the result of another step lists it in "after" (for example write emails after the leads are found).
+- Use a member ONLY if the work needs that skill. The team is brought in automatically: the user never has to ask for it. Never add members to look busy.
+- Tools: lists of leads / live websites / downloads / logins -> pc; build a website or app -> code; video -> video; writing -> think; emails -> email.
+- Maximum 7 steps.
 Reply with JSON only: {"steps":[...]}${ctx ? `\n\nKnown about the user:${ctx.slice(0, 1200)}` : ""}
 
 GOAL: ${goal}`
-  );
-  const raw = parseJson(reply);
-  const steps: Step[] = (Array.isArray(raw?.steps) ? raw.steps : []).slice(0, 7).map((s: any, i: number) => ({
-    member: byId(String(s?.member)) ? String(s.member) : "chief",
-    task: String(s?.task ?? "").slice(0, 2500),
-    after: (Array.isArray(s?.after) ? s.after : []).map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < i),
-  })).filter((s: Step) => s.task);
-  const planned: Step[] = steps.length ? steps : [{ member: "chief", task: goal, after: [] }];
+    );
+    const raw = parseJson(reply);
+    steps = (Array.isArray(raw?.steps) ? raw.steps : []).slice(0, 7).map((s: any, i: number) => ({
+      member: byId(String(s?.member)) ? String(s.member) : "chief",
+      task: String(s?.task ?? "").slice(0, 2500),
+      after: (Array.isArray(s?.after) ? s.after : []).map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < i),
+    })).filter((s: Step) => s.task);
+  } catch { steps = []; }
+
+  // The user wrote N steps: never end up with fewer.
+  let planned: Step[] = steps;
+  if (explicit.length >= 2 && steps.length < explicit.length) planned = stepsFromExplicit(goal, explicit);
+  if (!planned.length) planned = [{ member: "chief", task: goal, after: [] }];
+
   const routed = enforceToolRouting(planned);
-  return routed.map((s, i) => ({ ...s, after: s.after.filter((n) => Number.isInteger(n) && n >= 0 && n < i) }));
+  return routed.map((s, i) => ({ ...s, after: Array.from(new Set(s.after)).filter((n) => Number.isInteger(n) && n >= 0 && n < i) }));
 }
 
 // ---------- every computer member gets its OWN computer ----------
@@ -251,6 +305,8 @@ async function execMember(who: Member, task: string, host: TeamHost, onLine: (l:
   }
 }
 
+const FAILED = /^Failed:|^⚠️|^❌|^Skipped:/i;
+
 export async function runTeamGoal(a: { uid: string; chatId: string; goal: string; ctx: string; host: TeamHost }): Promise<string> {
   const { uid, chatId, host } = a;
   const feed = (from: string, to: string, text: string, kind: Feed["kind"]) =>
@@ -260,68 +316,100 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
 
   await feed("You", "Chief", a.goal, "task");
   await say("chief", "user", a.goal);
+
+  // 1) split the task into steps (the team is brought in automatically, nobody has to ask for it)
   const steps = await planTeam(host.llm, a.goal, a.ctx);
   const ids = Array.from(new Set(steps.map((s) => s.member)));
-  await updateTeam(uid, chatId, (t) => { for (const id of ids) if (!t.members.includes(id)) t.members.push(id); });
-  const planText = `Plan: ${steps.map((s, i) => `${i + 1}. ${byId(s.member)?.name}`).join(" → ")}`;
-  await feed("Chief", "Team", planText, "note");
-  await say("chief", "assistant", `${planText}\n\n${steps.map((s, i) => `${i + 1}. ${byId(s.member)?.name}: ${s.task.slice(0, 160)}`).join("\n")}`);
+  let joined: string[] = [];
+  await updateTeam(uid, chatId, (t) => {
+    joined = ids.filter((id) => !t.members.includes(id));
+    for (const id of ids) if (!t.members.includes(id)) t.members.push(id);
+  });
+  if (joined.length) await feed("Chief", "Team", `Joined automatically for this task: ${joined.map((id) => byId(id)?.name ?? id).join(", ")}.`, "note");
 
-  // Own computers per member when the account has an E2B key and a model key; otherwise the chat's shared computer (one at a time).
+  // own computers per member when the account has an E2B key and a model key; otherwise the chat's shared computer (one at a time)
   const needsPc = steps.some((s) => byId(s.member)?.tool === "pc");
   const wenv = needsPc ? await loadWorkerEnv(uid, chatId) : null;
   const wk: Worker | null = wenv ? { uid, chatId, ctx: a.ctx, env: wenv } : null;
-  if (needsPc) await feed("Chief", "Team", wk ? "Each computer member works on its own computer, in parallel (max 3 at once)." : "Using this chat's shared computer, one step at a time.", "note");
 
-  const results: string[] = new Array(steps.length).fill("");
+  // 2) lanes: steps in the same lane run one after the other (they share one workspace / computer),
+  //    steps in different lanes run at the same time. Venus Code and Venus Pro are different lanes.
+  const laneOf = (i: number): string => {
+    const who = byId(steps[i].member)!;
+    if (who.tool === "pc") return wk ? "pc:" + who.id : "pc";
+    if (who.tool === "code") return "code";
+    if (who.tool === "video") return !wk && ASSET.test(steps[i].task) ? "pc" : "video";
+    return "s" + i;
+  };
+
   const level: number[] = [];
   steps.forEach((s, i) => { level[i] = s.after.length ? 1 + Math.max(...s.after.map((k) => level[k] ?? 0)) : 0; });
-
+  const phases: string[] = [];
   for (let lv = 0; lv <= Math.max(...level); lv++) {
-    const idxs = steps.map((_, i) => i).filter((i) => level[i] === lv);
-    // Same member = one after another. Different computer members = parallel (own computers).
-    // Without own computers, all PC work shares one computer and is serialized. Code and video have one workspace per chat.
     const groups = new Map<string, number[]>();
-    for (const i of idxs) {
-      const who = byId(steps[i].member)!;
-      const tool = who.tool;
-      const k = tool === "pc" ? (wk ? "pc:" + who.id : "pc") : tool === "code" || tool === "video" ? tool : "s" + i;
-      groups.set(k, [...(groups.get(k) ?? []), i]);
-    }
-    await Promise.all(Array.from(groups.values()).map(async (list) => {
-      for (const i of list) {
-        const s = steps[i];
-        const who = byId(s.member)!;
-        const deps = s.after.map((k) => `Result of step ${k + 1} (${byId(steps[k].member)?.name}):\n${results[k].slice(0, 2500)}`).join("\n\n");
-        await feed("Chief", who.name, s.task, "task");
-        await say(who.id, "user", `📋 From Chief:\n${s.task}`);
-        await say(who.id, "assistant", "▶ Got it — starting now.");
-        await updateTeam(uid, chatId, (t) => { t.working[who.id] = s.task.slice(0, 140); });
-        let lastLine = 0;
-        const onLine = (line: string) => {
-          if (Date.now() - lastLine < 2500) return;
-          lastLine = Date.now();
-          void updateTeam(uid, chatId, (t) => { t.working[who.id] = line.slice(0, 140); });
-        };
-        try {
-          const blocked = s.after.some((k) => /^Failed:|^⚠️|^❌/i.test(results[k].trim()));
-          if (blocked) {
-            results[i] = "Skipped: a required earlier step failed, so this step was not run with incomplete inputs.";
-            await say(who.id, "assistant", results[i]);
-          } else {
-            results[i] = await execMember(who, deps ? `${s.task}\n\n${deps}` : s.task, host, onLine, wk);
-          }
-        } catch (e) {
-          results[i] = `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
-        }
-        await feed(who.name, "Chief", results[i], "result");
-        await say(who.id, "assistant", results[i]);
-        await updateTeam(uid, chatId, (t) => { delete t.working[who.id]; });
-      }
-    }));
+    steps.forEach((_, i) => { if (level[i] === lv) groups.set(laneOf(i), [...(groups.get(laneOf(i)) ?? []), i]); });
+    phases.push(Array.from(groups.values()).map((l) => l.map((i) => `${i + 1}.${byId(steps[i].member)?.name}`).join(" → ")).join(" ∥ "));
   }
+  const planText = `Plan (${steps.length} step${steps.length > 1 ? "s" : ""}, ∥ = parallel, → = one after the other): ${phases.join("  ⟶  ")}`;
+  await feed("Chief", "Team", planText, "note");
+  await say("chief", "assistant", `${planText}\n\n${steps.map((s, i) => `${i + 1}. ${byId(s.member)?.name}${s.after.length ? ` (after ${s.after.map((k) => k + 1).join(", ")})` : " (can start at once)"}: ${s.task.slice(0, 160)}`).join("\n")}`);
+  if (needsPc) await feed("Chief", "Team", wk ? "Each computer member works on its own computer, in parallel (max 3 at once)." : "Using this chat's shared computer, one step at a time.", "note");
 
-  const failures = results.filter((r) => /^Failed:|^⚠️|^❌|^Skipped:/i.test(r.trim())).length;
+  // 3) run: a step starts as soon as the steps it needs are finished AND its lane is free
+  const results: string[] = new Array(steps.length).fill("");
+  const laneTails = new Map<string, Promise<unknown>>();
+  const inLane = <T,>(key: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = laneTails.get(key) ?? Promise.resolve();
+    const p = prev.then(fn);
+    laneTails.set(key, p.catch(() => undefined));
+    return p;
+  };
+
+  const runOne = async (i: number): Promise<void> => {
+    const s = steps[i];
+    const who = byId(s.member)!;
+    try {
+      const deps = s.after.map((k) => `Result of step ${k + 1} (${byId(steps[k].member)?.name}):\n${results[k].slice(0, 2500)}`).join("\n\n");
+      await feed("Chief", who.name, `Step ${i + 1}: ${s.task}`, "task");
+      await say(who.id, "user", `📋 From Chief (step ${i + 1}):\n${s.task}`);
+      await say(who.id, "assistant", "▶ Got it — starting now.");
+      await updateTeam(uid, chatId, (t) => { t.working[who.id] = s.task.slice(0, 140); });
+      let lastLine = 0;
+      const onLine = (line: string) => {
+        if (Date.now() - lastLine < 2500) return;
+        lastLine = Date.now();
+        void updateTeam(uid, chatId, (t) => { t.working[who.id] = line.slice(0, 140); });
+      };
+      try {
+        const blocked = s.after.some((k) => FAILED.test(results[k].trim()));
+        if (blocked) {
+          results[i] = "Skipped: a required earlier step failed, so this step was not run with incomplete inputs.";
+          await say(who.id, "assistant", results[i]);
+        } else {
+          results[i] = await execMember(who, deps ? `${s.task}\n\n${deps}` : s.task, host, onLine, wk);
+        }
+      } catch (e) {
+        results[i] = `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
+      }
+      await feed(who.name, "Chief", results[i], "result");
+      await say(who.id, "assistant", results[i]);
+    } catch (e) {
+      results[i] = results[i] || `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
+    } finally {
+      await updateTeam(uid, chatId, (t) => { delete t.working[who.id]; });
+    }
+  };
+
+  const finished: Array<Promise<void>> = [];
+  steps.forEach((s, i) => {
+    finished[i] = (async () => {
+      await Promise.all(s.after.map((k) => finished[k]));
+      await inLane(laneOf(i), () => runOne(i));
+    })();
+  });
+  await Promise.all(finished);
+
+  const failures = results.filter((r) => FAILED.test(r.trim())).length;
   const report = await host.llm(
     personaOf(byId("chief")!),
     `Write the final report to the user in clear English (markdown). Start with one outcome line (use ❌ failed if the core goal failed, ⚠️ partly if any required step failed or was skipped, otherwise ✅ done), then what each member did, concrete results (links, names, files) and what still needs the user. Keep every "UNVERIFIED", "UNCHECKED", "FACT CHECK" and "VERIFIED:" line from the members exactly as written. Never invent anything and NEVER claim a skipped/failed step was completed.\n\nGOAL: ${a.goal}\nSTEPS WITH FAILURE/SKIP SIGNALS: ${failures}\n\n${steps.map((s, i) => `STEP ${i + 1} — ${byId(s.member)?.name} (${s.task.slice(0, 160)}):\n${results[i].slice(0, 1800)}`).join("\n\n")}`
