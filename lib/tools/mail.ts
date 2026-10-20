@@ -1,5 +1,5 @@
 // Server-only. ONE mail tool for every situation: it picks Gmail, Outlook, SMTP (app password) or Resend by itself,
-// falls back to the next one when a sender fails, never sends the same mail twice, and reports every result honestly.
+// falls back to the next one when a sender fails, never sends the same mail twice in a row, VERIFIES the send and reports every result honestly.
 import { createHash } from "crypto";
 import type { Def } from "./plugins";
 import { assertPublicHost, http } from "./net";
@@ -16,6 +16,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/;
 const AUTH = /\b(401|403|535|534|invalid_grant|unauthori[sz]ed|forbidden|expired|reconnect|EAUTH|permission|scope|invalid login)\b/i;
 const RATE = /\b(429|rate|quota|too many|daily limit|try again later|450|451|452)\b/i;
+const DUP_WINDOW_MS = 15 * 60_000; // identical mail to the same person within 15 minutes is treated as an accidental repeat
 
 class InputError extends Error {}
 
@@ -96,7 +97,10 @@ function smtpProv(raw: string): Prov | null {
           from, to: m.to.join(", "), ...(m.cc.length ? { cc: m.cc.join(", ") } : {}), ...(m.bcc.length ? { bcc: m.bcc.join(", ") } : {}),
           subject: m.subject, ...(m.html ? { html: m.body, text: strip(m.body) } : { text: m.body }),
         });
-        return `${m.to.join(", ")} (id ${s(info?.messageId, 60)})`;
+        const accepted: string[] = (info?.accepted ?? []).map((x: unknown) => String(x));
+        const rejected: string[] = (info?.rejected ?? []).map((x: unknown) => String(x));
+        if (!accepted.length) throw new Error(`the SMTP server accepted nobody${rejected.length ? " (rejected: " + rejected.join(", ") + ")" : ""}`);
+        return `${accepted.join(", ")} (id ${s(info?.messageId, 60)})${rejected.length ? ` — rejected: ${rejected.join(", ")}` : ""}`;
       } catch (e: any) {
         throw new Error(`SMTP${e?.code ? " " + e.code : ""}: ${s(e?.message, 160)}${e?.code === "EAUTH" ? " (wrong username or app password)" : ""}`);
       }
@@ -123,7 +127,14 @@ async function loadProviders(ctx: ToolCtx): Promise<{ provs: Prov[]; notes: stri
       id: "gmail", label: `Gmail${acct ? ` (${acct})` : ""}`,
       async send(m) {
         access ||= await oauthAccess(gp, c["oauth:google"], ctx);
-        return gmailSend(access, { to: m.to.join(", "), cc: m.cc.join(", ") || undefined, bcc: m.bcc.join(", ") || undefined, subject: m.subject, body: m.body, html: m.html });
+        const res = await gmailSend(access, { to: m.to.join(", "), cc: m.cc.join(", ") || undefined, bcc: m.bcc.join(", ") || undefined, subject: m.subject, body: m.body, html: m.html });
+        // PROOF: Gmail must give a message id, and that message must really sit in the Sent folder.
+        const id = /\(id ([A-Za-z0-9_-]+)\)/.exec(res)?.[1];
+        if (!id) throw new Error("Gmail returned no message id, so the email is NOT confirmed as sent");
+        const v = await http(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=minimal`, { headers: { Authorization: `Bearer ${access}` } }, 15_000).catch(() => null);
+        const labels: string[] = Array.isArray(v?.json?.labelIds) ? v!.json.labelIds : [];
+        if (v && v.status < 400 && !labels.includes("SENT")) throw new Error("Gmail accepted the message but it is not in the Sent folder, so it is NOT confirmed as sent");
+        return labels.includes("SENT") ? `${res} ✓ confirmed in Gmail Sent` : res;
       },
     });
   } else { off.push("Gmail"); if (broken.includes("oauth:google")) notes.push("Google login can't be read: press Reconnect for Google in Connectors."); }
@@ -142,7 +153,7 @@ async function loadProviders(ctx: ToolCtx): Promise<{ provs: Prov[]; notes: stri
           saveToSentItems: true,
         });
         if (r.status >= 400 || r.status === 0) throw new Error(`Outlook ${r.status || "network"}: ${s(r.json?.error?.message ?? r.text, 160)}`);
-        return m.to.join(", ");
+        return `${m.to.join(", ")} (Outlook accepted it, HTTP ${r.status})`;
       },
     });
   } else { off.push("Outlook"); if (broken.includes("oauth:microsoft")) notes.push("Microsoft login can't be read: press Reconnect."); }
@@ -162,7 +173,8 @@ async function loadProviders(ctx: ToolCtx): Promise<{ provs: Prov[]; notes: stri
             from, to: m.to, ...(m.cc.length ? { cc: m.cc } : {}), ...(m.bcc.length ? { bcc: m.bcc } : {}), subject: m.subject, ...(m.html ? { html: m.body } : { text: m.body }),
           });
           if (r.status >= 400 || r.status === 0) throw new Error(`Resend ${r.status || "network"}: ${s(r.json?.message ?? r.text, 160)}${r.status === 403 ? " (with onboarding@resend.dev it can only email your own address; verify a domain)" : ""}`);
-          return `${m.to.join(", ")} (id ${s(r.json?.id, 40)})`;
+          if (!r.json?.id) throw new Error("Resend returned no email id, so the email is NOT confirmed as sent");
+          return `${m.to.join(", ")} (id ${s(r.json.id, 40)})`;
         },
       });
     }
@@ -174,7 +186,7 @@ const NOTHING =
   "No email sender is connected for this chat. Tell the owner the quickest fix: Connectors → \"Email (SMTP / App password)\" " +
   "(Gmail: create an app password at myaccount.google.com/apppasswords, host smtp.gmail.com, port 465). Other options: Connectors → Google / Microsoft (OAuth), or a Resend key.";
 
-// ---------------- never send twice ----------------
+// ---------------- never send twice by accident ----------------
 async function claim(uid: string, m: Msg): Promise<{ dup: boolean; release: () => Promise<void> }> {
   const key = createHash("sha1").update(`${m.to.join(",").toLowerCase()}|${m.subject}|${m.body}`).digest("hex").slice(0, 40);
   const ref = getAdminDb().collection("users").doc(uid).collection("mailSent").doc(key);
@@ -182,7 +194,7 @@ async function claim(uid: string, m: Msg): Promise<{ dup: boolean; release: () =
   try { await ref.create(rec); }
   catch {
     const old = (await ref.get().catch(() => null))?.data() as { at?: number } | undefined;
-    if (old?.at && Date.now() - old.at < 6 * 3600_000) return { dup: true, release: async () => {} };
+    if (old?.at && Date.now() - old.at < DUP_WINDOW_MS) return { dup: true, release: async () => {} };
     await ref.set(rec).catch(() => {});
   }
   return { dup: false, release: async () => { await ref.delete().catch(() => {}); } };
@@ -192,12 +204,18 @@ type Outcome = { state: "sent" | "dup" | "failed"; text: string; via?: string; b
 
 async function deliver(m: Msg, ctx: ToolCtx, provs: Prov[], dead: Set<string>, force: boolean): Promise<Outcome> {
   const lock = force ? { dup: false, release: async () => {} } : await claim(ctx.uid, m);
-  if (lock.dup) return { state: "dup", text: "already sent in the last 6 hours (skipped; use force:true to send again)" };
+  if (lock.dup) return { state: "dup", text: "NOT SENT AGAIN: the same mail to the same person was already sent in the last 15 minutes (skipped; use force:true to send again)" };
   const errs: string[] = [];
   for (const p of provs) {
     if (dead.has(p.id)) continue;
-    try { return { state: "sent", text: await p.send(m), via: p.label }; }
-    catch (e) {
+    try {
+      const text = await p.send(m);
+      // receipt for the owner: what was REALLY sent, to whom, through which sender
+      void getAdminDb().collection("users").doc(ctx.uid).collection("mailLog")
+        .add({ at: Date.now(), chatId: ctx.chatId, to: m.to.join(", ").slice(0, 200), subject: m.subject.slice(0, 120), via: p.label, receipt: text.slice(0, 160) })
+        .catch(() => {});
+      return { state: "sent", text, via: p.label };
+    } catch (e) {
       const msg = e instanceof Error ? e.message : "failed";
       errs.push(`${p.label}: ${msg.slice(0, 140)}`);
       if (AUTH.test(msg) || RATE.test(msg)) dead.add(p.id);
@@ -228,18 +246,32 @@ export const MAIL_TOOLS: Def[] = [
     },
   },
   {
+    name: "mail.history", risk: "read", params: "limit?:number (default 10, max 30)",
+    description: "PROOF of work: the emails this agent really sent (time, recipient, subject, which sender, receipt). Use it when the owner asks whether an email was really sent.",
+    run: async (a, _c, ctx) => {
+      if (!ctx) throw new Error("Only available from a chat.");
+      const n = Math.min(30, Math.max(1, Math.floor(Number(a.limit)) || 10));
+      const snap = await getAdminDb().collection("users").doc(ctx.uid).collection("mailLog").orderBy("at", "desc").limit(80).get();
+      const rows = snap.docs.map((d) => d.data() as { at: number; chatId?: string; to: string; subject: string; via: string; receipt: string })
+        .filter((x) => x.chatId === ctx.chatId).slice(0, n);
+      return rows.length
+        ? rows.map((x) => `${new Date(x.at).toISOString().slice(0, 16).replace("T", " ")} UTC · to ${x.to} · "${x.subject}" · via ${x.via} · ${x.receipt}`).join("\n")
+        : "No email has been sent by this agent yet (nothing in the send log).";
+    },
+  },
+  {
     name: "mail.send", risk: "write",
     params: "to:string (one or several, comma separated), subject:string, body:string, cc?:string, bcc?:string, html?:boolean, via?:gmail|outlook|smtp|resend, force?:boolean",
-    description: "Send ONE email. Picks the connected sender by itself (Gmail, Outlook, SMTP, Resend), falls back to the next when one fails, and returns proof. This is the tool for ALL single emails.",
+    description: "Send ONE email. Picks the connected sender by itself (Gmail, Outlook, SMTP, Resend), falls back to the next when one fails, VERIFIES the send and returns a receipt. This is the tool for ALL single emails. Only say the email was sent when the result starts with EMAIL SENT.",
     run: async (a, _c, ctx) => {
       if (!ctx) throw new Error("Only available from a chat.");
       const m = buildMsg(a);
       const { provs, notes } = await loadProviders(ctx);
-      if (!provs.length) throw new Error(`${NOTHING}${notes.length ? " " + notes.join(" ") : ""}`);
+      if (!provs.length) throw new Error(`EMAIL NOT SENT. ${NOTHING}${notes.length ? " " + notes.join(" ") : ""}`);
       try {
         const r = await deliver(m, ctx, order(provs, s(a.via, 12)), new Set(), a.force === true);
         if (r.state === "sent") return `EMAIL SENT to ${r.text} via ${r.via}.`;
-        if (r.state === "dup") return `NOT SENT AGAIN: ${r.text}`;
+        if (r.state === "dup") throw new Error(`EMAIL NOT SENT. ${r.text}`);
         throw new Error(`EMAIL NOT SENT. Every sender failed: ${r.text}${notes.length ? " · " + notes.join(" ") : ""}. Fix the cause (see messages) or ask the owner to reconnect/add a sender.`);
       } finally { provs.forEach((p) => p.close?.()); }
     },
@@ -249,8 +281,8 @@ export const MAIL_TOOLS: Def[] = [
     params: "items:[{to, subject?, body?, cc?, name?, ...any fields}] (up to 200), subject?:string and body?:string as TEMPLATES with {{name}} placeholders filled from each item, html?:boolean, vars?:object, via?:gmail|outlook|smtp|resend, force?:boolean",
     description:
       "Send MANY emails in ONE call (up to 200). Either write subject/body per item, or give ONE template (subject, body with {{name}}, {{company}} ...) and per-person fields in each item. " +
-      "Senders are chosen and switched automatically, already-sent mails are never repeated, and the report says exactly which succeeded, failed or were not reached. " +
-      "If the report lists ✗ or … items, call it again with ONLY those items.",
+      "Senders are chosen and switched automatically, accidental repeats are skipped, every send is verified, and the report says exactly which succeeded, failed or were not reached. " +
+      "If the report lists ✗ or … items, call it again with ONLY those items. If nothing was sent the call fails with NOTHING WAS SENT.",
     run: async (a, _c, ctx) => {
       if (!ctx) throw new Error("Only available from a chat.");
       const list = (Array.isArray(a.items) ? a.items : []).filter((x): x is Item => Boolean(x) && typeof x === "object" && !Array.isArray(x));
@@ -258,7 +290,7 @@ export const MAIL_TOOLS: Def[] = [
       if (list.length > 200) throw new Error("At most 200 emails per call: split the list and call again for the rest.");
       const defaults: Defaults = { subject: s(a.subject, 300) || undefined, body: s(a.body, 100_000) || undefined, html: a.html === true, vars: a.vars && typeof a.vars === "object" ? (a.vars as Item) : undefined };
       const { provs: all, notes } = await loadProviders(ctx);
-      if (!all.length) throw new Error(`${NOTHING}${notes.length ? " " + notes.join(" ") : ""}`);
+      if (!all.length) throw new Error(`NOTHING WAS SENT. ${NOTHING}${notes.length ? " " + notes.join(" ") : ""}`);
       const provs = order(all, s(a.via, 12));
       const force = a.force === true;
       const dead = new Set<string>();
@@ -303,14 +335,17 @@ export const MAIL_TOOLS: Def[] = [
       });
       if (n("sent") > 10) lines.splice(Math.min(10, lines.length), 0, `(… ${n("sent") - 10} more ✓ not listed)`);
       const todo = res.map((r, i) => (r.state === "failed" || r.state === "pending" ? i + 1 : 0)).filter(Boolean);
-      return [
-        `MAIL REPORT: ${n("sent")} sent, ${n("dup")} skipped (already sent), ${n("failed")} failed, ${n("pending")} not attempted, of ${list.length}.`,
+      const report = [
+        `MAIL REPORT: ${n("sent")} sent, ${n("dup")} skipped (accidental repeat), ${n("failed")} failed, ${n("pending")} not attempted, of ${list.length}.`,
         via.size ? `Sent via: ${Array.from(via.entries()).map(([k, v]) => `${k} ×${v}`).join(", ")}.` : "",
         ...lines,
         todo.length
           ? `\nNOT DONE: items ${todo.slice(0, 60).map((x) => "#" + x).join(", ")}. Call mail.send_many again with ONLY these items (same template). Do not resend the ✓ ones. If a ✗ reason says the sender login/permission is bad, tell the owner exactly what to reconnect.`
           : "\nALL DONE: every email in this call was sent or already sent earlier.",
       ].filter(Boolean).join("\n");
+      // nothing went out: this is a FAILURE, never a success
+      if (n("sent") === 0 && n("dup") === 0) throw new Error(`NOTHING WAS SENT. ${report}${notes.length ? "\n" + notes.join(" ") : ""}`);
+      return report;
     },
   },
 ];
