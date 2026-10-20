@@ -6,6 +6,7 @@ import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import type { Chat } from "@/lib/chats";
 import { splitSuggestions } from "@/lib/suggest";
+import { useAnyActivity } from "@/lib/avatar-activity";
 import Link from "next/link";
 
 export default function Sidebar({
@@ -27,6 +28,7 @@ export default function Sidebar({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [q, setQ] = useState("");
+  const busy = useAnyActivity();
   const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
 
   const needle = q.trim().toLowerCase();
@@ -81,7 +83,7 @@ export default function Sidebar({
                 active ? "bg-panel2" : "hover:bg-panel2/60"
               }`}
             >
-              <BotAvatar color={chat.agentColor} size={34} />
+              <BotAvatar color={chat.agentColor} size={38} working={busy && active} />
               <div className="min-w-0 flex-1">
                 <span className="truncate text-sm font-medium text-ink">{chat.agentName}</span>
                 <p className="truncate text-xs text-muted">{last ? preview : "New chat"}</p>
