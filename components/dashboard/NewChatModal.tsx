@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Plus, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
-import { PRESET_AGENTS, AVATAR_COLORS, type AvatarColor } from "@/lib/bots";
+import { PRESET_AGENTS, AVATAR_COLORS, MASCOTS, type AvatarColor } from "@/lib/bots";
 import type { CustomAgent } from "@/lib/agents";
 
 type PickedAgent = { name: string; role?: string; color: AvatarColor };
@@ -23,7 +23,7 @@ export default function NewChatModal({
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
-  const [color, setColor] = useState<AvatarColor>("teal");
+  const [color, setColor] = useState<AvatarColor>("blue-calm");
   const [busy, setBusy] = useState(false);
 
   if (!open) return null;
@@ -31,7 +31,7 @@ export default function NewChatModal({
   function handleClose() {
     setCreating(false);
     setName("");
-    setColor("teal");
+    setColor("blue-calm");
     onClose();
   }
 
@@ -70,14 +70,14 @@ export default function NewChatModal({
             <p className="mb-3 text-xs text-muted">
               Pick a teammate to start with.
             </p>
-            <div className="max-h-64 space-y-1 overflow-y-auto">
+            <div className="max-h-72 space-y-1 overflow-y-auto">
               {PRESET_AGENTS.map((a) => (
                 <button
                   key={a.id}
                   onClick={() => onPick(a)}
                   className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-panel2"
                 >
-                  <BotAvatar color={a.color} size={30} />
+                  <BotAvatar color={a.color} size={38} />
                   <div className="min-w-0">
                     <div className="text-sm text-ink">{a.name}</div>
                     <div className="text-xs text-faint">{a.role}</div>
@@ -90,7 +90,7 @@ export default function NewChatModal({
                   onClick={() => onPick(a)}
                   className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-panel2"
                 >
-                  <BotAvatar color={a.color} size={30} />
+                  <BotAvatar color={a.color} size={38} />
                   <span className="text-sm text-ink">{a.name}</span>
                 </button>
               ))}
@@ -113,17 +113,22 @@ export default function NewChatModal({
             />
             <div>
               <p className="mb-2 text-xs text-muted">Avatar</p>
-              <div className="flex items-center gap-2">
+              <div className="grid grid-cols-5 gap-2">
                 {AVATAR_COLORS.map((c) => (
                   <button
                     type="button"
                     key={c}
+                    title={MASCOTS[c].label}
+                    aria-label={MASCOTS[c].label}
+                    aria-pressed={color === c}
                     onClick={() => setColor(c)}
-                    className={`rounded-full transition-transform ${
-                      color === c ? "scale-110 ring-2 ring-white/70" : ""
+                    className={`flex items-center justify-center rounded-xl p-1.5 transition-transform ${
+                      color === c
+                        ? "scale-105 bg-panel2 ring-2 ring-gold"
+                        : "hover:bg-panel2"
                     }`}
                   >
-                    <BotAvatar color={c} size={30} />
+                    <BotAvatar color={c} size={48} />
                   </button>
                 ))}
               </div>
