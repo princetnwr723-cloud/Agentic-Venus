@@ -1,6 +1,6 @@
 import type { Def } from "./plugins";
 import { getAdminDb } from "@/lib/firebase-admin";
-import { addMemoryServer, forgetMemoryServer, listSkills, recallSearch, saveSkillServer } from "@/lib/learning";
+import { addMemoryServer, appendProgress, forgetMemoryServer, listSkills, readAgentFiles, recallSearch, saveSkillServer, writeAgentFiles } from "@/lib/learning";
 import { installFromInput } from "@/lib/skill-install";
 import { COLLAB_TOOLS } from "./collab";
 
@@ -8,6 +8,46 @@ const s = (v: unknown, n = 4000) => String(v ?? "").trim().slice(0, n);
 const need = <T,>(ctx: T | undefined): T => { if (!ctx) throw new Error("This tool only works from a chat."); return ctx; };
 
 export const LEARNING_TOOLS: Def[] = [
+  {
+    name: "files.read", risk: "read", params: "",
+    description: "Read your own soul.md (who you are) and memory.md (what you know and did). They are also loaded into your prompt before every task.",
+    run: async (_a, _c, ctx) => {
+      const c = need(ctx);
+      const f = await readAgentFiles(c.uid, c.chatId);
+      return `# soul.md\n${f.soul}\n\n# memory.md\n${f.memory}`;
+    },
+  },
+  {
+    name: "memory.log", risk: "read", params: "line:string (one short line: what you did and the result, with proof)",
+    description: "Add one dated line to the progress log in your memory.md. Call it after finishing meaningful work so you stay good at this owner's tasks (never passwords, keys or private data).",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      await appendProgress(c.uid, c.chatId, s(a.line, 320));
+      return "Logged in memory.md.";
+    },
+  },
+  {
+    name: "memory.rewrite", risk: "write", params: "content:string (the COMPLETE new memory.md, markdown; keep the '## Progress log' section)",
+    description: "Rewrite your whole memory.md to organise it (merge duplicates, fix wrong notes). The owner approves it first.",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      const content = s(a.content, 14000);
+      if (content.length < 20) throw new Error("content is too short.");
+      await writeAgentFiles(c.uid, c.chatId, { memory: content });
+      return `memory.md rewritten (${content.length} characters).`;
+    },
+  },
+  {
+    name: "soul.update", risk: "write", params: "content:string (the COMPLETE new soul.md, markdown)",
+    description: "Change your soul.md (your identity, values and working style), for example when the owner tells you how you should behave from now on. The owner approves it first.",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      const content = s(a.content, 6000);
+      if (content.length < 20) throw new Error("content is too short.");
+      await writeAgentFiles(c.uid, c.chatId, { soul: content });
+      return `soul.md updated (${content.length} characters).`;
+    },
+  },
   {
     name: "recall.search", risk: "read", params: "query:string",
     description: "Search your own past: earlier chat messages, missions and phone-call summaries. Use it whenever the owner refers to something from before.",
