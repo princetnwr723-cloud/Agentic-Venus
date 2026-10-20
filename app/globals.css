@@ -35,6 +35,398 @@ body {
   border-radius: 6px;
 }
 
+/* ------------------------------------------------------------------ */
+/* Mascot avatars                                                      */
+/* ------------------------------------------------------------------ */
+
+.mv {
+  overflow: visible;
+}
+
+.mv-char,
+.mv-ant-l,
+.mv-ant-r,
+.mv-arm-l,
+.mv-arm-r,
+.mv-foot-l,
+.mv-foot-r,
+.mv-star,
+.mv-eye,
+.mv-pupil,
+.mv-lid,
+.mv-mouth,
+.mv-joyeye,
+.mv-wink,
+.mv-sweat,
+.mv-cheek,
+.mv-brows {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* ---- idle: calm, alive ---- */
+.mv-char {
+  transform-origin: 50% 100%;
+  animation: mv-bob 3.6s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-ant-l {
+  transform-origin: 92% 95%;
+  animation: mv-sway-l 2.8s ease-in-out infinite alternate;
+  animation-delay: var(--d, 0s);
+}
+.mv-ant-r {
+  transform-origin: 8% 95%;
+  animation: mv-sway-r 3.1s ease-in-out infinite alternate;
+  animation-delay: var(--d, 0s);
+}
+.mv-arm-l {
+  transform-origin: 82% 12%;
+  animation: mv-arm-l 2.6s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-arm-r {
+  transform-origin: 18% 12%;
+  animation: mv-arm-r 2.9s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-star {
+  animation: mv-twinkle 2.4s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-eye {
+  animation: mv-blink 4.6s infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-pupil {
+  animation: mv-look 7s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-lid {
+  animation: mv-lid 6s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-joyeye {
+  transform-origin: 50% 100%;
+  animation: mv-joy 1.9s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-wink {
+  transform-origin: 50% 70%;
+  animation: mv-wink 5.2s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.mv-sweat {
+  transform-origin: 50% 0%;
+  opacity: 0;
+}
+.mv-brows {
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+
+/* ---- working: under pressure ---- */
+.mv-working .mv-char {
+  animation: mv-tremble 0.26s linear infinite;
+}
+.mv-working .mv-ant-l {
+  animation: mv-wag-l 0.32s ease-in-out infinite alternate;
+}
+.mv-working .mv-ant-r {
+  animation: mv-wag-r 0.32s ease-in-out infinite alternate;
+  animation-delay: -0.16s;
+}
+.mv-working .mv-arm-l {
+  animation: mv-type-l 0.3s ease-in-out infinite;
+}
+.mv-working .mv-arm-r {
+  animation: mv-type-r 0.3s ease-in-out infinite;
+  animation-delay: -0.15s;
+}
+.mv-working .mv-foot-l {
+  animation: mv-step 0.34s ease-in-out infinite;
+}
+.mv-working .mv-foot-r {
+  animation: mv-step 0.34s ease-in-out infinite;
+  animation-delay: -0.17s;
+}
+.mv-working .mv-star {
+  animation: mv-flash 0.5s ease-in-out infinite;
+}
+.mv-working .mv-pupil {
+  animation: mv-flick 0.8s linear infinite;
+}
+.mv-working .mv-eye {
+  animation: mv-blink-fast 2s infinite;
+}
+.mv-working .mv-mouth {
+  animation: mv-talk 0.45s ease-in-out infinite;
+}
+.mv-working .mv-lid {
+  animation: none;
+  transform: translateY(-64px);
+}
+.mv-working .mv-brows {
+  opacity: 1;
+}
+.mv-working .mv-sweat {
+  animation: mv-sweat 1.25s ease-in infinite;
+}
+.mv-working .mv-sweat.mv-sweat-b {
+  animation-delay: 0.6s;
+}
+.mv-working .mv-cheek {
+  animation: mv-flush 0.6s ease-in-out infinite alternate;
+}
+
+/* animate={false} */
+.mv-still,
+.mv-still * {
+  animation: none !important;
+}
+
+@keyframes mv-bob {
+  0%,
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+  50% {
+    transform: translateY(-1.6%) scale(1.012, 0.99);
+  }
+}
+@keyframes mv-tremble {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  25% {
+    transform: translate(0.5%, -0.4%) rotate(1.4deg);
+  }
+  50% {
+    transform: translate(-0.4%, 0.3%) rotate(-1.2deg);
+  }
+  75% {
+    transform: translate(0.3%, 0.4%) rotate(1deg);
+  }
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+}
+@keyframes mv-blink {
+  0%,
+  90%,
+  100% {
+    transform: scaleY(1);
+  }
+  94% {
+    transform: scaleY(0.06);
+  }
+}
+@keyframes mv-blink-fast {
+  0%,
+  80%,
+  100% {
+    transform: scaleY(1);
+  }
+  86% {
+    transform: scaleY(0.06);
+  }
+}
+@keyframes mv-look {
+  0%,
+  18%,
+  100% {
+    transform: translate(0, 0);
+  }
+  24%,
+  40% {
+    transform: translate(16px, -3px);
+  }
+  46%,
+  62% {
+    transform: translate(-14px, 3px);
+  }
+  68% {
+    transform: translate(0, 0);
+  }
+}
+@keyframes mv-flick {
+  0%,
+  100% {
+    transform: translate(14px, -4px);
+  }
+  25% {
+    transform: translate(-14px, 3px);
+  }
+  50% {
+    transform: translate(10px, 6px);
+  }
+  75% {
+    transform: translate(-10px, -5px);
+  }
+}
+@keyframes mv-sway-l {
+  0% {
+    transform: rotate(-4deg);
+  }
+  100% {
+    transform: rotate(3deg);
+  }
+}
+@keyframes mv-sway-r {
+  0% {
+    transform: rotate(4deg);
+  }
+  100% {
+    transform: rotate(-3deg);
+  }
+}
+@keyframes mv-wag-l {
+  0% {
+    transform: rotate(-10deg);
+  }
+  100% {
+    transform: rotate(8deg);
+  }
+}
+@keyframes mv-wag-r {
+  0% {
+    transform: rotate(10deg);
+  }
+  100% {
+    transform: rotate(-8deg);
+  }
+}
+@keyframes mv-arm-l {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-9deg) translateY(-3%);
+  }
+}
+@keyframes mv-arm-r {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(9deg) translateY(-3%);
+  }
+}
+@keyframes mv-type-l {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-9%) rotate(-12deg);
+  }
+}
+@keyframes mv-type-r {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-9%) rotate(12deg);
+  }
+}
+@keyframes mv-step {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8%);
+  }
+}
+@keyframes mv-twinkle {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+  50% {
+    transform: scale(1.18) rotate(10deg);
+  }
+}
+@keyframes mv-flash {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.3) rotate(14deg);
+    filter: brightness(1.4);
+  }
+}
+@keyframes mv-lid {
+  0%,
+  74%,
+  100% {
+    transform: translateY(0);
+  }
+  80% {
+    transform: translateY(100px);
+  }
+  86% {
+    transform: translateY(0);
+  }
+  92% {
+    transform: translateY(34px);
+  }
+}
+@keyframes mv-joy {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(0.82);
+  }
+}
+@keyframes mv-wink {
+  0%,
+  88%,
+  100% {
+    transform: scaleY(1);
+  }
+  93% {
+    transform: scaleY(0.8);
+  }
+}
+@keyframes mv-talk {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.06, 0.88);
+  }
+}
+@keyframes mv-sweat {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.6);
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(130px) scale(1);
+  }
+}
+@keyframes mv-flush {
+  0% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
