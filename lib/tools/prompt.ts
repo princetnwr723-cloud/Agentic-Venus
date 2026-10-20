@@ -16,10 +16,20 @@ const HINTS: Record<string, string> = {
   smtp: "Email via SMTP / app password: used automatically by mail.send / mail.send_many.",
   webhook: "Post a message to the connected Slack/Discord channel.",
   identity: "Your own temporary email inbox for signing up to services and reading verification codes.",
+  social: "SOCIAL MEDIA of the owner. Start with social.accounts (which platforms are connected, which are not). Research: social.research (YouTube, X, Reddit) and social.my_posts (the owner's own numbers). Posting: social.post (text, link, picture) and social.post_video (a finished Venus Pro video from social.videos; the newest one by default) to one or several platforms at once. Every post asks the owner for approval. The result lists ✓ with a link or ✗ with a reason per platform: retry only the ✗ ones. If a result says \"still processing\", call social.finish exactly as printed. Write each caption natively for its platform (length, tone, hashtags). Never claim a post is live without a ✓ link.",
+  "oauth:youtube": "YouTube login (uploads, search, own channel). Use the social.* tools; raw API only through oauth_youtube.request.",
+  "oauth:x": "X (Twitter) login. Use the social.* tools.",
+  "oauth:linkedin": "LinkedIn login (own profile posts). Use the social.* tools.",
+  "oauth:meta": "Facebook Page + Instagram login. Use the social.* tools.",
+  "oauth:threads": "Threads login. Use the social.* tools.",
+  "oauth:tiktok": "TikTok login. Use the social.* tools (posts are private until the TikTok app is audited).",
+  "oauth:pinterest": "Pinterest login. Use the social.* tools.",
+  "oauth:reddit": "Reddit login. Use the social.* tools.",
 };
 
 const GROUP_TITLE = (src: string) =>
   src === "free" ? "Built in (always available)"
+  : src === "social" ? "Social media (YouTube, X, LinkedIn, Facebook, Instagram, Threads, TikTok, Pinterest, Reddit)"
   : src.startsWith("mcp:") ? `MCP server "${src.slice(4)}"`
   : src.startsWith("oauth:") ? `OAuth app "${src.slice(6)}"`
   : src.startsWith("api:") ? `API "${src.slice(4)}"`
@@ -64,6 +74,7 @@ export function toolPrompt(specs: ToolSpec[]): string {
     `\n\nWHICH TOOL FOR WHAT: ` +
     `send email → mail.send / mail.send_many; ` +
     `current facts/news/prices → web.search then web.read; ` +
+    `research or post on social media, upload a video → social.* (social.accounts first); ` +
     `phone a person → voice.call (approved first; you talk live and the summary comes back); ` +
     `tell the owner something → notify.send; ` +
     `long task → plan.set first; ` +
