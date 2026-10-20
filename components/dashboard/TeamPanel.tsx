@@ -53,7 +53,7 @@ export default function TeamPanel({ uid, chatId, chatName, onClose, onTalk }: {
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-3 border-b border-line px-3 py-2.5">
             <button onClick={() => setOpen(null)} className="text-muted hover:text-ink"><ChevronLeft size={18} /></button>
-            <BotAvatar color={member.color} size={32} />
+            <BotAvatar color={member.color} size={36} working={Boolean(working[member.id]) || busy} />
             <div className="min-w-0"><p className="text-sm font-medium text-ink">{member.name}</p><p className="truncate text-[11px] text-muted">{member.title} · {TOOL_LABEL[member.tool]}</p></div>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
@@ -80,7 +80,7 @@ export default function TeamPanel({ uid, chatId, chatName, onClose, onTalk }: {
               return (
                 <div key={id} className="flex items-center gap-3 border-b border-line px-4 py-3 hover:bg-panel2/60">
                   <button onClick={() => setOpen(id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
-                    <div className="relative"><BotAvatar color={m.color} size={36} />{working[id] && <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full bg-gold" />}</div>
+                    <div className="relative"><BotAvatar color={m.color} size={40} working={Boolean(working[id])} />{working[id] && <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full bg-gold" />}</div>
                     <div className="min-w-0"><p className="text-sm font-medium text-ink">{m.name} <span className="ml-1 rounded-full bg-panel2 px-2 py-0.5 text-[10px] font-normal text-muted">{TOOL_LABEL[m.tool]}</span></p><p className="truncate text-xs text-muted">{working[id] ? `Working: ${working[id]}` : m.title}</p></div>
                   </button>
                   {id !== "chief" && <button onClick={() => removeMember(uid, chatId, id)} className="text-faint hover:text-red-400"><Trash2 size={14} /></button>}
@@ -108,7 +108,7 @@ export default function TeamPanel({ uid, chatId, chatName, onClose, onTalk }: {
                     const on = team?.members.includes(m.id);
                     return (
                       <button key={m.id} disabled={on} onClick={() => addMember(uid, chatId, m.id)} className="flex items-start gap-2.5 rounded-xl border border-line bg-panel2 p-3 text-left hover:border-gold/60 disabled:opacity-50">
-                        <BotAvatar color={m.color} size={30} />
+                        <BotAvatar color={m.color} size={34} />
                         <div className="min-w-0"><p className="text-sm font-medium text-ink">{m.name} {on ? <span className="text-[10px] text-avatar-teal">added</span> : <Plus size={11} className="inline text-muted" />}</p><p className="text-[11px] text-muted">{m.title}</p><p className="mt-1 line-clamp-2 text-[11px] text-faint">{m.skill}</p></div>
                       </button>
                     );
