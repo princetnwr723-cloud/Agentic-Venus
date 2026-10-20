@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
+import { beginActivity } from "@/lib/avatar-activity";
 
 const mmss = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -12,10 +13,14 @@ const mmss = (ms: number) => {
 export default function WorkingBar({ label, startedAt, steps }: { label: string; startedAt: number; steps: string[] }) {
   const [now, setNow] = useState(Date.now());
   const [open, setOpen] = useState(false);
+
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // while this bar is on screen the agent avatars show the "under pressure" look
+  useEffect(() => beginActivity(), []);
 
   return (
     <div className="mx-auto w-full max-w-2xl px-6 pb-2">
