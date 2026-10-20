@@ -12,12 +12,13 @@ import { VISUAL_TOOLS } from "./visual";
 import { MAIL_TOOLS } from "./mail";
 import { PLAN_TOOLS } from "./plan";
 import { GMAIL_TOOLS } from "./gmail";
+import { SOCIAL_TOOLS, providerOfPlatform, socialTargets } from "./social";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
 import { oauthAccess } from "./oauth-token";
 import { assertPublicUrl, cut, http } from "./net";
 import { safeId, unpack } from "./catalog";
-import { OAUTH_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
+import { OAUTH_PROVIDERS, SOCIAL_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
 import { INJECTION_PATTERNS, wrapUntrusted } from "@/lib/shield";
 import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 
@@ -74,6 +75,8 @@ export async function buildCatalog(c: Conn, ctx?: ToolCtx): Promise<{ specs: Too
   const errors: string[] = [];
   for (const [id, defs] of Object.entries(ALL)) if (c[id]) specs.push(...defs.map((d) => toSpec(d, id)));
   if (c["oauth:google"]) specs.push(...GMAIL_TOOLS.map((d) => toSpec(d, "oauth:google")));
+  // Social media tools appear as soon as ANY social platform is connected.
+  if (SOCIAL_PROVIDERS.some((p) => c[`oauth:${p.id}`])) specs.push(...SOCIAL_TOOLS.map((d) => toSpec(d, "social")));
 
   const mcp = mcpEntries(c);
   const results = await Promise.allSettled(mcp.map(async (e) => mcpList(e.url, await mcpBearer(e, ctx))));
@@ -121,6 +124,21 @@ const brief = (it: unknown): string => {
 
 /** What the owner sees in the approval question. Batches list every recipient / file, not just the first 400 characters. */
 function summarize(name: string, args: Record<string, unknown>): string {
+  if (name.startsWith("social.")) {
+    const where = Array.isArray(args.platforms) ? args.platforms.join(", ") : String(args.platforms ?? args.platform ?? "");
+    const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+    const text = clip(args.caption ?? args.text ?? args.description ?? args.body, 300);
+    return [
+      `${name} → ${where || "?"}`,
+      args.title ? `Title: ${clip(args.title, 100)}` : "",
+      name === "social.post_video" ? `Video: ${args.video_id ? clip(args.video_id, 40) : "the newest finished Venus Pro video"}` : "",
+      text ? `Text: ${text}` : "",
+      args.link ? `Link: ${clip(args.link, 200)}` : "",
+      args.image_url ? `Picture: ${clip(args.image_url, 200)}` : "",
+      args.subreddit ? `Subreddit: r/${clip(args.subreddit, 40)}` : "",
+      name === "social.finish" ? "Completes a post that was still processing." : `Visibility: ${args.visibility ? clip(args.visibility, 20) : "public"}`,
+    ].filter(Boolean).join("\n");
+  }
   if (Array.isArray(args.items)) {
     const tpl = [args.subject ? `Subject: ${String(args.subject).slice(0, 100)}` : "", args.body ? `Text: ${String(args.body).replace(/\s+/g, " ").slice(0, 160)}` : ""].filter(Boolean).join("\n");
     return `${name} — ${args.items.length} item(s)${tpl ? "\n" + tpl : ""}\n` + args.items.slice(0, 12).map((it, i) => `${i + 1}. ${brief(it)}`).join("\n") + (args.items.length > 12 ? `\n… +${args.items.length - 12} more` : "");
@@ -186,6 +204,25 @@ export async function callTool(
       const access = await oauthAccess(p, raw, opts.ctx);
       return good(await def.run(args, [access], opts.ctx), name, def.risk);
     } catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Gmail failed.", risk: def.risk }; }
+  }
+
+  // Social media tools use the OAuth logins of the connected platforms (YouTube, X, LinkedIn, Meta, Threads, TikTok, Pinterest, Reddit).
+  if (src === "social") {
+    const def = SOCIAL_TOOLS.find((d) => d.name === name);
+    if (!def) return { ok: false, text: `Unknown tool "${name}".` };
+    const connected = SOCIAL_PROVIDERS.filter((p) => c[`oauth:${p.id}`]);
+    if (!connected.length) return { ok: false, text: "No social media account is connected for this chat. Tell the owner: open Connectors (plug icon), pick the platform and press Connect." };
+    const wanted = socialTargets(args).map(providerOfPlatform);
+    const auto = wanted.length > 0 && wanted.every((id) => isAuto(c, `oauth:${id}`));
+    if (mustAsk(def.risk, auto)) return ask(name, args, "write");
+    try {
+      const tokens: Record<string, string> = {}, errors: Record<string, string> = {};
+      await Promise.all(connected.map(async (p) => {
+        try { tokens[p.id] = await oauthAccess(p, c[`oauth:${p.id}`], opts.ctx); }
+        catch (e) { errors[p.id] = e instanceof Error ? e.message : `${p.label} login failed. Press Reconnect in Connectors.`; }
+      }));
+      return good(await def.run(args, [JSON.stringify({ tokens, errors })], opts.ctx), name, def.risk);
+    } catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Social media tool failed.", risk: def.risk }; }
   }
 
   if (src.startsWith("mcp_")) {
