@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { callWithFallback, type ChatMsg, type Fallback } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
+import { appendNote, mailGuardNote } from "@/lib/mail-guard";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -25,10 +26,13 @@ export async function POST(req: Request) {
       .slice(0, 2);
 
     const full: ChatMsg[] = systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages;
-    const { reply, used } = await callWithFallback({ provider, apiKey, model, messages: full }, fallbacks);
+    const { reply: raw, used } = await callWithFallback({ provider, apiKey, model, messages: full }, fallbacks);
 
     const inChars = full.reduce((n, m) => n + String(m.content ?? "").length, 0);
-    await addTokens(String(body.uid), estTokens(inChars + reply.length));
+    await addTokens(String(body.uid), estTokens(inChars + raw.length));
+
+    // honesty guard: never let the agent claim "email sent" without a real receipt
+    const reply = appendNote(raw, mailGuardNote(full, raw));
 
     return NextResponse.json({ reply, used });
   } catch (err) {
