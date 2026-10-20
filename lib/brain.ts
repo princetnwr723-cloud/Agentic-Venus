@@ -1,6 +1,7 @@
 import { auth } from "@/lib/firebase";
 import { bm25, jaccard } from "@/lib/bm25";
 import { parseSkillMarkdown as parseSkillMd, rankSkillList } from "@/lib/skills-core";
+import { agentFilesPrompt } from "@/lib/agent-files";
 import type { ProviderId } from "@/lib/providers";
 
 /** Memory and skills belong to ONE chat. Nothing is shared between chats. Storage is the server API (not client Firestore). */
@@ -11,7 +12,8 @@ export type Skill = {
   id: string; name: string; description: string; instructions: string; source?: string; auto?: boolean; tags?: string[];
   uses?: number; wins?: number; fails?: number; version?: number; trial?: boolean; disabled?: boolean; prev?: string; updatedAt: number;
 };
-export type Brain = { memories: Memory[]; skills: Skill[] };
+/** files = the agent's soul.md and memory.md (loaded into every prompt) */
+export type Brain = { memories: Memory[]; skills: Skill[]; files?: { soul: string; memory: string } };
 export type LlmEnv = { apiKeys: Partial<Record<ProviderId, string>>; provider: ProviderId; model: string };
 export type Verdict = "pass" | "partial" | "fail";
 
@@ -32,7 +34,7 @@ async function bcall<T = any>(s: Scope, action: string, extra: Record<string, un
 
 export async function loadBrain(s: Scope): Promise<Brain> {
   const d = await bcall<Brain>(s, "load");
-  return { memories: d.memories ?? [], skills: d.skills ?? [] };
+  return { memories: d.memories ?? [], skills: d.skills ?? [], files: d.files ?? undefined };
 }
 const readMem = async (s: Scope) => (await bcall<{ items: Memory[] }>(s, "mem_get")).items ?? [];
 const writeMem = (s: Scope, items: Memory[]) => bcall(s, "mem_set", { items });
@@ -114,12 +116,14 @@ export function rankSkills(skills: Skill[], text: string, n = 3): Skill[] {
 }
 
 /**
- * What goes into the agent's prompt: ITS role, what it knows about the owner, ITS memory, ITS skills (this chat only).
+ * What goes into the agent's prompt: soul.md + memory.md FIRST (read before every task), then ITS role, what it knows about the owner,
+ * ITS memory, ITS skills (this chat only).
  * noSkills = the caller (Venus Pro, Venus Code, team planning) has no skill loader, but the 2 skills that fit the job
  * are still injected in full, so e.g. a video-editing skill shapes how Venus Pro makes videos.
  */
 export function brainPrompt(brain: Brain, text: string, opts: { noSkills?: boolean } = {}): string {
   const parts: string[] = [];
+  if (brain.files && (brain.files.soul || brain.files.memory)) parts.push(agentFilesPrompt(brain.files));
   const role = brain.memories.find((m) => m.kind === "role");
   if (role) parts.push("## Your role (set by the user — always act in it)\n" + role.text);
   const profile = brain.memories.filter((m) => m.kind === "profile");
@@ -175,7 +179,7 @@ async function consolidate(s: Scope, env: LlmEnv) {
   await writeMem(s, [...keep, ...fresh]);
 }
 
-/** Self-improvement after a task (this chat only): score used skills, keep facts, make trial skills, store lessons, rewrite failing skills. */
+/** Self-improvement after a task (this chat only): log progress in memory.md, score used skills, keep facts, make trial skills, store lessons, rewrite failing skills. */
 export async function reflect(
   s: Scope, env: LlmEnv, brain: Brain,
   input: { task: string; outcome: string; steps?: string; verdict?: Verdict; skillsUsed?: string[] }
@@ -183,6 +187,10 @@ export async function reflect(
   const learned: string[] = [];
   const verdict = input.verdict ?? "pass";
   const used = input.skillsUsed ?? [];
+
+  // progress line in memory.md (kept even if the learning model call below fails)
+  void bcall(s, "files_log", { line: `${verdict}: ${input.task.replace(/\s+/g, " ").slice(0, 110)} → ${input.outcome.replace(/\s+/g, " ").slice(0, 170)}` }).catch(() => {});
+
   if (used.length) learned.push(...(await recordSkillOutcome(s, brain, used, verdict)));
 
   const usedSkills = brain.skills.filter((x) => used.includes(x.name));
