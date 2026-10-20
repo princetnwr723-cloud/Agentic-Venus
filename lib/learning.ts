@@ -4,6 +4,7 @@ import { bm25, jaccard } from "@/lib/bm25";
 import { callProvider } from "@/lib/ai-providers-server";
 import { loadAgent } from "@/lib/voice-calls";
 import { categoriesOf, rankSkillList } from "@/lib/skills-core";
+import { MEMORY_CAP, SOUL_CAP, addLogLine, agentFilesPrompt, defaultMemory, defaultSoul } from "@/lib/agent-files";
 
 export type Mem = { id: string; text: string; at: number; auto?: boolean; kind?: string; weight?: number };
 export type SkillDoc = {
@@ -16,6 +17,34 @@ const slug = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(
 const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s);
 const SECRET = /(password|passwd|api[_ -]?key|secret|token|card number|cvv|otp)\s*[:=]/i;
+
+// ---------------- soul.md + memory.md (one pair per chat/agent) ----------------
+export type AgentFiles = { soul: string; memory: string; soulIsDefault: boolean; memoryIsDefault: boolean };
+const filesDoc = (uid: string, chatId: string) => chatRef(uid, chatId).collection("brain").doc("files");
+
+export async function readAgentFiles(uid: string, chatId: string): Promise<AgentFiles> {
+  const [f, c] = await Promise.all([filesDoc(uid, chatId).get(), chatRef(uid, chatId).get()]);
+  const d = (f.data() ?? {}) as { soul?: string; memory?: string };
+  const name = String((c.data() as { agentName?: string } | undefined)?.agentName || "Agent");
+  const soul = String(d.soul ?? "").trim();
+  const memory = String(d.memory ?? "").trim();
+  return { soul: soul || defaultSoul(name), memory: memory || defaultMemory(), soulIsDefault: !soul, memoryIsDefault: !memory };
+}
+
+export async function writeAgentFiles(uid: string, chatId: string, patch: { soul?: string; memory?: string }) {
+  const upd: Record<string, unknown> = { updatedAt: Date.now() };
+  if (typeof patch.soul === "string") upd.soul = patch.soul.slice(0, SOUL_CAP);
+  if (typeof patch.memory === "string") upd.memory = patch.memory.slice(0, MEMORY_CAP);
+  await filesDoc(uid, chatId).set(upd, { merge: true });
+}
+
+/** Adds one dated line to the progress log in memory.md (never stores secrets). */
+export async function appendProgress(uid: string, chatId: string, line: string) {
+  const t = line.replace(/\s+/g, " ").trim().slice(0, 320);
+  if (t.length < 3 || SECRET.test(t)) return;
+  const f = await readAgentFiles(uid, chatId);
+  await writeAgentFiles(uid, chatId, { memory: addLogLine(f.memory, t) });
+}
 
 // ---------------- memory ----------------
 export async function readMem(uid: string, chatId: string): Promise<Mem[]> {
@@ -97,7 +126,7 @@ export async function saveSkillServer(
 
 // ---------------- what goes into every agent prompt (chat apps, calls, missions) ----------------
 export async function brainContext(uid: string, chatId: string, query = ""): Promise<{ role: string; mem: string }> {
-  const [mems, skills] = await Promise.all([readMem(uid, chatId), listSkills(uid, chatId)]);
+  const [mems, skills, files] = await Promise.all([readMem(uid, chatId), listSkills(uid, chatId), readAgentFiles(uid, chatId).catch(() => null)]);
   const role = mems.find((i) => i.kind === "role")?.text ?? "";
   const profile = mems.filter((i) => i.kind === "profile");
   let list = mems.filter((i) => i.kind !== "role" && i.kind !== "profile");
@@ -107,6 +136,7 @@ export async function brainContext(uid: string, chatId: string, query = ""): Pro
     list = [...top, ...heavy, ...list.slice(-4)].filter((m, i, a) => a.findIndex((x) => x.id === m.id) === i).slice(0, 18);
   }
   const parts: string[] = [];
+  if (files) parts.push(agentFilesPrompt(files)); // soul.md + memory.md are read before every task
   if (profile.length) parts.push("WHAT YOU KNOW ABOUT YOUR OWNER (use it naturally, never recite it):\n" + profile.slice(-30).map((m) => `- ${m.text}`).join("\n"));
   if (list.length) parts.push(list.map((m) => `- ${m.kind === "lesson" ? "(lesson) " : ""}${m.text}`).join("\n"));
   const live = skills.filter((s) => !s.disabled);
@@ -142,6 +172,9 @@ export async function learnFromRun(
 ): Promise<string[]> {
   const learned: string[] = [];
   try {
+    // progress goes into memory.md first, so even a failing learning step never loses it
+    await appendProgress(uid, chatId, `${input.verdict}: ${clip(input.task.replace(/\s+/g, " "), 110)} → ${clip(input.outcome.replace(/\s+/g, " "), 170)}`).catch(() => {});
+
     const agent = await loadAgent(uid, chatId);
     const skills = await listSkills(uid, chatId);
     const used = rankSkills(skills, input.task, 3);
