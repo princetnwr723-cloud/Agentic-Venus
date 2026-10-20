@@ -1,3 +1,5 @@
+"use client";
+
 import {
   Activity,
   Brain,
@@ -13,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
+import { useAnyActivity } from "@/lib/avatar-activity";
 import type { AvatarColor } from "@/lib/bots";
 
 function IconBtn({
@@ -92,6 +95,8 @@ export default function ChatHeader({
   hasComputer: boolean;
   pcPaused: boolean;
 }) {
+  const busy = useAnyActivity();
+
   const pcLabel = !hasComputer
     ? "Computer (not created yet)"
     : pcPaused
@@ -106,7 +111,7 @@ export default function ChatHeader({
         title="Open profile"
         className="flex min-w-0 items-center gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-panel2/60"
       >
-        <BotAvatar color={color} size={34} />
+        <BotAvatar color={color} size={40} working={busy || teamRunning} />
         <span className="min-w-0 truncate text-sm font-medium text-ink">
           {name}
         </span>
