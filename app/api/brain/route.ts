@@ -3,6 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { authFromRequest } from "@/lib/job-token";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { categoriesOf } from "@/lib/skills-core";
+import { appendProgress, readAgentFiles, writeAgentFiles } from "@/lib/learning";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -37,8 +38,26 @@ export async function POST(req: Request) {
 
     switch (action) {
       case "load": {
-        const [m, k] = await Promise.all([memRef.get(), skills.get()]);
-        return NextResponse.json({ memories: (m.data() as { items?: unknown[] } | undefined)?.items ?? [], skills: k.docs.map((d) => d.data()) });
+        const [m, k, files] = await Promise.all([memRef.get(), skills.get(), readAgentFiles(auth.uid, chatId).catch(() => null)]);
+        return NextResponse.json({
+          memories: (m.data() as { items?: unknown[] } | undefined)?.items ?? [],
+          skills: k.docs.map((d) => d.data()),
+          files: files ? { soul: files.soul, memory: files.memory } : null,
+        });
+      }
+      case "files_get":
+        return NextResponse.json(await readAgentFiles(auth.uid, chatId));
+      case "files_set": {
+        const patch: { soul?: string; memory?: string } = {};
+        if (typeof body.soul === "string") patch.soul = body.soul;
+        if (typeof body.memory === "string") patch.memory = body.memory;
+        if (!Object.keys(patch).length) return fail("Nothing to save.", 400);
+        await writeAgentFiles(auth.uid, chatId, patch);
+        return NextResponse.json({ ok: true });
+      }
+      case "files_log": {
+        await appendProgress(auth.uid, chatId, str(body.line, 400));
+        return NextResponse.json({ ok: true });
       }
       case "mem_get":
         return NextResponse.json({ items: ((await memRef.get()).data() as { items?: unknown[] } | undefined)?.items ?? [] });
