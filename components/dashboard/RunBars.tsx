@@ -1,3 +1,8 @@
+"use client";
+
+import { useEffect } from "react";
+import { beginActivity } from "@/lib/avatar-activity";
+
 export default function RunBars({
   venusRun, codeRun, teamRun,
 }: {
@@ -5,7 +10,15 @@ export default function RunBars({
   codeRun: { title: string; label: string } | null;
   teamRun: string | null;
 }) {
-  if (!venusRun && !codeRun && !teamRun) return null;
+  const active = Boolean(venusRun || codeRun || teamRun);
+
+  // while a video / code / team run is showing, the agent avatars show the "under pressure" look
+  useEffect(() => {
+    if (!active) return;
+    return beginActivity();
+  }, [active]);
+
+  if (!active) return null;
   return (
     <div className="mx-auto w-full max-w-2xl space-y-2 px-6 pb-2">
       {venusRun && (
