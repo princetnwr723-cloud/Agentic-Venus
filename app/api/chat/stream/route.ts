@@ -1,7 +1,8 @@
 import { waitUntil } from "@vercel/functions";
-import { streamProvider, type ChatMsg } from "@/lib/ai-providers-server";
+import { streamProvider, STREAM_ERROR_MARK, type ChatMsg } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
+import { mailGuardNote } from "@/lib/mail-guard";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -25,10 +26,25 @@ export async function POST(req: Request) {
 
   // count the answer while it streams, and charge the tokens when the stream ends
   let outBytes = 0;
+  let acc = "";
+  const dec = new TextDecoder();
   const counted = source.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) { outBytes += chunk.byteLength; controller.enqueue(chunk); },
-      flush() {
+      transform(chunk, controller) {
+        outBytes += chunk.byteLength;
+        acc += dec.decode(chunk, { stream: true });
+        controller.enqueue(chunk);
+      },
+      flush(controller) {
+        // honesty guard: never let the agent claim "email sent" without a real receipt
+        if (!acc.includes(STREAM_ERROR_MARK)) {
+          const note = mailGuardNote(messages, acc);
+          if (note) {
+            const extra = "\n\n" + note;
+            outBytes += extra.length;
+            controller.enqueue(new TextEncoder().encode(extra));
+          }
+        }
         const job = addTokens(uid, estTokens(inChars + outBytes)).catch(() => {});
         try { waitUntil(job); } catch { /* not on Vercel */ }
       },
