@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { Plus, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
-import { PRESET_AGENTS, AVATAR_COLORS, MASCOTS, type AvatarColor } from "@/lib/bots";
+import AvatarEditor from "@/components/AvatarEditor";
+import { PRESET_AGENTS, type AvatarColor } from "@/lib/bots";
 import type { CustomAgent } from "@/lib/agents";
 
 type PickedAgent = { name: string; role?: string; color: AvatarColor };
@@ -50,7 +51,7 @@ export default function NewChatModal({
       onClick={handleClose}
     >
       <div
-        className="w-full max-w-md rounded-xl2 border border-line bg-panel p-6"
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl2 border border-line bg-panel p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -111,28 +112,7 @@ export default function NewChatModal({
               placeholder="Agent name"
               className="w-full rounded-lg border border-line bg-bg px-3.5 py-2.5 text-sm text-ink placeholder:text-faint focus:border-gold"
             />
-            <div>
-              <p className="mb-2 text-xs text-muted">Avatar</p>
-              <div className="grid grid-cols-5 gap-2">
-                {AVATAR_COLORS.map((c) => (
-                  <button
-                    type="button"
-                    key={c}
-                    title={MASCOTS[c].label}
-                    aria-label={MASCOTS[c].label}
-                    aria-pressed={color === c}
-                    onClick={() => setColor(c)}
-                    className={`flex items-center justify-center rounded-xl p-1.5 transition-transform ${
-                      color === c
-                        ? "scale-105 bg-panel2 ring-2 ring-gold"
-                        : "hover:bg-panel2"
-                    }`}
-                  >
-                    <BotAvatar color={c} size={48} />
-                  </button>
-                ))}
-              </div>
-            </div>
+            <AvatarEditor value={color} onChange={setColor} />
             <div className="flex gap-2">
               <button
                 type="button"
