@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Copy, Mail, RefreshCw, Users, X } from "lucide-react";
+import { doc, updateDoc } from "firebase/firestore";
 import BotAvatar from "@/components/BotAvatar";
+import AvatarEditor from "@/components/AvatarEditor";
+import { auth, db } from "@/lib/firebase";
+import { avatarFor, setAvatarOverride, useAvatarStore } from "@/lib/avatar-activity";
 import { browserCreate, browserOverview } from "@/lib/mail-browser";
 import type { AvatarColor } from "@/lib/bots";
 
@@ -10,7 +14,6 @@ type MailItem = { id: string; from: string; domain: string; subject: string; at:
 type Service = { domain: string; mails: number; lastAt: string; lastSubject: string; codes: string[]; used: boolean };
 type LogRow = { at: number; kind: string; site: string; text: string };
 type Overview = { enabled: boolean; address: string | null; mails: MailItem[]; services: Service[]; log: LogRow[]; mailError?: string };
-type AgentFiles = { soul: string; memory: string };
 
 const when = (v: string | number) => { const d = new Date(v); return isNaN(d.getTime()) ? "" : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); };
 const KIND: Record<string, string> = { created: "📬 inbox created", mail: "✉️ mail arrived", otp: "🔑 code arrived", used: "✍️ email used" };
@@ -24,19 +27,18 @@ export default function IdentityPanel({
   onEmailCreated: (placeholder: string) => void;
   cooperation: boolean; onToggleCooperation: (on: boolean) => void;
 }) {
-  const [tab, setTab] = useState<"profile" | "email" | "activity">("profile");
+  const [tab, setTab] = useState<"profile" | "avatar" | "email" | "activity">("profile");
   const [data, setData] = useState<Overview | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [openMail, setOpenMail] = useState<string | null>(null);
   const [copied, setCopied] = useState("");
 
-  // soul.md + memory.md
-  const [saved, setSaved] = useState<AgentFiles | null>(null);
-  const [draft, setDraft] = useState<AgentFiles>({ soul: "", memory: "" });
-  const [fileTab, setFileTab] = useState<"soul" | "memory">("soul");
-  const [fileMsg, setFileMsg] = useState("");
-  const [fileBusy, setFileBusy] = useState(false);
+  useAvatarStore();
+  const shown = avatarFor(chatId, color);
+  const [draftAv, setDraftAv] = useState<AvatarColor>(color);
+  const [savingAv, setSavingAv] = useState(false);
+  const [savedAv, setSavedAv] = useState(false);
 
   const call = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
     const res = await fetch("/api/identity", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await getToken()) }, body: JSON.stringify({ action, chatId, ...extra }) });
@@ -44,31 +46,6 @@ export default function IdentityPanel({
     if (!res.ok) throw new Error(d?.error || "Request failed.");
     return d;
   }, [chatId, getToken]);
-
-  const brainCall = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
-    const res = await fetch("/api/brain", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await getToken()) }, body: JSON.stringify({ action, chatId, ...extra }) });
-    const d = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(d?.error || "Request failed.");
-    return d;
-  }, [chatId, getToken]);
-
-  async function loadFiles() {
-    try {
-      const d = await brainCall("files_get");
-      const f = { soul: String(d.soul ?? ""), memory: String(d.memory ?? "") };
-      setSaved(f); setDraft(f); setFileMsg("");
-    } catch (e) { setFileMsg(e instanceof Error ? e.message : "Could not load soul.md / memory.md."); }
-  }
-
-  async function saveFile(which: "soul" | "memory") {
-    setFileBusy(true); setFileMsg("");
-    try {
-      await brainCall("files_set", { [which]: draft[which] });
-      setSaved((p) => ({ ...(p ?? { soul: "", memory: "" }), [which]: draft[which] }));
-      setFileMsg(`${which}.md saved. The agent reads it before every task.`);
-    } catch (e) { setFileMsg(e instanceof Error ? e.message : "Could not save."); }
-    setFileBusy(false);
-  }
 
   const load = useCallback(async () => {
     setBusy(true); setErr("");
@@ -86,11 +63,25 @@ export default function IdentityPanel({
   }, [call, chatId]);
 
   useEffect(() => { if (open) { setData(null); void load(); } }, [open, chatId, load]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (open) { setSaved(null); void loadFiles(); } }, [open, chatId]);
+  useEffect(() => { if (open) setDraftAv(avatarFor(chatId, color)); }, [open, chatId, color]);
   if (!open) return null;
 
   const copy = (v: string) => { navigator.clipboard?.writeText(v); setCopied(v); setTimeout(() => setCopied(""), 1200); };
+
+  async function saveAvatar() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) { setErr("Please sign in again."); return; }
+    setSavingAv(true); setErr("");
+    try {
+      await updateDoc(doc(db, "users", uid, "chats", chatId), { agentColor: draftAv });
+      setAvatarOverride(chatId, draftAv);
+      setSavedAv(true);
+      setTimeout(() => setSavedAv(false), 1500);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not save the avatar.");
+    }
+    setSavingAv(false);
+  }
 
   async function enable() {
     setBusy(true); setErr("");
@@ -115,21 +106,20 @@ export default function IdentityPanel({
     setBusy(false);
   }
   const row = "flex justify-between gap-3 border-b border-line py-2 text-sm";
-  const dirty = saved ? draft[fileTab] !== saved[fileTab] : false;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/60" onClick={onClose}>
       <aside className="flex h-full w-full max-w-[480px] flex-col border-l border-line bg-panel" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-3 border-b border-line px-5 py-4">
-          <BotAvatar color={color} size={44} />
+          <BotAvatar color={shown} size={52} />
           <div className="min-w-0 flex-1"><p className="truncate text-base font-semibold text-ink">{name}</p><p className="truncate text-xs text-muted">{role || presetRole || "No role yet — tell it in chat, e.g. “you are my CEO”"}</p></div>
           <button onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
         <div className="flex gap-1 border-b border-line px-4 py-2 text-xs">
-          {([["profile", "Profile"], ["email", "Email"], ["activity", "Activity"]] as const).map(([k, l]) => (
+          {([["profile", "Profile"], ["avatar", "Avatar"], ["email", "Email"], ["activity", "Activity"]] as const).map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} className={`rounded-md px-3 py-1.5 ${tab === k ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{l}</button>
           ))}
-          <button onClick={() => { void load(); void loadFiles(); }} title="Refresh" className="ml-auto rounded-md p-1.5 text-muted hover:text-ink"><RefreshCw size={14} className={busy ? "animate-spin" : ""} /></button>
+          <button onClick={load} title="Refresh" className="ml-auto rounded-md p-1.5 text-muted hover:text-ink"><RefreshCw size={14} className={busy ? "animate-spin" : ""} /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {err && <p className="mb-3 whitespace-pre-wrap break-words rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">{err}</p>}
@@ -168,38 +158,20 @@ export default function IdentityPanel({
                   </button>
                 </div>
               </div>
+            </div>
+          )}
 
-              <div className="mt-4 rounded-lg border border-line p-3">
-                <p className="text-sm font-medium text-ink">Soul &amp; Memory</p>
-                <p className="mt-1 text-[11px] leading-relaxed text-muted">
-                  <b className="text-ink">soul.md</b> = who this agent is and how it works. <b className="text-ink">memory.md</b> = what it knows and what it has done.
-                  The agent reads both before every task (chat, code, video, team, calls, missions). After finished work the system adds a line to the progress log, so the agent keeps getting better. You can edit both here.
-                </p>
-                <div className="mt-3 flex gap-1 text-xs">
-                  {(["soul", "memory"] as const).map((k) => (
-                    <button key={k} onClick={() => { setFileTab(k); setFileMsg(""); }} className={`rounded-md px-3 py-1.5 font-mono ${fileTab === k ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{k}.md</button>
-                  ))}
-                </div>
-                {saved === null ? (
-                  <p className="mt-2 text-xs text-faint">Loading…</p>
-                ) : (
-                  <>
-                    <textarea
-                      value={draft[fileTab]}
-                      onChange={(e) => setDraft((d) => ({ ...d, [fileTab]: e.target.value }))}
-                      rows={14}
-                      spellCheck={false}
-                      className="mt-2 w-full resize-y rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink placeholder:text-faint focus:border-gold focus:outline-none"
-                    />
-                    <div className="mt-2 flex items-center gap-3">
-                      <button onClick={() => void saveFile(fileTab)} disabled={fileBusy || !dirty} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-40">{fileBusy ? "Saving…" : `Save ${fileTab}.md`}</button>
-                      {dirty && <button onClick={() => setDraft((d) => ({ ...d, [fileTab]: saved[fileTab] }))} className="text-xs text-muted underline">Undo changes</button>}
-                      <span className="ml-auto text-[10px] text-faint">{draft[fileTab].length} / {fileTab === "soul" ? 6000 : 14000}</span>
-                    </div>
-                  </>
-                )}
-                {fileMsg && <p className="mt-2 text-[11px] text-muted">{fileMsg}</p>}
-              </div>
+          {tab === "avatar" && (
+            <div>
+              <AvatarEditor value={draftAv} onChange={setDraftAv} />
+              <button
+                type="button"
+                onClick={saveAvatar}
+                disabled={savingAv}
+                className="mt-4 w-full rounded-lg bg-white py-2.5 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
+              >
+                {savingAv ? "Saving…" : savedAv ? "Saved ✓" : "Save avatar"}
+              </button>
             </div>
           )}
 
