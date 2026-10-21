@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Key, LogOut, Plus, Settings, Search, AudioLines } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import type { Chat } from "@/lib/chats";
 import { splitSuggestions } from "@/lib/suggest";
-import { useAnyActivity } from "@/lib/avatar-activity";
+import { avatarFor, setActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import Link from "next/link";
 
 export default function Sidebar({
@@ -29,7 +29,13 @@ export default function Sidebar({
   const [menuOpen, setMenuOpen] = useState(false);
   const [q, setQ] = useState("");
   const busy = useAnyActivity();
+  useAvatarStore();
   const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
+
+  // tells the header which chat is open (so a changed avatar shows there too)
+  useEffect(() => {
+    setActiveChat(activeId);
+  }, [activeId]);
 
   const needle = q.trim().toLowerCase();
   const shown = needle
@@ -83,7 +89,7 @@ export default function Sidebar({
                 active ? "bg-panel2" : "hover:bg-panel2/60"
               }`}
             >
-              <BotAvatar color={chat.agentColor} size={38} working={busy && active} />
+              <BotAvatar color={avatarFor(chat.id, chat.agentColor)} size={38} working={busy && active} />
               <div className="min-w-0 flex-1">
                 <span className="truncate text-sm font-medium text-ink">{chat.agentName}</span>
                 <p className="truncate text-xs text-muted">{last ? preview : "New chat"}</p>
