@@ -1,5 +1,61 @@
-// The 10 mascot avatars. Old chats saved one of the 6 legacy colour names;
-// resolveMascot() maps those to a mascot so nothing breaks.
+// Mascot avatars: 15 expressions x ANY colour.
+// An avatar value is one of:
+//   - a preset id            "red-calm"
+//   - a custom value         "love:#ff3ea5"   (expression:#hex)
+//   - an old colour name     "teal" (still works, mapped to a preset)
+
+export type MascotExpr =
+  | "fierce"
+  | "rogue"
+  | "wink"
+  | "wow"
+  | "joy"
+  | "sleepy"
+  | "calm"
+  | "love"
+  | "cool"
+  | "sad"
+  | "dizzy"
+  | "starry"
+  | "tongue"
+  | "shy"
+  | "nerd";
+
+export const EXPRESSIONS: MascotExpr[] = [
+  "calm",
+  "joy",
+  "wink",
+  "wow",
+  "fierce",
+  "rogue",
+  "sleepy",
+  "love",
+  "cool",
+  "sad",
+  "dizzy",
+  "starry",
+  "tongue",
+  "shy",
+  "nerd",
+];
+
+export const EXPRESSION_LABELS: Record<MascotExpr, string> = {
+  calm: "Calm",
+  joy: "Happy",
+  wink: "Wink",
+  wow: "Surprised",
+  fierce: "Fierce",
+  rogue: "Star cheeks",
+  sleepy: "Sleepy",
+  love: "Love",
+  cool: "Cool",
+  sad: "Sad",
+  dizzy: "Dizzy",
+  starry: "Starstruck",
+  tongue: "Tongue out",
+  shy: "Shy",
+  nerd: "Nerd",
+};
 
 export type MascotId =
   | "red-fierce"
@@ -15,29 +71,23 @@ export type MascotId =
 
 export type LegacyColor = "teal" | "amber" | "violet" | "sky" | "coral" | "sage";
 
-export type AvatarColor = MascotId | LegacyColor;
+export type CustomAvatar = `${MascotExpr}:#${string}`;
 
-export type MascotTheme = "red" | "redFelt" | "orange" | "blue" | "green" | "purple";
-export type MascotExpr = "fierce" | "wink" | "wow" | "joy" | "sleepy" | "calm";
+export type AvatarColor = MascotId | LegacyColor | CustomAvatar;
 
-export type MascotDef = {
-  label: string;
-  theme: MascotTheme;
-  expr: MascotExpr;
-  stars?: boolean;
-};
+export type MascotDef = { label: string; expr: MascotExpr; hex: string };
 
 export const MASCOTS: Record<MascotId, MascotDef> = {
-  "red-fierce": { label: "Red · fierce", theme: "red", expr: "fierce" },
-  "orange-wink": { label: "Orange · wink", theme: "orange", expr: "wink" },
-  "blue-wow": { label: "Blue · surprised", theme: "blue", expr: "wow" },
-  "green-joy": { label: "Green · happy", theme: "green", expr: "joy" },
-  "purple-star": { label: "Purple · star cheeks", theme: "purple", expr: "fierce", stars: true },
-  "red-sleepy": { label: "Red · sleepy", theme: "redFelt", expr: "sleepy" },
-  "orange-calm": { label: "Orange · calm", theme: "orange", expr: "calm" },
-  "blue-calm": { label: "Blue · calm", theme: "blue", expr: "calm" },
-  "purple-calm": { label: "Purple · calm", theme: "purple", expr: "calm" },
-  "red-calm": { label: "Red · calm", theme: "redFelt", expr: "calm" },
+  "red-fierce": { label: "Red · fierce", expr: "fierce", hex: "#ee1216" },
+  "orange-wink": { label: "Orange · wink", expr: "wink", hex: "#ff690c" },
+  "blue-wow": { label: "Blue · surprised", expr: "wow", hex: "#1e88f0" },
+  "green-joy": { label: "Green · happy", expr: "joy", hex: "#52b438" },
+  "purple-star": { label: "Purple · star cheeks", expr: "rogue", hex: "#7a2cd6" },
+  "red-sleepy": { label: "Red · sleepy", expr: "sleepy", hex: "#ec3220" },
+  "orange-calm": { label: "Orange · calm", expr: "calm", hex: "#ff690c" },
+  "blue-calm": { label: "Blue · calm", expr: "calm", hex: "#1e88f0" },
+  "purple-calm": { label: "Purple · calm", expr: "calm", hex: "#7a2cd6" },
+  "red-calm": { label: "Red · calm", expr: "calm", hex: "#ec3220" },
 };
 
 export const AVATAR_COLORS: MascotId[] = Object.keys(MASCOTS) as MascotId[];
@@ -51,10 +101,28 @@ const LEGACY: Record<LegacyColor, MascotId> = {
   sage: "green-joy",
 };
 
-export function resolveMascot(color: string | null | undefined): MascotId {
-  if (color && Object.prototype.hasOwnProperty.call(MASCOTS, color)) return color as MascotId;
-  if (color && Object.prototype.hasOwnProperty.call(LEGACY, color)) return LEGACY[color as LegacyColor];
-  return "blue-calm";
+const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+
+export function parseAvatar(value: string | null | undefined): { expr: MascotExpr; hex: string } {
+  const v = String(value ?? "").trim();
+  if (has(MASCOTS, v)) {
+    const m = MASCOTS[v as MascotId];
+    return { expr: m.expr, hex: m.hex };
+  }
+  if (has(LEGACY, v)) {
+    const m = MASCOTS[LEGACY[v as LegacyColor]];
+    return { expr: m.expr, hex: m.hex };
+  }
+  const c = /^([a-z]+):(#[0-9a-fA-F]{6})$/.exec(v);
+  if (c && (EXPRESSIONS as string[]).includes(c[1])) {
+    return { expr: c[1] as MascotExpr, hex: c[2].toLowerCase() };
+  }
+  const d = MASCOTS["blue-calm"];
+  return { expr: d.expr, hex: d.hex };
+}
+
+export function makeAvatar(expr: MascotExpr, hex: string): AvatarColor {
+  return `${expr}:${hex.toLowerCase()}` as AvatarColor;
 }
 
 export type PresetAgent = {
