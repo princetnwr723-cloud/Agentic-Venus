@@ -12,6 +12,7 @@ import { VISUAL_TOOLS } from "./visual";
 import { MAIL_TOOLS } from "./mail";
 import { PLAN_TOOLS } from "./plan";
 import { GMAIL_TOOLS } from "./gmail";
+import { REVERSE_TOOLS } from "./reverse";
 import { SOCIAL_TOOLS, providerOfPlatform, socialTargets } from "./social";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
@@ -29,7 +30,7 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
@@ -222,7 +223,7 @@ export async function callTool(
         catch (e) { errors[p.id] = e instanceof Error ? e.message : `${p.label} login failed. Press Reconnect in Connectors.`; }
       }));
       return good(await def.run(args, [JSON.stringify({ tokens, errors })], opts.ctx), name, def.risk);
-    } catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Social media tool failed.", risk: def.risk }; }
+    } catch (e) { return { ok: false, text: (e instanceof Error ? e.message : "Social media tool failed.") + " Do not use the computer or a browser for this: fix the arguments and call the same social tool once more, or tell the owner exactly what is blocked.", risk: def.risk }; }
   }
 
   if (src.startsWith("mcp_")) {

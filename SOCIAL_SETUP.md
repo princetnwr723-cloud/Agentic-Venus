@@ -13,7 +13,12 @@ Gmail login pehle se tha (`google` provider). Wo waisa hi chal raha hai.
 | `lib/tools/oauth-identify.ts` | Har platform par "kis account se login hua" dikhata hai |
 | `app/api/connectors/oauth/start/route.ts` | Social providers ke authorize URL (PKCE, comma scopes, client_key) |
 | `app/api/connectors/oauth/callback/route.ts` | Token exchange har platform ke style me, Meta/Threads long-lived swap |
-| `lib/tools/social.ts` | **Naya.** `social.*` tools |
+| `lib/tools/social.ts` | **Naya.** `social.*` tools (video title/id/latest se milta hai, YouTube ke errors saaf, research web fallback ke saath) |
+| `lib/social-intent.ts` | **Naya.** Router guard: upload / post / research hamesha social tool se, PC se kabhi nahi |
+| `lib/intent.ts` | Router ko social-intent guard + REA refusal mila |
+| `lib/rea-policy.ts`, `lib/tools/reverse.ts` | **Naya.** REA (Reverse Engineer Anything) built-in: `reverse.guide` tool + rules |
+| `lib/pc-toolbelt.ts` | Computer me Node 22 + `rea-agents` install, REA aur social rules prompt me |
+| `lib/tools/catalog.ts` | `reverse.guide` free pack me
 | `lib/tools/registry.ts` | social tools ko catalog aur approval flow me jodta hai |
 | `lib/tools/prompt.ts` | Agent ko social tools ka use batata hai |
 | `lib/connector-announce.ts` | Chat me "Agent updated" message ke liye social text |
@@ -74,3 +79,13 @@ Chat route Vercel par 60 second tak chalta hai. Video seedha Supabase se downloa
 - Type-check: naye/badle sab files saaf.
 - Mocked tests: 33 tool checks (har platform ka request format, headers, chunk ranges, approval gating, untrusted-output wrapping) + 5 callback checks (PKCE, Basic auth, Meta long-lived swap, galat account par kuch save nahi, replay/tamper refuse). Repo ke apne 38 tests bhi pass.
 - **Live platforms par test nahi hua** (mere paas tumhare app credentials nahi hain). Endpoints official docs se verify kiye gaye. Sabse kam verified hisse: Pinterest video pin, Threads, Facebook video chunk upload. Pehli baar chalate waqt in par error aaye to uska text agent ke result me poora dikhega.
+
+## 7. REA (Reverse Engineer Anything) built-in
+
+- Agent ka computer ab `rea` command ke saath aata hai (npm `rea-agents`, Node 22+). Chat me `reverse.guide` tool playbook deta hai: kya allowed hai, kaise analyse karna hai, aur "free unlimited version" kaise banana hai.
+- "Free unlimited version" ka matlab: tool ko analyse karo (SEEN / INFERRED / UNKNOWN), phir **owner ka apna** clean-room version open-source libraries se banao. Apna code hai, isliye uspe koi limit nahi.
+- **Nahi hoga:** crack, keygen, licence / paywall / quota / rate-limit bypass, DRM ya watermark hatana, kisi aur ka account ya key. Aisi request par agent ek line me mana karke legal rasta batata hai (REA ka apna disclaimer bhi yahi hai).
+
+## 8. Dobara upload wali dikkat (fix)
+
+Pehle "ek aur video upload karo" router ko "computer ka kaam" lagta tha, isliye agent browser se upload karne lagta tha. Ab: (1) router me guard hai jo social upload/post/research ko chat tool par hi rakhta hai, (2) prompt me rule hai ki upload hamesha `social.post_video`, (3) video `video_id` se, exact title se, "latest" se ya brief ke shabdon se mil jata hai, (4) fail hone par error me video ids aur "computer mat use karo" likha aata hai.

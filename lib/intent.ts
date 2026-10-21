@@ -1,4 +1,6 @@
 import { repoFileIntent } from "@/lib/repo-intent";
+import { socialToolIntent } from "@/lib/social-intent";
+import { REA_REFUSAL, reaBlocked } from "@/lib/rea-policy";
 
 export type Intent = "chat" | "set_role" | "assemble" | "pc" | "code" | "video" | "team" | "remember" | "forget" | "clarify";
 export type Then = "pc" | "assemble" | "team" | "code";
@@ -14,8 +16,8 @@ HOW THE AGENT WORKS: real work that needs a live computer the user can watch is 
 INTENTS
 - set_role: the user tells you WHO you are or gives your job ("you are my CEO", "from now on you are the lead developer of this project", "tum meri company ke head ho"). Put the role in one sentence in "role". If the same message ALSO asks for work (read the repo, assign a team...), put those steps in "then" and the remaining work as ONE self-contained instruction in "task".
 - assemble: the user asks you to hire / assemble / assign / set up a team. Nothing is started.
-- chat: questions, discussion, advice, writing, brainstorming, opinions, simple status, small lookups, AND every action a connected tool can do directly: sending, reading or searching email (gmail.*, email.*), messages (whatsapp/sms/telegram/slack), Google Sheets/Calendar/Drive (oauth_google), and adding / editing / deleting files in a GitHub repo (github.put_files, or repo.write_file + repo.push when the repo is cloned). This stays "chat" even for MANY recipients or files: the chat calls the tool. NEVER "pc" or "code" for these. Leave "reply" empty.
-- pc: ONE job that needs a live computer (see above). If no tool call can do it, it is pc.
+- chat: questions, discussion, advice, writing, brainstorming, opinions, simple status, small lookups, AND every action a connected tool can do directly: sending, reading or searching email (gmail.*, email.*), messages (whatsapp/sms/telegram/slack), Google Sheets/Calendar/Drive (oauth_google), and posting, UPLOADING an already finished Venus Pro video (also "upload another one", "post it again"), or researching on a connected social platform (YouTube, X, LinkedIn, Facebook, Instagram, Threads, TikTok, Pinterest, Reddit) with the social.* tools, and adding / editing / deleting files in a GitHub repo (github.put_files, or repo.write_file + repo.push when the repo is cloned). This stays "chat" even for MANY recipients, files or platforms: the chat calls the tool. NEVER "pc", "video" or "code" for these ("video" means MAKING a new video, never uploading one). Leave "reply" empty.
+- pc: ONE job that needs a live computer (see above), including analysing or reverse engineering software (REA runs on the computer). If no tool call can do it, it is pc.
 - code: ONE job that is software to build or change (website, app, script, bug fix, new feature). NEVER for research, leads, reading, writing, plans, company/role setup, sending email, or adding a file to a repo.
 - video: ONE motion-graphics video or reel.
 - team: the request has 2 or more steps (listed 1,2,3 or sequenced with "then / phir / uske baad") or needs 2+ different areas of work (for example website + video + leads). The agent splits it into steps by itself, brings the right specialists in automatically, and runs independent steps in parallel and dependent steps one after the other. The user NEVER has to say "team" or "assemble".
@@ -108,7 +110,10 @@ export async function understand(
   llm: (system: string, prompt: string) => Promise<string>,
   a: { text: string; recent: Array<{ role: "user" | "assistant"; content: string }>; role: string; tools: string[]; hasComputer: boolean }
 ): Promise<Understanding> {
+  // Cracks, licence / paywall / quota bypass and similar are never run: answer right away, no model call, no computer.
+  if (reaBlocked(a.text)) return { intent: "clarify", task: "", reply: REA_REFUSAL, role: "", why: "bypass / crack request refused", facts: [], then: [] };
   const forced = forcePc(a.text, a.tools);
+  const socialJob = !forced && socialToolIntent(a.text, a.tools, a.recent.map((m) => m.content).join("\n"));
   const fallback: Understanding = heuristic(a.text, a.hasComputer) ?? { intent: "chat", task: "", reply: "", role: "", why: "fallback", facts: [], then: [] };
   try {
     const ctx = a.recent.slice(-6).map((m) => `${m.role === "user" ? "USER" : "YOU"}: ${m.content.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
@@ -140,6 +145,9 @@ ${a.text.slice(0, 1500)}`
       u.task = u.task || a.text;
       u.why = "multi-step task: split into steps, specialists join automatically, independent steps run in parallel";
     }
+
+    // Posting / uploading / researching on a connected social platform is a social.* tool call: never the computer, never the video maker.
+    if (socialJob && ["pc", "code", "video", "team", "clarify"].includes(intent)) { u.intent = intent = "chat"; u.task = ""; u.reply = ""; u.why = "social media job: handled by the social.* tools"; }
 
     // A work order must never be answered as plain chat (that is how fake "verified leads" appeared).
     if (forced && (intent === "chat" || intent === "clarify")) { u.intent = intent = "pc"; u.why = "work order: forced to the computer"; }
