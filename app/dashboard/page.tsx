@@ -27,7 +27,7 @@ import { beginTrace, addUsage, traceOf } from "@/lib/trace";
 import { verifyResult } from "@/lib/critic";
 import { understand, type Understanding } from "@/lib/intent";
 import { attachmentBlock, attachmentIdsIn, MAX_ATTACH_FILES, type Attachment } from "@/lib/attachments";
-import { attachmentLinks, localAttachment, uploadAttachment } from "@/lib/attach-client";
+import { attachmentLinks, localAttachment, rememberPreview, revokePreview, uploadAttachment } from "@/lib/attach-client";
 import { describeStep, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
 import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOutcome, type PcPending } from "@/lib/pc-agent";
 import { SUGGEST_PROMPT, splitSuggestions, withNext } from "@/lib/suggest";
@@ -99,7 +99,7 @@ export default function DashboardPage() {
   const [sending, setSending] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [attach, setAttach] = useState<Attachment[]>([]);
-  useEffect(() => { setAttach([]); }, [activeId]);
+  useEffect(() => { setAttach((cur) => { cur.forEach(revokePreview); return []; }); }, [activeId]);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectorsOpen, setConnectorsOpen] = useState(false);
@@ -1256,6 +1256,8 @@ export default function DashboardPage() {
     const files = slash ? [] : attach.filter((a) => a.status === "ready");
     const payload = text + attachmentBlock(files);
     const vision = files.find((a) => a.vision)?.vision;
+    files.forEach((a) => rememberPreview(a.id, a.preview)); // the thumbnail stays visible in the sent message
+    attach.filter((a) => a.status !== "ready" || slash).forEach(revokePreview);
     appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now(), ...(reply ? { replyTo: reply } : {}) }]);
     setDraft(""); setAttach([]); setReplyTo(null);
 
@@ -1535,7 +1537,7 @@ export default function DashboardPage() {
               <ChatComposer
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
                 hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
-                attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => cur.filter((x) => x.id !== id))}
+                attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
                 mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
                 replyTo={replyTo} onClearReply={() => setReplyTo(null)}
               />
