@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, AtSign, CornerUpLeft, Monitor, Paperclip, X } from "lucide-react";
-import { humanSize, type Attachment } from "@/lib/attachments";
+import type { Attachment } from "@/lib/attachments";
+import AttachCard from "@/components/dashboard/AttachCard";
 import BotAvatar from "@/components/BotAvatar";
 import type { AvatarColor } from "@/lib/bots";
 
@@ -79,7 +80,7 @@ export default function ChatComposer({
         onSubmit={onSubmit}
         onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); }}
         onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []); if (f.length) { e.preventDefault(); onPickFiles(f); } }}
-        className="relative flex w-full items-center gap-2 px-6 py-4"
+        className="relative w-full px-6 py-4"
       >
         {open && (
           <div role="listbox" aria-label="Mention an agent" className="absolute bottom-full left-6 right-6 z-20 mb-1 overflow-hidden rounded-xl border border-line bg-panel shadow-2xl">
@@ -110,15 +111,16 @@ export default function ChatComposer({
           </div>
         )}
 
+        {attach.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {attach.map((a) => (
+              <AttachCard key={a.id} name={a.name} kind={a.kind} preview={a.preview} status={a.status} progress={a.progress} error={a.error} onRemove={() => onRemoveAttach(a.id)} />
+            ))}
+          </div>
+        )}
+        <div className="flex w-full items-center gap-2">
         <input ref={fileRef} type="file" multiple hidden onChange={(e) => { const f = Array.from(e.target.files ?? []); e.target.value = ""; if (f.length) onPickFiles(f); }} />
         <button type="button" aria-label="Attach files (photo, video, zip, PDF, any file)" title="Attach photo, video, zip, PDF or any file" onClick={() => fileRef.current?.click()} className="rounded-full p-2 text-muted hover:bg-panel2"><Paperclip size={18} /></button>
-        {attach.length > 0 && <div className="flex max-w-[45%] flex-wrap gap-1">{attach.map((a) => (
-          <span key={a.id} title={a.error || `${a.name} · ${humanSize(a.size)}`} className={`flex max-w-[210px] items-center gap-1 rounded-full px-2.5 py-1 text-[11px] ${a.status === "error" ? "bg-red-500/15 text-red-300" : "bg-panel2 text-ink"}`}>
-            <span className="truncate">{a.kind === "image" ? "🖼️" : a.kind === "video" ? "🎬" : a.kind === "audio" ? "🎵" : a.kind === "zip" ? "🗜️" : "📎"} {a.name}</span>
-            <span className="shrink-0 text-faint">{a.status === "uploading" ? `${Math.round(a.progress * 100)}%` : a.status === "error" ? "⚠" : humanSize(a.size)}</span>
-            <button type="button" aria-label={`Remove ${a.name}`} onClick={() => onRemoveAttach(a.id)} className="text-faint hover:text-ink">×</button>
-          </span>
-        ))}</div>}
         {hasComputerKey && (
           <button type="button" onClick={onToggleComputer} aria-pressed={computerMode} title={computerMode ? "Computer mode ON — your message goes straight to the computer as a task" : "Computer mode — send your message straight to the computer as a task"} className={`flex items-center gap-1.5 rounded-full px-2.5 py-2 text-xs ${computerMode ? "bg-gold font-medium text-bg" : "text-muted hover:bg-panel2 hover:text-ink"}`}>
             <Monitor size={15} />{computerMode && "Computer"}
@@ -138,6 +140,7 @@ export default function ChatComposer({
           className="flex-1 rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:border-gold"
         />
         <button type="submit" aria-label="Send" disabled={(!draft.trim() && !attach.some((a) => a.status === "ready")) || sending || attach.some((a) => a.status === "uploading")} className="rounded-full bg-white p-2.5 text-bg hover:opacity-90 disabled:opacity-40"><ArrowUp size={16} /></button>
+        </div>
       </form>
     </div>
   );
