@@ -120,3 +120,50 @@ export function splitAttachmentBlock(content: string): { text: string; files: Se
   }
   return { text: c.slice(0, i), files };
 }
+
+import type { Def } from "./plugins";
+import type { ToolCtx } from "./types";
+import { attachmentUrl, findAttachment, listAttachments } from "@/lib/attachments-server";
+
+const needCtx = (ctx: ToolCtx | undefined): ToolCtx => { if (!ctx) throw new Error("This tool only works from a chat."); return ctx; };
+const arg = (a: Record<string, unknown>, key: string) => String(a[key] ?? "").trim();
+
+export const ATTACHMENT_TOOLS: Def[] = [
+  {
+    name: "attachments.list", risk: "read", params: "limit?:number",
+    description: "List files attached to this chat. Returns file names, types, sizes and IDs.",
+    run: async (a, _c, ctx) => {
+      const c = needCtx(ctx);
+      const limit = Math.max(1, Math.min(40, Number(a.limit) || 20));
+      const files = await listAttachments(c.uid, c.chatId, limit);
+      return files.length ? files.map(f => `- ${f.name} | ${f.kind} | ${f.size} bytes | id=${f.id}`).join("\n") : "No ready attachments in this chat.";
+    },
+  },
+  {
+    name: "attachments.link", risk: "read", params: "file:string (attachment ID, exact name, partial name, or latest)",
+    description: "Create a temporary download link for a file attached to this chat.",
+    run: async (a, _c, ctx) => {
+      const c = needCtx(ctx);
+      const file = await findAttachment(c.uid, c.chatId, arg(a, "file"));
+      if (!file) throw new Error("Attachment not found in this chat.");
+      return `${file.name}: ${await attachmentUrl(file)}`;
+    },
+  },
+  {
+    name: "attachments.read", risk: "read", params: "file:string (attachment ID, exact name, partial name, or latest)",
+    description: "Read a text-based attachment from this chat. Binary files should be opened with the computer/browser tools.",
+    run: async (a, _c, ctx) => {
+      const c = needCtx(ctx);
+      const file = await findAttachment(c.uid, c.chatId, arg(a, "file"));
+      if (!file) throw new Error("Attachment not found in this chat.");
+      if (!/^(text|application\/(json|xml|javascript|x-yaml)|application\/pdf)$/i.test(file.mime) && !/\.(txt|md|json|csv|tsv|log|xml|html|css|js|ts|tsx|jsx|py|sql|yaml|yml|sh|java|c|cpp|go|rs|rb|php)$/i.test(file.name)) {
+        return `${file.name} is a ${file.kind} file. Use attachments.link or the computer/browser tools to inspect it.`;
+      }
+      const url = await attachmentUrl(file);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Could not download attachment (HTTP ${response.status}).`);
+      const body = await response.text();
+      return body.slice(0, 30000) + (body.length > 30000 ? "\n\n[Output truncated at 30,000 characters.]" : "");
+    },
+  },
+];
