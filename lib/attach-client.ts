@@ -27,6 +27,12 @@ async function visionCopy(file: File): Promise<Attachment["vision"] | undefined>
   } catch { return undefined; }
 }
 
+// Pictures already sent in this browser session keep their thumbnail in the chat (after a reload only the badge card shows).
+const sentPreviews = new Map<string, string>();
+export const rememberPreview = (id: string, url?: string) => { if (id && url) sentPreviews.set(id, url); };
+export const previewFor = (id: string): string | undefined => sentPreviews.get(id);
+export const revokePreview = (a: Attachment) => { if (a.preview) { try { URL.revokeObjectURL(a.preview); } catch { /* already gone */ } } };
+
 let counter = 0;
 const tmpId = () => `tmp_${Date.now().toString(36)}${(counter++).toString(36)}`;
 
@@ -40,7 +46,9 @@ export async function localAttachment(file: File): Promise<Attachment> {
     if (!/[\u0000-\u0008]/.test(text.slice(0, 2000))) return { ...base, text, status: "ready", progress: 1 };
   }
   const vision = base.kind === "image" ? await visionCopy(file) : undefined;
-  return { ...base, ...(vision ? { vision } : {}), status: "uploading" };
+  let preview: string | undefined;
+  if (base.kind === "image" && /^image\/(png|jpe?g|webp|gif|bmp|avif|svg\+xml)$/i.test(file.type)) { try { preview = URL.createObjectURL(file); } catch { /* no preview */ } }
+  return { ...base, ...(vision ? { vision } : {}), ...(preview ? { preview } : {}), status: "uploading" };
 }
 
 /** Sends the file straight to private storage. Returns the real attachment id. */
