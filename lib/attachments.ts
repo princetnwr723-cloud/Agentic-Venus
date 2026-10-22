@@ -10,6 +10,7 @@ export type Attachment = {
   id: string; name: string; size: number; mime: string; kind: AttachKind;
   text?: string;                        // small text file: its content travels inside the message
   vision?: { mediaType: string; data: string }; // photo: a small copy the model can look at on this turn
+  preview?: string; // local browser-only thumbnail for the attachment card
   status: "uploading" | "ready" | "error"; progress: number; error?: string;
 };
 
@@ -83,3 +84,39 @@ export function attachmentBlock(list: Attachment[]): string {
 }
 
 export const attachmentIdsIn = (text: string): string[] => Array.from(String(text ?? "").matchAll(/\bid=(att_[a-z0-9]{6,20})\b/g)).map((m) => m[1]);
+
+/** The little name shown on an attachment card. */
+export function shortName(name: string, max = 24): string {
+  const n = String(name ?? "");
+  if (n.length <= max) return n;
+  const keep = max - 1;
+  const tail = Math.min(10, Math.floor(keep / 2));
+  return `${n.slice(0, keep - tail)}…${n.slice(n.length - tail)}`;
+}
+
+/** The label shown on an attachment card. */
+export const badgeOf = (name: string, kind: AttachKind): string => (extOf(name) || kind).toUpperCase().slice(0, 5);
+
+export type SentFile = { id: string; name: string; kind: string; size: string; inline: boolean };
+const BLOCK_MARK = "\n\n📎 Attached files:\n";
+
+/** Split the attachment metadata block from the user's message for rendering. */
+export function splitAttachmentBlock(content: string): { text: string; files: SentFile[] } {
+  const c = String(content ?? "");
+  const i = c.indexOf(BLOCK_MARK);
+  if (i < 0) return { text: c, files: [] };
+  const files: SentFile[] = [];
+  for (const line of c.slice(i + BLOCK_MARK.length).split("\n")) {
+    if (!line.startsWith("- ")) break;
+    const parts = line.slice(2).split(" · ");
+    const last = parts[parts.length - 1] ?? "";
+    const inline = last === "content below";
+    const id = last.startsWith("id=") ? last.slice(3) : "";
+    if (inline || id) parts.pop();
+    const size = parts.pop() ?? "";
+    const kind = parts.pop() ?? "other";
+    const name = parts.join(" · ");
+    if (name) files.push({ id, name, kind, size, inline });
+  }
+  return { text: c.slice(0, i), files };
+}
