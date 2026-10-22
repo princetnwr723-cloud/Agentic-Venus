@@ -5,6 +5,9 @@ import { Check, Copy, CornerUpLeft, Repeat, Reply, RotateCcw } from "lucide-reac
 import type { ChatMessage } from "@/lib/chats";
 import Markdown from "@/components/Markdown";
 import { splitSuggestions } from "@/lib/suggest";
+import { splitAttachmentBlock, type AttachKind } from "@/lib/attachments";
+import { previewFor } from "@/lib/attach-client";
+import AttachCard from "@/components/dashboard/AttachCard";
 
 function Tool({ label, onClick, active, children }: { label: string; onClick: (e: React.MouseEvent) => void; active?: boolean; children: React.ReactNode }) {
   return (
@@ -70,7 +73,19 @@ export default function ChatThread({
                     <span className="line-clamp-2 break-words">{m.replyTo.preview}</span>
                   </div>
                 )}
-                <div className="whitespace-pre-wrap rounded-xl bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">{m.content}</div>
+                {(() => {
+                  const sent = splitAttachmentBlock(m.content);
+                  return (
+                    <>
+                      {sent.files.length > 0 && (
+                        <div className="flex flex-wrap justify-end gap-2">
+                          {sent.files.map((f, k) => <AttachCard key={k} name={f.name} kind={f.kind as AttachKind} preview={f.id ? previewFor(f.id) : undefined} />)}
+                        </div>
+                      )}
+                      {(sent.text.trim() || sent.files.length === 0) && <div className="whitespace-pre-wrap rounded-xl bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">{sent.text}</div>}
+                    </>
+                  );
+                })()}
               </div>
             ) : (
               <div className="max-w-[85%]">
