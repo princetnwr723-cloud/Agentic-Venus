@@ -26,6 +26,8 @@ import { pickModel, fallbackChain, type Role } from "@/lib/router";
 import { beginTrace, addUsage, traceOf } from "@/lib/trace";
 import { verifyResult } from "@/lib/critic";
 import { understand, type Understanding } from "@/lib/intent";
+import { attachmentBlock, attachmentIdsIn, MAX_ATTACH_FILES, type Attachment } from "@/lib/attachments";
+import { attachmentLinks, localAttachment, uploadAttachment } from "@/lib/attach-client";
 import { describeStep, listRecipes, markRecipe, matchRecipes, replayRecipe, saveRecipe, type RecipeStep } from "@/lib/recipes";
 import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOutcome, type PcPending } from "@/lib/pc-agent";
 import { SUGGEST_PROMPT, splitSuggestions, withNext } from "@/lib/suggest";
@@ -96,7 +98,8 @@ export default function DashboardPage() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [streaming, setStreaming] = useState(false);
-  const [attach, setAttach] = useState<{ name: string; text: string } | null>(null);
+  const [attach, setAttach] = useState<Attachment[]>([]);
+  useEffect(() => { setAttach([]); }, [activeId]);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectorsOpen, setConnectorsOpen] = useState(false);
@@ -616,12 +619,12 @@ export default function DashboardPage() {
     }
   }
 
-  async function streamLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }>, onText: (t: string) => void): Promise<string> {
+  async function streamLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }>, onText: (t: string) => void, image?: { mediaType: string; data: string }): Promise<string> {
     const key = apiKeys[chat.provider];
     if (!key) throw new Error("No API key saved for this chat's model.");
     const res = await fetch("/api/chat/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: chat.provider, apiKey: key, model: chat.model, systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt }] }),
+      body: JSON.stringify({ provider: chat.provider, apiKey: key, model: chat.model, systemPrompt: system || undefined, messages: [...history, { role: "user", content: prompt, ...(image ? { image } : {}) }] }),
     });
     if (!res.ok || !res.body) throw new Error((await readJson(res))?.error || "Stream failed.");
     const reader = res.body.getReader();
@@ -1209,18 +1212,27 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleAttach(f: File) {
-    if (f.size > 200_000) { setPcMessage("File is too big (max 200 KB of text)."); return; }
-    const t = await f.text();
-    if (/[\u0000-\u0008]/.test(t.slice(0, 2000))) { setPcMessage("Only text-based files for now (txt, md, csv, json, code)."); return; }
-    setAttach({ name: f.name, text: t });
+  async function handleAttachFiles(files: File[]) {
+    if (!activeChat) return;
+    const chatId = activeChat.id;
+    const picked = files.slice(0, Math.max(0, MAX_ATTACH_FILES - attach.length));
+    if (files.length > picked.length) setPcMessage(`You can attach up to ${MAX_ATTACH_FILES} files in one message.`);
+    for (const f of picked) {
+      const a = await localAttachment(f);
+      setAttach((cur) => [...cur, a]);
+      if (a.status !== "uploading") continue;
+      const patch = (p: Partial<Attachment>) => setAttach((cur) => cur.map((x) => (x.id === a.id ? { ...x, ...p } : x)));
+      void uploadAttachment(f, chatId, (pr) => patch({ progress: pr }))
+        .then((realId) => patch({ id: realId, status: "ready", progress: 1 }))
+        .catch((e) => patch({ status: "error", error: e instanceof Error ? e.message : "Upload failed." }));
+    }
   }
 
   // ---- Chat ----
 
   function handleSend(e: React.FormEvent) {
     e.preventDefault();
-    void submitText(draft.trim());
+    void submitText(draft.trim() || (attach.some((a) => a.status === "ready") ? "Please look at the attached file(s): tell me what they are and what is in them." : ""));
   }
 
   /** Used by the composer AND by the two suggestion buttons under every reply. */
@@ -1241,9 +1253,11 @@ export default function DashboardPage() {
     const key = apiKeys[chat.provider];
     if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !key) { setSettingsOpen(true); return; }
 
-    const payload = attach && !slash ? `${text}\n\n📎 File: ${attach.name}\n\`\`\`\n${attach.text}\n\`\`\`` : text;
+    const files = slash ? [] : attach.filter((a) => a.status === "ready");
+    const payload = text + attachmentBlock(files);
+    const vision = files.find((a) => a.vision)?.vision;
     appendMessages(chat.id, [{ role: "user", content: payload, at: Date.now(), ...(reply ? { replyTo: reply } : {}) }]);
-    setDraft(""); setAttach(null); setReplyTo(null);
+    setDraft(""); setAttach([]); setReplyTo(null);
 
     // the reply the owner pointed at travels with the task into chat, computer, Venus Code, Venus Pro and the team
     const replyCtx = reply
@@ -1264,6 +1278,14 @@ export default function DashboardPage() {
       } finally { workEnd(chat.id, "collab"); setSending(false); }
     }
     const extra = collab + coopText + replyCtx;
+    // private download links for the attached files travel with a task for the computer / Venus Code (never stored in the chat)
+    let fileLinks = "";
+    const attIds = attachmentIdsIn(payload);
+    if (attIds.length) {
+      const links = await attachmentLinks(chat.id, attIds);
+      if (links.length) fileLinks = `\n\nATTACHED FILES (private download links, valid 6 hours; on the computer: curl -L -o "<name>" "<link>"):\n${links.map((l) => `- ${l.name}: ${l.url}`).join("\n")}`;
+    }
+    const taskExtra = extra + fileLinks;
 
     // explicit commands: the user chose them, no guessing
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
@@ -1306,7 +1328,7 @@ export default function DashboardPage() {
     // the user switched on Computer mode: that is an explicit order
     if (e2bKey && computerMode) {
       say(chat.id, "On it — opening the computer. You can watch it work in the panel.");
-      void runPcTask(chat, text + extra, false);
+      void runPcTask(chat, text + taskExtra, false);
       return;
     }
 
@@ -1338,7 +1360,7 @@ export default function DashboardPage() {
         workSet(chat.id, `Samajh gaya: ${INTENT_LABEL[u.intent] ?? u.intent}${u.why.startsWith("keyword") ? " (keyword se)" : ""}`, "chat");
         if (u.intent !== "chat") {
           // the mentioned agents' work and the reply the owner pointed at travel with the task
-          if (extra && ["pc", "code", "video", "team"].includes(u.intent)) u.task = (u.task || text) + extra;
+          if (taskExtra && ["pc", "code", "video", "team"].includes(u.intent)) u.task = (u.task || text) + taskExtra;
           await routeIntent(chat, u, text);
           return;
         }
@@ -1354,9 +1376,14 @@ export default function DashboardPage() {
 
       workSet(chat.id, "Jawab likh raha hoon…", "chat");
       setStreaming(true);
-      let replyOut = await streamLLM(chat, system, userPrompt, history, (t) => {
-        patchChat(chat.id, { messages: [...base, { role: "assistant", content: t.replace(/\[\[[\s\S]*$/, "").trim() || "…", at }] });
-      });
+      const showText = (t: string) => patchChat(chat.id, { messages: [...base, { role: "assistant", content: t.replace(/\[\[[\s\S]*$/, "").trim() || "…", at }] });
+      let replyOut: string;
+      try { replyOut = await streamLLM(chat, system, userPrompt, history, showText, vision); }
+      catch (e) {
+        if (!vision) throw e;
+        // this model cannot look at pictures: carry on without the picture and say so
+        replyOut = await streamLLM(chat, system, `${userPrompt}\n(The photo could not be shown to this model. Say so, and work from the file name and the owner's words.)`, history, showText);
+      }
 
       let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
       let tainted = false;
@@ -1508,7 +1535,7 @@ export default function DashboardPage() {
               <ChatComposer
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
                 hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
-                attach={attach} onPickFile={(f) => void handleAttach(f)} onClearAttach={() => setAttach(null)}
+                attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => cur.filter((x) => x.id !== id))}
                 mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
                 replyTo={replyTo} onClearReply={() => setReplyTo(null)}
               />

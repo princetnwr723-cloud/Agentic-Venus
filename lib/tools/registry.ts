@@ -13,6 +13,7 @@ import { MAIL_TOOLS } from "./mail";
 import { PLAN_TOOLS } from "./plan";
 import { GMAIL_TOOLS } from "./gmail";
 import { REVERSE_TOOLS } from "./reverse";
+import { ATTACHMENT_TOOLS } from "./attachments";
 import { SOCIAL_TOOLS, providerOfPlatform, socialTargets } from "./social";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
@@ -30,7 +31,7 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };

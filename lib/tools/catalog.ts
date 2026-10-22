@@ -10,7 +10,7 @@ export const FREE_PACK = {
   tools: [
     "web.search", "web.read", "weather.now", "wiki.summary", "currency.convert", "rss.read",
     "verify.leads", "verify.facts", "verify.urls", "mail.send ✎", "mail.send_many ✎", "mail.status", "plan.set", "plan.done", "plan.status", "voice.call ✎", "voice.calls", "mission.start ✎", "mission.status", "notify.send",
-    "recall.search", "memory.save", "skill.save ✎", "repo.status", "repo.clone ✎", "repo.write_file ✎", "repo.push ✎", "reverse.guide",
+    "recall.search", "memory.save", "skill.save ✎", "repo.status", "repo.clone ✎", "repo.write_file ✎", "repo.push ✎", "reverse.guide", "attachments.list", "attachments.read", "attachments.link",
   ],
 };
 

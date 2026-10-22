@@ -5,6 +5,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { createSignedDownload, supabaseConfigured } from "@/lib/supabase-server";
 import { webSearch } from "@/lib/web-tools-server";
 import { safeFetch } from "./net";
+import { attachmentUrl, findAttachment, listAttachments } from "@/lib/attachments-server";
 import { identifyAccount } from "./oauth-identify";
 import { OAUTH_PROVIDERS, SOCIAL_PROVIDERS } from "./oauth-catalog";
 import type { Def } from "./plugins";
@@ -156,6 +157,29 @@ const ensureHttps = (v: unknown, what: string): string => {
 
 type VenusVideo = { id: string; title: string; path: string; seconds: number; aspect: string; preview: boolean; url: () => Promise<string>; bytes: () => Promise<Buffer> };
 
+/** A video the owner attached in the chat (id "att_…" or its file name) can be posted like a Venus Pro video. */
+async function attachedVideo(ctx: ToolCtx, a: Record<string, unknown>): Promise<VenusVideo | null> {
+  const want = s(a.video_id ?? a.attachment_id ?? a.project_id ?? a.id ?? a.video ?? a.video_title, 160);
+  if (!/^att_[a-z0-9]{6,20}$/.test(want) && !/\.(mp4|mov|webm|m4v|mkv)$/i.test(want)) return null;
+  const f = await findAttachment(ctx.uid, ctx.chatId, want);
+  if (!f) return null;
+  if (f.kind !== "video") throw new Error(`"${f.name}" is a ${f.kind} file, not a video.`);
+  let signed: Promise<string> | null = null;
+  let buf: Promise<Buffer> | null = null;
+  const url = () => (signed ??= attachmentUrl(f, 3 * 3600));
+  const bytes = () => (buf ??= (async () => {
+    const res = await safeFetch(await url(), { headers: { "User-Agent": UA } }, 55_000);
+    if (!res.ok) throw new Error(`Could not read the video from storage (HTTP ${res.status}).`);
+    const len = Number(res.headers.get("content-length") ?? 0);
+    if (len > MAX_VIDEO) throw new Error(`The video is ${Math.round(len / MB)} MB; the limit is ${MAX_VIDEO / MB} MB. Make it shorter or 720p.`);
+    const b = Buffer.from(await res.arrayBuffer());
+    if (b.length < 1000) throw new Error("The stored video is empty.");
+    if (b.length > MAX_VIDEO) throw new Error(`The video is ${Math.round(b.length / MB)} MB; the limit is ${MAX_VIDEO / MB} MB.`);
+    return b;
+  })());
+  return { id: f.id, title: f.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").slice(0, 100) || "Video", path: f.path, seconds: 0, aspect: "", preview: false, url, bytes };
+}
+
 type VenusRow = Record<string, any>;
 /** The owner's Venus Pro projects that have a video file (final render, or at least a preview), newest first. */
 async function venusRows(ctx: ToolCtx): Promise<VenusRow[]> {
@@ -169,6 +193,8 @@ const LATEST = /^(latest|last|newest|recent|new|current|previous|pichli|pichla|a
 async function loadVideo(ctx: ToolCtx | undefined, a: Record<string, unknown>): Promise<VenusVideo> {
   if (!ctx) throw new Error("Videos can only be posted from a chat.");
   if (!supabaseConfigured()) throw new Error("Video storage is not set up: add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel.");
+  const att = await attachedVideo(ctx, a);
+  if (att) return att;
   const rows = await venusRows(ctx);
   // `title` is the POST title, never the video selector: the selector is video_id / project_id / id / video / video_title.
   const want = s(a.video_id ?? a.project_id ?? a.id ?? a.video ?? a.video_title, 120);
@@ -742,7 +768,9 @@ export const SOCIAL_TOOLS: Def[] = [
       if (!ctx) throw new Error("Only available inside a chat.");
       const rows = (await venusRows(ctx)).slice(0, 20).map((d) =>
         `id=${d.id} · "${s(d.title, 70)}" · ${d.seconds ?? "?"}s · ${d.aspect ?? "?"} · ${d.finalPath ? "final" : "preview only"} · ${new Date(Number(d.createdAt) || 0).toISOString().slice(0, 10)}`);
-      return rows.length ? rows.join("\n") + "\nUpload with social.post_video {platforms:[...], video_id:\"<id>\"}." : "No Venus Pro video yet. Venus Pro makes videos on request (ask for one in the chat or open Venus Pro).";
+      const mine = (await listAttachments(ctx.uid, ctx.chatId).catch(() => [])).filter((x) => x.kind === "video").slice(0, 10).map((x) => `id=${x.id} · "${s(x.name, 70)}" · attached by the owner in this chat`);
+      const all = [...rows, ...mine];
+      return all.length ? all.join("\n") + "\nUpload with social.post_video {platforms:[...], video_id:\"<id>\"}." : "No Venus Pro video and no attached video yet. Venus Pro makes videos on request, or the owner can attach one with the paperclip.";
     },
   },
   {
