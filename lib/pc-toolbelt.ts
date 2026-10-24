@@ -1,14 +1,15 @@
 // What is installed on every agent computer, and how the agent is told to use it.
 import { REA_PC_PROMPT } from "@/lib/rea-policy";
 
+// 8: the wait no longer matches the permanent unattended-upgrades daemon (it made setup wait forever).
 // 7: setup is now serialized (waits for the computer's own first-boot installs), retries apt with fresh package lists,
 // and falls back to the official Node.js tarball. Bumping the version re-runs setup on old computers.
-export const PC_SETUP_VERSION = "7";
+export const PC_SETUP_VERSION = "8";
 
 /**
  * Core tools install first (the computer is "ready" after this); the big desktop apps install in the background.
  * Design rules (these are what fixed "Can't find a source to download version ..." and "rename failed ... partial"):
- *  - only ONE apt process at a time: wait for provisioning / unattended-upgrades before every apt call,
+ *  - only ONE apt process at a time: wait for provisioning / other apt runs before every apt call (max 3 minutes),
  *  - always install from freshly downloaded package lists, and retry with a refresh when a package cannot be found,
  *  - the core (git, curl, zip, Node 22) is mandatory, every optional tool is best-effort,
  *  - Node.js falls back to the official tarball when NodeSource or apt fails,
@@ -20,9 +21,10 @@ step() { echo "== $*"; }
 die() { echo "SETUP FAILED: $*"; exit 1; }
 
 wait_apt() {
+  if [ "$SKIP_WAIT" = "1" ]; then return 0; fi
   i=0
-  while [ $i -lt 180 ]; do
-    if pgrep -f '/tmp/provision.sh' >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgr >/dev/null 2>&1; then
+  while [ $i -lt 36 ]; do
+    if pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f '^bash /tmp/provision[.]sh' >/dev/null 2>&1; then
       if [ $((i % 6)) -eq 0 ]; then echo "waiting for another package install on this computer to finish..."; fi
       sleep 5
       i=$((i+1))
@@ -30,7 +32,8 @@ wait_apt() {
       return 0
     fi
   done
-  echo "another package install is still running; continuing anyway"
+  echo "another package install is still running after 3 minutes; continuing (apt waits for its own lock)"
+  SKIP_WAIT=1
   return 0
 }
 
