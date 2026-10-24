@@ -21,8 +21,21 @@ const MAX_SETUP_REPAIRS = 2;
 type SetupState = Awaited<ReturnType<typeof codeState>>;
 type Box = Awaited<ReturnType<typeof connect>>;
 
+/** A setup from an older script version can sit in "waiting for another package install" forever: restart it with the current script. */
+async function restartStuckSetup(sb: Box, s: SetupState): Promise<SetupState | null> {
+  const last = s.log.split("\n").filter(Boolean).slice(-1)[0] ?? "";
+  if (!/waiting for another package install/i.test(last)) return null;
+  const r = await exec(sb, "echo $(( $(date +%s) - $(stat -c %Y /tmp/jobs/codesetup.sh 2>/dev/null || date +%s) ))", 8_000);
+  const age = parseInt(r.stdout.trim(), 10) || 0;
+  if (age < 90) return null;
+  await exec(sb, "pkill -f 'codesetup[.]sh'; sleep 1; rm -f /tmp/jobs/codesetup.exit", 12_000).catch(() => null);
+  await startCodeSetup(sb);
+  return { state: "installing", log: "Setup was stuck waiting for another install. Restarted it with the fixed script..." };
+}
+
 async function codeStateWithRepair(sb: Box): Promise<SetupState> {
   const s = await codeState(sb);
+  if (s.state === "installing") return (await restartStuckSetup(sb, s)) ?? s;
   if (s.state !== "failed") return s;
   const r = await exec(sb, "cat /tmp/jobs/codesetup.tries 2>/dev/null || echo 0", 8_000);
   const tries = parseInt(r.stdout.trim(), 10) || 0;
