@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { doc, onSnapshot } from "firebase/firestore";
-import { ArrowLeft, Download, File as FileIcon, Maximize2, RefreshCw, RotateCcw, Square, X } from "lucide-react";
+import { ArrowLeft, Download, File as FileIcon, Folder, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Square, Trash2, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Markdown from "@/components/Markdown";
 import { useAuth } from "@/lib/auth-context";
@@ -11,7 +11,10 @@ import { useKeys } from "@/lib/keys-context";
 import { db } from "@/lib/firebase";
 import { touch } from "@/lib/computers";
 import { listChats, type Chat } from "@/lib/chats";
-import { setStop, watchCodeProject, type CodeProject } from "@/lib/code-store";
+import {
+  newCodeProject, projectIdFor, removeCodeProject, renameCodeProject, saveCodeProject, setActiveProject, setStop,
+  watchCodeProject, watchCodeProjects, type CodeProject,
+} from "@/lib/code-store";
 import { wsCall, type CodeEnv } from "@/lib/code-agent";
 
 const fmtTool = (t: string): [string, string] => {
@@ -47,6 +50,11 @@ export default function CodePage() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
   const [proj, setProj] = useState<CodeProject | null>(null);
+  const [projects, setProjects] = useState<CodeProject[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // wsId = the workspace of the project that is open. The chat's first project uses the chat id itself.
+  const [wsId, setWsId] = useState<string | null>(null);
+  const wantProject = useRef<string | null>(null);
   const [tab, setTab] = useState<Tab>("preview");
   const [tree, setTree] = useState<string[]>([]);
   const [file, setFile] = useState<{ path: string; content: string } | null>(null);
@@ -80,6 +88,7 @@ export default function CodePage() {
     listChats(user.uid).then((l) => {
       setChats(l);
       const want = new URLSearchParams(window.location.search).get("chat");
+      wantProject.current = new URLSearchParams(window.location.search).get("project");
       setChatId(want && l.some((c) => c.id === want) ? want : l[0]?.id ?? null);
     });
   }, [user]);
@@ -94,23 +103,48 @@ export default function CodePage() {
     }, () => {});
   }, [user, chatId]);
 
+  // the projects of this chat (left side)
   useEffect(() => {
     if (!user || !chatId) return;
+    setProjects([]); setProjectsLoaded(false); setWsId(null);
+    return watchCodeProjects(user.uid, chatId, (list) => { setProjects(list); setProjectsLoaded(true); });
+  }, [user, chatId]);
+
+  // which project is open: ?project=, else the one the agent / owner worked in last, else the newest, else the chat's main workspace
+  useEffect(() => {
+    if (!chatId || !projectsLoaded || wsId) return;
+    const ids = new Set(projects.map((p) => p.id));
+    const pinned = wantProject.current && ids.has(wantProject.current) ? wantProject.current : null;
+    const last = chat?.codeWs && ids.has(chat.codeWs) ? chat.codeWs : null;
+    const newest = [...projects].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]?.id ?? null;
+    setWsId(pinned ?? last ?? newest ?? chatId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId, projectsLoaded, projects, wsId, chat?.codeWs]);
+
+  // the agent started or switched to another project while this page is open: follow it
+  const agentWs = chat?.codeWs ?? null;
+  useEffect(() => {
+    if (agentWs && projects.some((p) => p.id === agentWs)) setWsId(agentWs);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentWs]);
+
+  useEffect(() => {
+    if (!user || !wsId) return;
     setProj(null); setTree([]); setFile(null); setChecks([]); setPage(null); setEntry(""); setZipUrl(""); setRepoOut(null);
     setLive({ state: "idle", url: null, log: "" });
-    return watchCodeProject(user.uid, chatId, setProj);
-  }, [user, chatId]);
+    return watchCodeProject(user.uid, wsId, setProj);
+  }, [user, wsId]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [proj?.log?.length]);
 
   const env = (): CodeEnv | null =>
     user && chat && e2bKey ? { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, provider: chat.provider, model: chat.model, chatId: chat.id, sandboxId: sandboxId ?? undefined } : null;
 
   async function pv(action: string, extra: Record<string, unknown> = {}) {
-    if (!user || !e2bKey || !sandboxId) throw new Error("The computer is not available yet.");
+    if (!user || !e2bKey || !sandboxId || !wsId) throw new Error("The computer is not available yet.");
     const res = await fetch("/api/code/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
-      body: JSON.stringify({ action, uid: user.uid, e2bKey, sandboxId, ws: chatId, ...extra }),
+      body: JSON.stringify({ action, uid: user.uid, e2bKey, sandboxId, ws: wsId, ...extra }),
     });
     const text = await res.text();
     let data: any;
@@ -125,31 +159,31 @@ export default function CodePage() {
   }
   async function refreshSide() {
     const e = env();
-    if (!e || !sandboxId) return;
+    if (!e || !sandboxId || !wsId) return;
     try {
-      setTree(((await wsCall(e, "tree", { sandboxId, ws: chatId })).files ?? []) as string[]);
-      setChecks(((await wsCall(e, "checkpoints", { sandboxId, ws: chatId })).items ?? []) as Array<{ sha: string; when: string; msg: string }>);
+      setTree(((await wsCall(e, "tree", { sandboxId, ws: wsId })).files ?? []) as string[]);
+      setChecks(((await wsCall(e, "checkpoints", { sandboxId, ws: wsId })).items ?? []) as Array<{ sha: string; when: string; msg: string }>);
     } catch { /* computer may be off */ }
   }
 
   // refresh when the agent saved something new (checkpoint) and every 6s while it works
   const ckpt = (proj?.log ?? []).filter((l) => l.kind === "checkpoint").length;
   useEffect(() => {
-    if (!sandboxId || !chatId || !user || !e2bKey) return;
+    if (!sandboxId || !wsId || !user || !e2bKey) return;
     if (tab === "preview" && mode === "static") refreshPreview();
     if (tab === "files" || tab === "checkpoints") refreshSide();
     if (!proj?.running) return;
     const iv = setInterval(() => { if (tab === "preview") { if (mode === "static") refreshPreview(); } else refreshSide(); }, 6000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, mode, sandboxId, chatId, user, e2bKey, proj?.running, ckpt]);
+  }, [tab, mode, sandboxId, wsId, user, e2bKey, proj?.running, ckpt]);
 
   // live server: detect an already running server when switching to it
   useEffect(() => {
     if (mode !== "live" || !sandboxId || !user || !e2bKey) return;
     pv("serve_status").then((r) => { if (r.ready) setLive({ state: "ready", url: r.url ?? null, log: r.log ?? "" }); }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, sandboxId, user, e2bKey]);
+  }, [mode, sandboxId, wsId, user, e2bKey]);
 
   useEffect(() => {
     if (live.state !== "starting") return;
@@ -201,18 +235,48 @@ export default function CodePage() {
   async function openFile(path: string) {
     const e = env();
     if (!e || !sandboxId) return;
-    setFile({ path, content: (await wsCall(e, "readfile", { sandboxId, ws: chatId, path })).content });
+    setFile({ path, content: (await wsCall(e, "readfile", { sandboxId, ws: wsId, path })).content });
   }
   async function restore(sha: string) {
     const e = env();
     if (!e || !sandboxId || !window.confirm("Restore the codespace to this checkpoint? Later changes will be discarded.")) return;
-    await wsCall(e, "restore", { sandboxId, ws: chatId, sha });
+    await wsCall(e, "restore", { sandboxId, ws: wsId, sha });
     refreshSide(); refreshPreview();
   }
   async function zip() {
     const e = env();
     if (!e || !sandboxId) return;
-    setZipUrl((await wsCall(e, "backup", { sandboxId, ws: chatId })).url);
+    setZipUrl((await wsCall(e, "backup", { sandboxId, ws: wsId })).url);
+  }
+
+  // ---- Projects (left side) ----
+  function openProject(id: string) {
+    if (!user || !chatId || id === wsId) return;
+    setWsId(id);
+    void setActiveProject(user.uid, chatId, id).catch(() => {});
+    window.history.replaceState(null, "", `/code?chat=${chatId}&project=${id}`);
+  }
+  async function createProject() {
+    if (!user || !chatId) return;
+    const name = window.prompt("Name of the new project", "New project")?.trim();
+    if (!name) return;
+    const id = projects.length === 0 ? chatId : projectIdFor(chatId);
+    await saveCodeProject(user.uid, newCodeProject(chatId, name, id));
+    openProject(id);
+  }
+  async function renameProject(p: CodeProject) {
+    if (!user) return;
+    const name = window.prompt("Project name", p.name)?.trim();
+    if (name && name !== p.name) await renameCodeProject(user.uid, p.id, name);
+  }
+  async function deleteProject(p: CodeProject) {
+    if (!user || !chatId || p.running) return;
+    if (!window.confirm(`Remove the project "${p.name}" from this list? Its activity log is deleted. The files stay on the computer until it is reset.`)) return;
+    await removeCodeProject(user.uid, p.id);
+    if (wsId === p.id) {
+      const next = projects.find((x) => x.id !== p.id);
+      if (next) openProject(next.id); else setWsId(chatId);
+    }
   }
 
   // ---- GitHub repository: clone into this workspace, push all changes back ----
@@ -266,7 +330,7 @@ export default function CodePage() {
 
   return (
     <div className="flex h-screen bg-bg">
-      <aside className="flex w-[200px] shrink-0 flex-col border-r border-line bg-panel">
+      <aside className="flex w-[220px] shrink-0 flex-col border-r border-line bg-panel">
         <div className="flex items-center justify-between px-4 py-4">
           <span className="text-sm font-medium text-ink">Venus Code</span>
           <button onClick={() => router.push("/dashboard")} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><ArrowLeft size={16} /></button>
@@ -277,8 +341,32 @@ export default function CodePage() {
             <span className="min-w-0 truncate text-sm text-ink">{chat.agentName}</span>
           </div>
         )}
+        {chat && (
+          <>
+            <div className="flex items-center justify-between px-4 pb-1 pt-1">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-faint">Projects</span>
+              <button onClick={createProject} title="New project" className="rounded p-1 text-muted hover:bg-panel2 hover:text-ink"><Plus size={14} /></button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+              {projects.length === 0 && <p className="px-2 py-1.5 text-[11px] leading-relaxed text-faint">No project yet. Ask for code in the chat and the agent creates one with its own name, or press + to make one.</p>}
+              {projects.map((p) => (
+                <div
+                  key={p.id}
+                  onClick={() => openProject(p.id)}
+                  className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] ${wsId === p.id ? "bg-panel2 text-ink" : "text-muted hover:bg-panel2/60 hover:text-ink"}`}
+                >
+                  <Folder size={14} className={wsId === p.id ? "text-gold" : ""} />
+                  <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                  {p.running && <span title="Working" className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />}
+                  <button onClick={(e) => { e.stopPropagation(); void renameProject(p); }} title="Rename" className="hidden shrink-0 text-faint hover:text-ink group-hover:block"><Pencil size={12} /></button>
+                  {!p.running && <button onClick={(e) => { e.stopPropagation(); void deleteProject(p); }} title="Remove from list" className="hidden shrink-0 text-faint hover:text-red-300 group-hover:block"><Trash2 size={12} /></button>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
         {repo && <p className="px-4 pb-2 text-[11px] text-avatar-teal">Repo: {repo.owner}/{repo.name} · {repo.branch}</p>}
-        <p className="px-4 text-[11px] leading-relaxed text-faint">Only this chat&apos;s codespace. Ask for code in the chat — this page shows the work live. The agent runs inside the computer, so it keeps working even if you close this tab.</p>
+        <p className="mt-auto px-4 pb-4 text-[11px] leading-relaxed text-faint">One chat can hold many projects. Ask for code in the chat — the agent picks or creates the right project and this page shows the work live. It runs inside the computer, so it keeps working even if you close this tab.</p>
       </aside>
 
       <main className="flex min-h-0 min-w-0 flex-1">
@@ -289,9 +377,9 @@ export default function CodePage() {
             <section className="m-3 mr-0 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-[#12141a] font-mono text-[13px] shadow-2xl">
               <div className="flex items-center gap-2 border-b border-line px-3 py-2">
                 <span className="h-3 w-3 rounded-full bg-[#ff5f57]" /><span className="h-3 w-3 rounded-full bg-[#febc2e]" /><span className="h-3 w-3 rounded-full bg-[#28c840]" />
-                <span className="ml-2 text-xs text-muted">✳ Venus Code — {chat.agentName}</span>
+                <span className="ml-2 text-xs text-muted">✳ Venus Code — {proj?.name ?? chat.agentName}</span>
                 {proj?.runnerJob && <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300">background runner · keeps going if you close this tab</span>}
-                {proj?.running && <button onClick={() => user && chatId && setStop(user.uid, chatId, true)} className="ml-auto flex items-center gap-1.5 rounded bg-red-500 px-2.5 py-1 text-xs text-white"><Square size={11} /> Stop</button>}
+                {proj?.running && <button onClick={() => user && wsId && setStop(user.uid, wsId, true)} className="ml-auto flex items-center gap-1.5 rounded bg-red-500 px-2.5 py-1 text-xs text-white"><Square size={11} /> Stop</button>}
               </div>
               <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-4 py-3">
                 <div className="rounded-lg border border-gold/60 p-3">
@@ -302,7 +390,7 @@ export default function CodePage() {
                       <BotAvatar color={chat.agentColor} size={56} />
                       <p className="text-xs text-muted">{chat.agentName}</p>
                       <p className="text-xs text-faint">{chat.model} · your API key</p>
-                      <p className="text-xs text-faint">~/work/{chat.id}</p>
+                      <p className="text-xs text-faint">~/work/{wsId ?? chat.id}</p>
                     </div>
                     <div className="space-y-2 text-xs md:border-l md:border-line md:pl-4">
                       <p className="font-semibold text-gold">How to use</p>
@@ -408,7 +496,13 @@ export default function CodePage() {
                     ))}
                   </div>
                 )}
-                {tab === "repo" && (
+                {tab === "repo" && wsId && wsId !== chatId && (
+                  <div className="h-full space-y-2 overflow-y-auto p-3 text-xs text-muted">
+                    <p>GitHub clone and push work on this chat&apos;s main workspace (~/work/{chatId}).</p>
+                    {projects.some((p) => p.id === chatId) && <button onClick={() => openProject(chatId as string)} className="rounded-md border border-line px-3 py-1.5 text-ink hover:bg-panel2">Open the main project: {projects.find((p) => p.id === chatId)?.name}</button>}
+                  </div>
+                )}
+                {tab === "repo" && (!wsId || wsId === chatId) && (
                   <div className="h-full space-y-3 overflow-y-auto p-3 text-xs">
                     <p className={repo ? "text-avatar-teal" : "text-muted"}>{repo ? `Cloned here: ${repo.owner}/${repo.name} · branch ${repo.branch}` : "No repository is cloned in this workspace yet."}</p>
 
