@@ -2,7 +2,10 @@ import { addMemory, bumpSkillUse, brainPrompt, loadBrain, reflect, type Brain } 
 import { listChats, updateChatPc } from "@/lib/chats";
 import { touch } from "@/lib/computers";
 import { codeSystemPrompt, parseTools, type ToolCall } from "@/lib/code-prompts";
-import { saveCodeProject, watchCodeProject, type CodeLog, type CodeProject, type RunnerJob } from "@/lib/code-store";
+import {
+  getActiveProjectId, isPristine, listCodeProjects, newCodeProject, projectIdFor, removeCodeProject, saveCodeProject, setActiveProject,
+  watchCodeProject, type CodeLog, type CodeProject, type RunnerJob,
+} from "@/lib/code-store";
 import { runCodeViaRunner, RunnerStartError } from "@/lib/runner-client";
 import type { ProviderId } from "@/lib/providers";
 
@@ -95,6 +98,88 @@ async function ensureCodeTools(env: CodeEnv, sid: string, hooks: CodeHooks): Pro
     if (t.state === "failed") throw new Error("Coding tools setup failed:\n" + String(t.log).slice(-500));
   }
   throw new Error("Coding tools setup timed out.");
+}
+
+
+// ---------- Projects: one chat can hold several named projects ----------
+
+const NEW_PROJECT_HINT = /\b(new|another|separate|different|alag|naya|nayi|naye|doosra|dusra|ek aur)\b[^.\n]{0,40}\b(project|website|site|app|application|page|game|bot|api|dashboard)\b/i;
+const GENERIC_NAME = /(^|\s)codespace$|^new project$|^project$/i;
+
+function cleanName(s: string): string {
+  return s.replace(/[\r\n"'`*#:]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40);
+}
+function fallbackName(instruction: string): string {
+  const words = instruction.replace(/https?:\/\/\S+/g, " ").replace(/[^A-Za-z0-9\u0900-\u097F\s-]/g, " ").split(/\s+/).filter(Boolean);
+  const skip = /^(please|pls|bhai|kar|karo|krdo|kro|bana|banao|bnao|make|build|create|a|an|the|me|for|my|ek|mere|liye|ke|ka|ki)$/i;
+  return cleanName(words.filter((w) => !skip.test(w)).slice(0, 4).join(" ")) || "New project";
+}
+
+async function askProjectName(env: CodeEnv, instruction: string): Promise<string> {
+  try {
+    const r = await llm(env, [{ role: "user", content: `Give a short project name (2 to 4 words, no quotes, no punctuation) for this coding request. Reply with the name only.\n\nREQUEST: ${instruction.slice(0, 600)}` }]);
+    return cleanName(r.split("\n")[0]) || fallbackName(instruction);
+  } catch { return fallbackName(instruction); }
+}
+
+/**
+ * Decides which project of the chat a coding request belongs to: continue the active one, switch to another existing
+ * project the request is about, or start a new named project. The dashboard always hands in the chat's main project;
+ * this picks the real target (an empty main project is reused instead of leaving an empty shell behind).
+ */
+async function resolveProject(env: CodeEnv, base: CodeProject, instruction: string): Promise<{ project: CodeProject; note?: string }> {
+  const text = instruction.replace(/^\s*\[mode:[a-z]+\]\s*/i, "").trim();
+  const found = await listCodeProjects(env.uid, env.chatId).catch(() => [] as CodeProject[]);
+  const byId = new Map(found.map((p) => [p.id, p]));
+  if (!byId.has(base.id)) byId.set(base.id, base);
+  const list = [...byId.values()];
+  const activeId = await getActiveProjectId(env.uid, env.chatId).catch(() => null);
+  const used = list.filter((p) => !isPristine(p)).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  const active = (activeId ? byId.get(activeId) : undefined) ?? used[0] ?? base;
+
+  const activate = async (p: CodeProject, note?: string) => {
+    await setActiveProject(env.uid, env.chatId, p.id).catch(() => {});
+    // an empty auto-created shell that was not chosen would only clutter the list
+    if (base.id !== p.id && isPristine(base)) await removeCodeProject(env.uid, base.id).catch(() => {});
+    return { project: p, note };
+  };
+  const create = async (name: string) => {
+    // an empty main project is reused for the new one; otherwise the new project gets its own workspace id
+    const doc: CodeProject = isPristine(base) ? { ...base, name } : newCodeProject(env.chatId, name, projectIdFor(env.chatId));
+    await saveCodeProject(env.uid, doc);
+    return activate(doc, `📁 New project: ${doc.name}`);
+  };
+
+  // nothing built yet in the target: use it, and give it a real name when it still has the generic one
+  if (isPristine(active)) {
+    if (!GENERIC_NAME.test(active.name)) return activate(active);
+    const named = { ...active, name: await askProjectName(env, text) };
+    await saveCodeProject(env.uid, named);
+    return activate(named, `📁 Project: ${named.name}`);
+  }
+
+  // there is earlier work: continue it, switch to the project the request is about, or start a new one
+  let action: "continue" | "new" = NEW_PROJECT_HINT.test(text) ? "new" : "continue";
+  let targetId = active.id;
+  let name = "";
+  try {
+    const rows = list.map((p) => `- ${p.id} | ${p.name} | ${(p.ctx || "empty").trim().split("\n").slice(-1)[0].slice(0, 110)}`).join("\n");
+    const raw = await llm(env, [{ role: "user", content:
+      `You route a coding request inside a chat that can hold several separate projects.\n\nProjects (id | name | last work):\n${rows}\n\nActive project id: ${active.id}\n\nREQUEST: ${text.slice(0, 700)}\n\n` +
+      `Reply with ONE JSON object only: {"action":"continue"|"new","id":"<project id to continue>","name":"<2-4 word name if new>"}\n` +
+      `Rules: choose "continue" when the request changes, fixes or extends an existing project (default: the active one; pick another project only when the request clearly refers to it). ` +
+      `Choose "new" only when the request asks for a different, separate thing (another website or app) or says new/another/alag/naya project. No quotes in the name.` }]);
+    const m = /\{[\s\S]*\}/.exec(raw);
+    if (m) {
+      const j = JSON.parse(m[0]) as { action?: string; id?: string; name?: string };
+      if (j.action === "new") { action = "new"; name = cleanName(String(j.name ?? "")); }
+      else { action = "continue"; if (j.id && byId.has(String(j.id))) targetId = String(j.id); }
+    }
+  } catch { /* the keyword check above decides */ }
+
+  if (action === "new") return create(name || (await askProjectName(env, text)));
+  const target = byId.get(targetId) ?? active;
+  return activate(target, target.id !== active.id ? `📁 Switched to project: ${target.name}` : undefined);
 }
 
 type Ctx = { env: CodeEnv; hooks: CodeHooks; project: CodeProject; sandboxId: string; brain: Brain; venusMd: string; tree: string; persona?: string };
@@ -266,7 +351,14 @@ export async function runCodeAgent(
   env: CodeEnv, hooks: CodeHooks, project: CodeProject, instruction: string,
   opts: { brain?: Brain; maxSteps?: number; persona?: string } = {}
 ): Promise<{ ok: boolean; summary: string; project: CodeProject }> {
-  let p: CodeProject = { ...project, running: true, stop: false };
+  let chosen = project;
+  let projectNote = "";
+  try {
+    const r = await resolveProject(env, project, instruction);
+    chosen = r.project;
+    projectNote = r.note ?? "";
+  } catch { /* keep the chat's main project */ }
+  let p: CodeProject = { ...chosen, running: true, stop: false };
   const log: CodeLog[] = [...(p.log ?? [])];
   const scope = { uid: env.uid, chatId: env.chatId };
   let last = 0;
@@ -288,10 +380,11 @@ export async function runCodeAgent(
     void flush();
   };
   await flush(true);
-  const unsub = watchCodeProject(env.uid, p.id, (d) => { if (d?.stop) stopped = true; });
+  const unsub = watchCodeProject(env.uid, p.id, (d) => { if (d?.stop) stopped = true; if (d?.name && d.name !== p.name) p = { ...p, name: d.name }; });
 
   try {
     emit({ kind: "user", text: instruction });
+    if (projectNote) emit({ kind: "info", text: projectNote });
     const initialSandboxId = await resolveSandbox(env);
     const sandboxId = await ensureCodeTools(env, initialSandboxId, wrapped);
     env.sandboxId = sandboxId;
