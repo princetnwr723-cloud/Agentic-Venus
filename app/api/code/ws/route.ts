@@ -15,6 +15,24 @@ export const maxDuration = 60;
 
 const fail = (m: string, s = 500) => NextResponse.json({ error: m }, { status: s });
 
+/** A failed setup is repaired automatically (the setup script is safe to re-run) before the user ever sees an error. */
+const MAX_SETUP_REPAIRS = 2;
+
+type SetupState = Awaited<ReturnType<typeof codeState>>;
+type Box = Awaited<ReturnType<typeof connect>>;
+
+async function codeStateWithRepair(sb: Box): Promise<SetupState> {
+  const s = await codeState(sb);
+  if (s.state !== "failed") return s;
+  const r = await exec(sb, "cat /tmp/jobs/codesetup.tries 2>/dev/null || echo 0", 8_000);
+  const tries = parseInt(r.stdout.trim(), 10) || 0;
+  if (tries >= MAX_SETUP_REPAIRS) return s;
+  await exec(sb, `mkdir -p /tmp/jobs && echo ${tries + 1} > /tmp/jobs/codesetup.tries`, 8_000);
+  await startCodeSetup(sb);
+  const why = s.log.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 220);
+  return { state: "installing", log: `Setup hit a problem (${why}). Repairing automatically, attempt ${tries + 2} of ${MAX_SETUP_REPAIRS + 1}...` };
+}
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req);
@@ -35,10 +53,11 @@ export async function POST(req: Request) {
 
     switch (action) {
       case "setup":
+        await exec(sb, "rm -f /tmp/jobs/codesetup.tries", 8_000).catch(() => null);
         await startCodeSetup(sb);
         return NextResponse.json({ ok: true });
       case "status":
-        return NextResponse.json(await codeState(sb));
+        return NextResponse.json(await codeStateWithRepair(sb));
 
       case "ensure": {
         let restoreUrl: string | undefined;
