@@ -1,26 +1,120 @@
 // What is installed on every agent computer, and how the agent is told to use it.
 import { REA_PC_PROMPT } from "@/lib/rea-policy";
 
-export const PC_SETUP_VERSION = "6";
+// 7: setup is now serialized (waits for the computer's own first-boot installs), retries apt with fresh package lists,
+// and falls back to the official Node.js tarball. Bumping the version re-runs setup on old computers.
+export const PC_SETUP_VERSION = "7";
 
-/** Core tools install first (the computer is "ready" after this); the big desktop apps install in the background. */
-export const pcSetupScript = (assets: string) => `set -e
-export DEBIAN_FRONTEND=noninteractive
-echo 'DPkg::Lock::Timeout "900";' | sudo tee /etc/apt/apt.conf.d/99locktimeout >/dev/null
-echo "== [1/5] system packages"
-sudo apt-get update -y || true
-sudo apt-get install -y git ripgrep zip unzip jq build-essential python3-pip python3-venv curl wget ca-certificates
-sudo apt-get install -y p7zip-full sqlite3 fd-find tree poppler-utils qpdf ffmpeg imagemagick pandoc tesseract-ocr xclip xdotool scrot fonts-liberation fonts-noto-core fonts-noto-color-emoji || true
-echo "== [2/5] Node.js"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-  sudo apt-get install -y nodejs
+/**
+ * Core tools install first (the computer is "ready" after this); the big desktop apps install in the background.
+ * Design rules (these are what fixed "Can't find a source to download version ..." and "rename failed ... partial"):
+ *  - only ONE apt process at a time: wait for provisioning / unattended-upgrades before every apt call,
+ *  - always install from freshly downloaded package lists, and retry with a refresh when a package cannot be found,
+ *  - the core (git, curl, zip, Node 22) is mandatory, every optional tool is best-effort,
+ *  - Node.js falls back to the official tarball when NodeSource or apt fails,
+ *  - re-running the script is always safe (the server re-runs it automatically when it failed).
+ */
+export const pcSetupScript = (assets: string) => `export DEBIAN_FRONTEND=noninteractive
+mkdir -p /tmp/jobs
+step() { echo "== $*"; }
+die() { echo "SETUP FAILED: $*"; exit 1; }
+
+wait_apt() {
+  i=0
+  while [ $i -lt 180 ]; do
+    if pgrep -f '/tmp/provision.sh' >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 || pgrep -f unattended-upgr >/dev/null 2>&1; then
+      if [ $((i % 6)) -eq 0 ]; then echo "waiting for another package install on this computer to finish..."; fi
+      sleep 5
+      i=$((i+1))
+    else
+      return 0
+    fi
+  done
+  echo "another package install is still running; continuing anyway"
+  return 0
+}
+
+APT="sudo -E apt-get -o Acquire::Retries=5 -o Dpkg::Lock::Timeout=600 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+
+apt_refresh() {
+  sudo rm -rf /var/lib/apt/lists/* 2>/dev/null
+  sudo mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial
+  n=1
+  while [ $n -le 4 ]; do
+    wait_apt
+    if $APT update -y; then return 0; fi
+    echo "apt update failed (try $n of 4), retrying..."
+    sleep $((n*4))
+    n=$((n+1))
+  done
+  return 1
+}
+
+apt_get() {
+  n=1
+  while [ $n -le 3 ]; do
+    wait_apt
+    if $APT "$@"; then return 0; fi
+    echo "apt-get $1 failed (try $n of 3): repairing and refreshing the package lists..."
+    sudo dpkg --configure -a >/dev/null 2>&1
+    $APT -f install -y >/dev/null 2>&1
+    apt_refresh
+    n=$((n+1))
+  done
+  return 1
+}
+
+apt_best_effort() {
+  apt_get install -y "$@" && return 0
+  echo "batch install failed, trying package by package"
+  for p in "$@"; do
+    wait_apt
+    $APT install -y "$p" || echo "optional package $p skipped"
+  done
+  return 0
+}
+
+node_ok() {
+  command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 22 ]
+}
+
+step "[1/5] system packages"
+apt_refresh || die "could not download the package lists from the Ubuntu mirrors"
+apt_get install -y git curl ca-certificates unzip zip jq xz-utils || die "could not install the core tools (git, curl, zip)"
+apt_best_effort ripgrep build-essential python3-pip python3-venv wget
+apt_best_effort p7zip-full sqlite3 fd-find tree poppler-utils qpdf ffmpeg imagemagick pandoc tesseract-ocr xclip xdotool scrot fonts-liberation fonts-noto-core fonts-noto-color-emoji
+
+step "[2/5] Node.js"
+if ! node_ok; then
+  if curl -fsSL --retry 3 -o /tmp/nodesource.sh https://deb.nodesource.com/setup_22.x && sudo -E bash /tmp/nodesource.sh && apt_get install -y nodejs; then
+    echo "Node.js installed from NodeSource"
+  else
+    echo "NodeSource failed, using the official Node.js download instead"
+  fi
 fi
+if ! node_ok; then
+  NODE_FILE=$(curl -fsSL --retry 3 https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | grep -o 'node-v22[0-9.]*-linux-x64.tar.xz' | head -1)
+  [ -n "$NODE_FILE" ] || die "could not find a Node.js 22 download"
+  curl -fsSL --retry 3 -o /tmp/node.tar.xz "https://nodejs.org/dist/latest-v22.x/$NODE_FILE" || die "could not download Node.js"
+  sudo tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 || die "could not unpack Node.js"
+  hash -r
+fi
+node_ok || die "Node.js 22 is not available on this computer"
 node -v
-echo "== [3/5] Python libraries"
+
+step "[3/5] Python libraries"
 PYLIBS="pandas numpy matplotlib openpyxl xlsxwriter python-docx python-pptx reportlab pypdf pdfplumber pillow requests beautifulsoup4 lxml scipy markdown pytesseract"
-pip3 install --user -q $PYLIBS || pip3 install --user --break-system-packages -q $PYLIBS || true
-echo "== [4/5] folders"
+if command -v pip3 >/dev/null 2>&1; then
+  pip3 install --user -q $PYLIBS || pip3 install --user --break-system-packages -q $PYLIBS || {
+    for l in $PYLIBS; do
+      pip3 install --user -q $l || pip3 install --user --break-system-packages -q $l || echo "python library $l skipped"
+    done
+  }
+else
+  echo "pip3 is missing: Python libraries skipped"
+fi
+
+step "[4/5] folders"
 mkdir -p "$HOME/.npm-global" /home/user/work ${assets} /home/user/Documents /home/user/Downloads /home/user/Desktop /tmp/jobs
 npm config set prefix "$HOME/.npm-global"
 echo "== REA (Reverse Engineer Anything)"
@@ -28,8 +122,27 @@ npm install --global rea-agents >/tmp/jobs/rea-install.log 2>&1 || echo "rea-age
 grep -q npm-global ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
 echo ${PC_SETUP_VERSION} > /home/user/.code-version
 touch /home/user/.code-ready
-echo "== [5/5] desktop apps (continue in the background)"
-(nohup bash -lc 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libreoffice-writer libreoffice-calc libreoffice-impress gimp inkscape vlc evince mousepad file-roller || true; touch /home/user/.pc-apps-full' >/tmp/jobs/pcapps.log 2>&1 &)
+rm -f /tmp/jobs/codesetup.tries
+
+step "[5/5] desktop apps (continue in the background)"
+cat > /tmp/jobs/pcapps.sh <<'EOS'
+export DEBIAN_FRONTEND=noninteractive
+APT="sudo -E apt-get -o Acquire::Retries=5 -o Dpkg::Lock::Timeout=900"
+n=1
+while [ $n -le 3 ]; do
+  $APT install -y --fix-missing libreoffice-writer libreoffice-calc libreoffice-impress gimp inkscape vlc evince mousepad file-roller && break
+  $APT update -y
+  n=$((n+1))
+done
+if ! command -v google-chrome >/dev/null 2>&1; then
+  curl -fsSL --retry 3 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && $APT install -y /tmp/chrome.deb
+fi
+if ! command -v code >/dev/null 2>&1; then
+  curl -fsSL --retry 3 -o /tmp/vscode.deb https://go.microsoft.com/fwlink/?LinkID=760868 && $APT install -y /tmp/vscode.deb
+fi
+touch /home/user/.pc-apps-full
+EOS
+(nohup bash /tmp/jobs/pcapps.sh >/tmp/jobs/pcapps.log 2>&1 &)
 echo "CODE TOOLS READY"
 `;
 
