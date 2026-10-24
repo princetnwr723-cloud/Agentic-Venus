@@ -13,7 +13,11 @@ const sign = (body: string) => createHmac("sha256", secret()).update(body).diges
 const MAX_JOB_TTL_MS = 6 * 60 * 60_000;
 const validIdentity = (value: string) => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\r\n]/.test(value);
 
-export function signJob(uid: string, chatId: string, jobId: string, ttlMs = MAX_JOB_TTL_MS): string {
+/** A chat can have several Venus Code projects. Their workspace ids look like "<chatId>__<suffix>"; tools always belong to the chat. */
+export const chatIdOfWorkspace = (ws: string): string => String(ws ?? "").split("__")[0];
+
+export function signJob(uid: string, workspaceOrChatId: string, jobId: string, ttlMs = MAX_JOB_TTL_MS): string {
+  const chatId = chatIdOfWorkspace(workspaceOrChatId);
   if (!validIdentity(uid) || !validIdentity(chatId) || !/^[a-z0-9]{4,24}$/.test(jobId)) {
     throw new Error("Cannot issue a job token for an invalid identity or job id.");
   }
