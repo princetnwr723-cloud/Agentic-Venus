@@ -7,7 +7,7 @@
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "7";
+export const RUNNER_VERSION = "9";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -231,6 +231,22 @@ function toCall(name, a, cid) {
   return c;
 }
 let nmsgs = [], xmsgs = [];
+// Small models often answer with plain text instead of calling a tool. Forcing a tool call on every turn fixes that
+// (finish is a tool too, so the model can still end the task). If a provider rejects forcing, fall back to automatic choice.
+let FORCE_TOOLS = true;
+async function postTools(url, headers, body, forced) {
+  if (!FORCE_TOOLS) return post(url, headers, body);
+  try { return await post(url, headers, forced(body)); }
+  catch (e) {
+    const m = String(e && e.message ? e.message : e);
+    if (/ 400/.test(m) && /tool_choice|toolConfig|tool_config|function_calling|functionCalling|tool choice|required|any/i.test(m)) {
+      FORCE_TOOLS = false;
+      emit("info", "This provider does not accept forced tool calls - continuing with automatic tool choice.");
+      return post(url, headers, body);
+    }
+    throw e;
+  }
+}
 function nUserMsg(text) {
   if (job.provider === "anthropic") return {role: "user", content: [{type: "text", text: text}]};
   if (job.provider === "gemini") return {role: "user", parts: [{text: text}]};
@@ -240,12 +256,12 @@ async function nTurn() {
   const p = job.provider, defs = activeSchemas();
   const calls = [], text = [];
   if (p === "anthropic") {
-    const d = await post("https://api.anthropic.com/v1/messages", {"x-api-key": KEY, "anthropic-version": "2023-06-01"}, {model: job.model, max_tokens: 8192, messages: nmsgs, tools: defs.map((t) => ({name: t.name, description: t.description, input_schema: jsonSchema(t)}))});
+    const d = await postTools("https://api.anthropic.com/v1/messages", {"x-api-key": KEY, "anthropic-version": "2023-06-01"}, {model: job.model, max_tokens: 8192, messages: nmsgs, tools: defs.map((t) => ({name: t.name, description: t.description, input_schema: jsonSchema(t)}))}, (b) => Object.assign({}, b, {tool_choice: {type: "any"}}));
     const content = Array.isArray(d.content) && d.content.length ? d.content : [{type: "text", text: "(no answer)"}];
     nmsgs.push({role: "assistant", content: content});
     for (const b of content) { if (b.type === "text") text.push(b.text); else if (b.type === "tool_use") calls.push(toCall(b.name, b.input, b.id)); }
   } else if (p === "gemini") {
-    const d = await post("https://generativelanguage.googleapis.com/v1beta/models/" + job.model + ":generateContent", {"x-goog-api-key": KEY}, {contents: nmsgs, tools: [{functionDeclarations: defs.map((t) => ({name: t.name, description: t.description, parameters: jsonSchema(t)}))}], generationConfig: {maxOutputTokens: 8192}});
+    const d = await postTools("https://generativelanguage.googleapis.com/v1beta/models/" + job.model + ":generateContent", {"x-goog-api-key": KEY}, {contents: nmsgs, tools: [{functionDeclarations: defs.map((t) => ({name: t.name, description: t.description, parameters: jsonSchema(t)}))}], generationConfig: {maxOutputTokens: 8192}}, (b) => Object.assign({}, b, {toolConfig: {functionCallingConfig: {mode: "ANY"}}}));
     const cand = d.candidates && d.candidates[0];
     const content = cand && cand.content && Array.isArray(cand.content.parts) && cand.content.parts.length ? cand.content : {role: "model", parts: []};
     if (!content.role) content.role = "model";
@@ -259,7 +275,7 @@ async function nTurn() {
       emit("info", "Gemini returned no usable text/tool call (possibly thought-only output); finishReason=" + String(cand && cand.finishReason || "unknown") + ".");
     }
   } else {
-    const d = await post(OPENAI_URLS[p], {Authorization: "Bearer " + KEY}, {model: job.model, messages: nmsgs, tool_choice: "auto", tools: defs.map((t) => ({type: "function", function: {name: t.name, description: t.description, parameters: jsonSchema(t)}}))});
+    const d = await postTools(OPENAI_URLS[p], {Authorization: "Bearer " + KEY}, {model: job.model, messages: nmsgs, tool_choice: "auto", tools: defs.map((t) => ({type: "function", function: {name: t.name, description: t.description, parameters: jsonSchema(t)}}))}, (b) => Object.assign({}, b, {tool_choice: "required"}));
     const m = (d.choices && d.choices[0] && d.choices[0].message) || {};
     const am = {role: "assistant", content: m.content == null ? "" : m.content};
     if (Array.isArray(m.tool_calls) && m.tool_calls.length) am.tool_calls = m.tool_calls;
@@ -931,7 +947,7 @@ async function main() {
     try { turn = NATIVE ? await withRetry(nTurn) : await xmlTurn(); }
     catch (e) {
       const m = String(e && e.message ? e.message : e);
-      if (NATIVE && / 400/.test(m)) {
+      if (NATIVE && (/ 400/.test(m) || (/ (404|422)/.test(m) && /tool|function/i.test(m)))) {
         NATIVE = false;
         emit("info", "This model does not accept native tool-calling (" + m.slice(0, 120) + ") - switching to the text tool format.");
         xmsgs = [{role: "user", content: buildFirst(stateNote(ctx))}];
@@ -945,6 +961,16 @@ async function main() {
 
     if (calls.length === 0) {
       noTool++;
+      // Some models never call tools natively (they just talk). After two text-only answers switch to the text tool
+      // format (XML tags) before giving up: it works with any model that can follow a format.
+      if (NATIVE && noTool >= 2) {
+        NATIVE = false;
+        noTool = 0;
+        emit("info", "This model answers with text instead of calling tools - switching to the text tool format so it can still work.");
+        writeState(ctx);
+        xmsgs = [{role: "user", content: buildFirst(stateNote(ctx))}];
+        continue;
+      }
       const answer = String(turn.thought || "").trim();
       if (!answer) {
         emit("info", "The model returned an empty response (no text and no tool calls). This is not task completion.");
@@ -952,14 +978,14 @@ async function main() {
           writeState(ctx);
           return end("error", "The model returned 3 consecutive empty responses. No completion was claimed and no further files were written. Retry with a supported model/provider or check the provider response and model name.", ctx.memories);
         }
-        addUser("Your last response was empty: it contained no text and no tool calls. Do not stop. Continue the task now by calling a tool (read/list/write/edit/bash) or call finish only after the requested implementation is complete and verified.");
+        addUser(NATIVE ? "Your last response was empty: it contained no text and no tool calls. Do not stop. Continue the task now by calling a tool (read/list/write/edit/bash) or call finish only after the requested implementation is complete and verified." : 'Your last response was empty. Reply ONLY with tool calls in the text format, for example <ls path="."/> or <write path="index.html">COMPLETE FILE CONTENT</write> or <bash>npm install</bash>, and <finish>summary</finish> only when the work is done and verified.');
         continue;
       }
       if (noTool >= 3) {
         writeState(ctx);
         return end("error", "The model repeatedly returned text without executing a tool or calling finish. The task is not marked complete. Retry or choose a model that supports tool calling reliably.", ctx.memories);
       }
-      addUser("This is a software task. Do not stop with a plain-text response. Continue by calling the next required tool, implement the requested files, verify them, and call finish only when done.");
+      addUser(NATIVE ? "This is a software task. Do not stop with a plain-text response. Continue by calling the next required tool, implement the requested files, verify them, and call finish only when done." : 'This is a software task. Do not answer with plain text. Reply ONLY with tool calls in the text format, for example <ls path="."/> or <write path="index.html">COMPLETE FILE CONTENT</write> or <bash>npm install</bash>. Call <finish>summary</finish> only when the requested files exist and are verified.');
       continue;
     }
     noTool = 0;
