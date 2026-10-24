@@ -21,7 +21,9 @@ export const maxDuration = 60;
 const IDLE_MS = 30 * 60_000;
 
 type Job = { id: string; sandboxId: string; offset?: number; hb?: number };
-type ProjectDoc = { running?: boolean; stop?: boolean; updatedAt?: number; runnerJob?: Job; log?: unknown[]; ctx?: string };
+type ProjectDoc = { running?: boolean; stop?: boolean; updatedAt?: number; runnerJob?: Job; log?: unknown[]; ctx?: string; chatId?: string };
+/** A chat can have several Venus Code projects ("<chatId>__<suffix>"); the chat is what gets the report and switches off the computer. */
+const chatOf = (id: string, p?: ProjectDoc) => (p?.chatId && String(p.chatId)) || id.split("__")[0];
 type PcJobDoc = { running?: boolean; task?: string; startedAt?: number; job?: Job; notified?: string };
 type Db = ReturnType<typeof getAdminDb>;
 type Ref = FirebaseFirestore.DocumentReference;
@@ -83,6 +85,7 @@ export async function POST(req: Request) {
       }
       const userRef = d.ref.parent.parent;
       if (!userRef) continue;
+      const chatId = chatOf(d.id, p);
       try {
         const e2bKey = await e2bFor(userRef);
         if (!e2bKey) { out.push({ id: d.id, skipped: "no E2B key" }); continue; }
@@ -129,8 +132,8 @@ export async function POST(req: Request) {
           finalized = true;
         });
         if (finalized) {
-          await postChat(userRef, d.id, `${ok ? "✅ Venus Code finished while you were away." : "⚠️ Venus Code stopped: "}\n\n${summary}\n\n[Open the Code page](/code?chat=${d.id})`);
-          await switchOff(userRef, d.id, e2bKey, job.sandboxId);
+          await postChat(userRef, chatId, `${ok ? "✅ Venus Code finished while you were away." : "⚠️ Venus Code stopped: "}\n\n${summary}\n\n[Open the Code page](/code?chat=${chatId}&project=${d.id})`);
+          await switchOff(userRef, chatId, e2bKey, job.sandboxId);
         }
         out.push({ id: d.id, status: state.status, finalized });
       } catch (e) {
@@ -209,6 +212,15 @@ export async function POST(req: Request) {
 
     // ---------------- 3) idle reaper: pause computers nobody is using ----------------
     let paused = 0;
+    const codeRunning = new Map<string, Set<string>>();
+    const runningCodeChats = async (userRef: Ref) => {
+      if (!codeRunning.has(userRef.path)) {
+        const set = new Set<string>();
+        for (const x of (await userRef.collection("codeProjects").where("running", "==", true).get()).docs) set.add(chatOf(x.id, x.data() as ProjectDoc));
+        codeRunning.set(userRef.path, set);
+      }
+      return codeRunning.get(userRef.path) as Set<string>;
+    };
     try {
       const chats = await db.collectionGroup("chats").where("pcPaused", "==", false).get();
       for (const c of chats.docs) {
@@ -217,8 +229,8 @@ export async function POST(req: Request) {
         if (!ch.pcSandboxId || !ch.pcActiveAt || Date.now() - ch.pcActiveAt < IDLE_MS) continue;
         const userRef = c.ref.parent.parent;
         if (!userRef) continue;
-        const [pj, cp] = await Promise.all([userRef.collection("pcJobs").doc(c.id).get(), userRef.collection("codeProjects").doc(c.id).get()]);
-        if ((pj.data() as { running?: boolean } | undefined)?.running || (cp.data() as { running?: boolean } | undefined)?.running) continue;
+        const [pj, busyCode] = await Promise.all([userRef.collection("pcJobs").doc(c.id).get(), runningCodeChats(userRef)]);
+        if ((pj.data() as { running?: boolean } | undefined)?.running || busyCode.has(c.id)) continue;
         const e2bKey = await e2bFor(userRef);
         if (!e2bKey) continue;
         try {
