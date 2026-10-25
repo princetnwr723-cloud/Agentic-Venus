@@ -7,7 +7,7 @@
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "11";
+export const RUNNER_VERSION = "12";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -739,8 +739,11 @@ async function runTool(c, ctx) {
     case "web_fetch":
       try { return {text: shield(await webFetch(c.body.trim()), "web_fetch")}; } catch (e) { return {text: "ERROR: " + (e && e.message ? e.message : "failed")}; }
     case "skill": {
-      const s = (ctx.skills || []).find((x) => String(x.name).toLowerCase() === String(a.name || "").toLowerCase());
-      return s ? {text: "# Skill: " + s.name + "\n" + String(s.instructions).slice(0, 12000)} : {text: "ERROR: no skill named \"" + a.name + "\". Available: " + ((ctx.skills || []).map((x) => x.name).join(", ") || "none")};
+      ctx.skillUsed = true;
+      const q = String(a.name || "").toLowerCase().trim();
+      const list = ctx.skills || [];
+      const s = list.find((x) => String(x.name).toLowerCase() === q) || list.find((x) => { const n = String(x.name).toLowerCase(); return q && (n.indexOf(q) >= 0 || q.indexOf(n) >= 0); });
+      return s ? {text: "# Skill: " + s.name + "\n" + String(s.instructions).slice(0, 12000)} : {text: "ERROR: no skill named \"" + a.name + "\". Available: " + (list.map((x) => x.name).join(", ") || "none")};
     }
     case "remember":
       ctx.memories.push(c.body.trim().slice(0, 300));
@@ -952,12 +955,21 @@ async function gates(fin, ctx) {
   }
   const changed = changedFiles();
   // only for build/create tasks: questions, analysis and read-only tasks may finish without changing any file
-  const requiresImplementation = /\b(build|create|make|implement|develop|website|web\s*app|webpage|landing\s*page|application|app|site|page|component|feature)\b/i.test(TASK) && !READONLY.test(TASK);
+  const requiresImplementation = (/\b(build|create|make|implement|develop|website|web\s*app|webpage|landing\s*page|application|app|site|page|component|feature)\b/i.test(TASK) || skp().explicit) && !READONLY.test(TASK);
   const deliverables = changed.filter((f) => !/\.(md|mdx|mmd|txt|rst|adoc)$/i.test(f) && !/(^|\/)(LICENSE|CHANGELOG|CONTRIBUTING)(\.|$)/i.test(f));
+  if (requiresImplementation && deliverables.length === 0 && ctx.gates.impl >= 3) ctx.noChange = true;
   if (requiresImplementation && deliverables.length === 0 && ctx.gates.impl < 3) {
     ctx.gates.impl++;
     emit("info", "Gate: no implementation files changed; documentation-only completion blocked (" + ctx.gates.impl + "/3).");
     return "IMPLEMENTATION REQUIRED: You have not changed any real implementation/output files. Do not finish after writing DESIGN.md, design.mmd, README.md, or VENUS.md. Create or update the actual source files requested by the user (for a static website: index.html, style.css, script.js; for a framework: the real app/source components), then inspect the files and verify the result. If the task was only a question or an analysis and needs no file change, say so in finish. If a write/tool call failed, diagnose and retry it.";
+  }
+  if (skp().explicit && ctx.gates.skill < 1) {
+    ctx.gates.skill++;
+    emit("info", "Gate: checking the result against the skill.");
+    const nm = skp().picked.map((x) => x.name).join(", ");
+    return nm
+      ? "SKILL CHECK: the user asked you to follow the skill(s) " + nm + ". Before finishing, go through the skill's requirements one by one, compare each with the REAL files in the project (read them), and fix every gap with edit/write. Then call finish and list which requirements you applied and in which file."
+      : "SKILL CHECK: the user referred to a skill but you have not loaded one. Load the matching skill with the skill tool now, compare the project files with its requirements, fix every gap with edit/write, then call finish.";
   }
   if (changed.length && ctx.gates.secrets < 2) {
     const hits = secretScan();
@@ -1030,6 +1042,23 @@ function projectContext() {
   if (!parts.length) { try { const r = fs.readFileSync(ROOT + "/README.md", "utf8").trim(); if (r) parts.push("### README.md\n" + r.slice(0, 1500)); } catch (e) {} }
   return parts.length ? "\n\n## Project rules and facts (follow them)\n" + parts.join("\n\n") : "";
 }
+// ---------------- skills: apply them for real instead of hoping the model loads one ----------------
+const SK_STOP = new Set(["the", "and", "for", "with", "this", "that", "from", "your", "you", "are", "use", "using", "when", "into", "not", "all", "any", "can", "how", "what", "website", "site", "page", "make", "build", "create", "please"]);
+function skToks(x) { return String(x || "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !SK_STOP.has(w)); }
+let SKPICK = null;
+function skp() {
+  if (SKPICK) return SKPICK;
+  const all = (job.skills || []).filter((s) => s && s.name && s.instructions);
+  const mentions = /\bskills?\b/i.test(TASK);
+  const low = TASK.toLowerCase();
+  const named = all.filter((s) => { const n = String(s.name).toLowerCase(); return low.indexOf(n) >= 0 || low.indexOf(n.replace(/[-_]+/g, " ")) >= 0; });
+  const tt = new Set(skToks(TASK));
+  const scored = all.map((s) => ({s: s, n: skToks(s.name + " " + (s.description || "")).filter((w, i, a) => a.indexOf(w) === i && tt.has(w)).length})).sort((a, b) => b.n - a.n);
+  if (named.length) SKPICK = {picked: named.slice(0, 3), explicit: true, mentions: mentions};
+  else if (mentions) SKPICK = {picked: all.length <= 3 ? all : scored.filter((x) => x.n > 0).slice(0, 2).map((x) => x.s), explicit: true, mentions: mentions};
+  else SKPICK = {picked: scored.filter((x) => x.n >= 2).slice(0, 2).map((x) => x.s), explicit: false, mentions: mentions};
+  return SKPICK;
+}
 function buildFirst(resume) {
   const sys = String(job.system || "");
   const cut = sys.indexOf("\n## VENUS.md");
@@ -1039,7 +1068,11 @@ function buildFirst(resume) {
   const modeNote = MODE === "plan" ? "\n\nMODE: PLAN. You may only explore. Finish with a concrete step-by-step plan (files to change, order, risks). Do not change anything." : MODE === "strict" ? "\n\nMODE: STRICT. Shell commands are limited to a safe allowlist (tests, builds, git status/diff/add/commit, file inspection)." : "";
   const toolsNote = TOOLS_TXT ? "\n\nCONNECTED TOOLS (use the tool function, or in the text format <tool name=\"...\">{json}</tool>). Write actions need the user's approval; when the user is away they are NOT done, so list them under 'Needs you':\n" + TOOLS_TXT : "";
   const hookNote = HOOKS && (HOOKS.deny_paths || HOOKS.pre_finish || HOOKS.post_edit || HOOKS.pre_bash_deny) ? "\n\nPROJECT HOOKS (.venus/hooks.json) are active and enforced by the system." : "";
-  return head + "\n## VENUS.md\n" + (md || "(none yet)") + "\n\n## Files\n" + treeText(ROOT) + projectContext() + "\n\n# TASK\n" + INSTR + modeNote + toolsNote + hookNote + (resume ? "\n\n# STATE (you are continuing your own earlier work)\n" + resume : "");
+  const sk = skp();
+  const skillNote = sk.picked.length
+    ? "\n\n## SKILLS FOR THIS TASK" + (sk.explicit ? " (the user asked you to follow them: apply them to the project files themselves; the task is NOT done until the files are changed accordingly)" : " (follow them where they apply)") + "\n" + sk.picked.map((x) => "### " + x.name + "\n" + String(x.instructions).slice(0, 8000)).join("\n\n").slice(0, 20000)
+    : (sk.explicit ? "\n\n## SKILLS\nThe user referred to a skill. Load the matching one with the skill tool FIRST (see the skills list above), then apply it to the project files." : "");
+  return head + "\n## VENUS.md\n" + (md || "(none yet)") + "\n\n## Files\n" + treeText(ROOT) + projectContext() + "\n\n# TASK\n" + INSTR + modeNote + toolsNote + hookNote + skillNote + (resume ? "\n\n# STATE (you are continuing your own earlier work)\n" + resume : "");
 }
 function resetContext(ctx, why) {
   writeState(ctx);
@@ -1055,11 +1088,16 @@ async function main() {
   emit("info", "Background runner v5 started (" + (NATIVE ? "native tool-calling" : "text tool format") + ", mode: " + MODE + ").");
   initBase();
   HOOKS = loadHooks();
+  {
+    const sk = skp();
+    if (sk.picked.length) emit("info", "Skills applied to this task: " + sk.picked.map((x) => x.name).join(", ") + (sk.explicit ? " (as you asked)." : "."));
+    else if (sk.mentions && !(job.skills || []).length) emit("info", "You mentioned a skill, but this chat has no enabled skills. Skills are not shared between chats: add the skill in THIS chat's Skills page, then try again.");
+  }
   const tl = await api("/api/tools", {action: "list"});
   if (tl.ok && Array.isArray(tl.d.specs)) {
     TOOLS_TXT = tl.d.specs.filter((s) => !/^(web|verify|identity)\./.test(s.name)).slice(0, 40).map((s) => "- " + s.name + "(" + s.params + ")" + (s.risk === "write" ? " (write) " : " ") + "- " + s.description).join("\n");
   }
-  const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, thoughts: [], lastReset: -99, readSeen: {}, nativeOk: false, depsTried: false, gates: {tests: 0, ui: 0, mem: 0, review: 0, impl: 0, secrets: 0}};
+  const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, thoughts: [], lastReset: -99, readSeen: {}, nativeOk: false, depsTried: false, gates: {tests: 0, ui: 0, mem: 0, review: 0, impl: 0, skill: 0, secrets: 0}};
   const first = buildFirst(savedState());
   if (NATIVE) nmsgs = [nUserMsg(first)]; else xmsgs = [{role: "user", content: first}];
   const maxSteps = job.maxSteps || 250;
@@ -1229,6 +1267,7 @@ async function main() {
       if (MODE === "plan") { writeState(ctx); return end("done", fin + "\n\n---\nPlan mode: nothing was changed. Run the same task again without --plan to build it.", ctx.memories); }
       const again = await gates(fin, ctx);
       if (again) { out[calls.findIndex((c) => c.name === "finish")] = "Finish not accepted yet."; addResults(calls, out, null, again); continue; }
+      if (ctx.noChange) { writeState(ctx); return end("error", "Nothing was changed in the project, so this task is NOT done. The model said: " + fin.slice(0, 400) + "\n\nTry again with a stronger model, or describe the exact change you want.", ctx.memories); }
       finalCommit(fin);
       writeState(ctx);
       const stat = statLine();
