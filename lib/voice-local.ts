@@ -35,6 +35,13 @@ export function languageForNumber(number?: string): string {
   return "en-US";
 }
 
+/** The country calling code at the start of a number: "+14155550123" -> "1", "+447911123456" -> "44". Empty when unknown. */
+export function callingCodeOf(number?: string): string {
+  const digits = String(number ?? "").replace(/\D/g, "");
+  for (const n of [3, 2, 1]) if (CALLING_CODES[digits.slice(0, n)] && digits.length > n) return digits.slice(0, n);
+  return "";
+}
+
 /** The saved language setting; "auto" means: follow the country of the number on the call. */
 export function resolveLanguage(setting: string | undefined, number?: string): string {
   const s = String(setting ?? "en-US").trim();
@@ -367,7 +374,7 @@ const withTimeout = <T,>(p: Promise<T>, ms: number, what: string): Promise<T> =>
 // ---------------- start / wake the voice server ----------------
 export type LocalVoiceState =
   | { state: "ready"; url: string; sandboxId: string }
-  | { state: "installing" | "no_computer" | "error"; detail: string };
+  | { state: "installing" | "waking" | "no_computer" | "error"; detail: string };
 
 const inflight = new Map<string, Promise<LocalVoiceState>>();
 const cooldown = new Map<string, number>();
@@ -385,7 +392,8 @@ async function doEnsure(uid: string, chatId: string | undefined, budgetMs: numbe
     if (!user?.e2bKey || !sandboxId) return { state: "no_computer", detail: "Is chat ka cloud PC abhi bana nahi hai (ya E2B key saved nahi hai). Pehle PC kholo." };
     const e2bKey = await resolveValue(uid, user.e2bKey);
     const { connect, exec } = await import("@/lib/e2b-server");
-    const sb = await withTimeout(connect(e2bKey, sandboxId), Math.max(4000, Math.min(budgetMs, 15_000)), "Waking the cloud PC");
+    // A paused cloud PC can need a while to resume: wait as long as the budget allows (up to 40 s).
+    const sb = await withTimeout(connect(e2bKey, sandboxId), Math.max(4000, Math.min(budgetMs - 4000, 40_000)), "Waking the cloud PC");
     const url = `https://${(sb as unknown as { getHost: (p: number) => string }).getHost(LOCAL_PORT)}`;
     const key = voiceKey(sandboxId);
     const kid = keyId(key);
@@ -411,7 +419,10 @@ async function doEnsure(uid: string, chatId: string | undefined, budgetMs: numbe
     await userRef.set({ voiceSettings: { localVoiceUrl: url, localVoiceSandbox: sandboxId, localVoiceAt: Date.now() } }, { merge: true });
     return { state: "ready", url, sandboxId };
   } catch (e) {
-    return { state: "error", detail: (e instanceof Error ? e.message : String(e)).slice(0, 240) };
+    const msg = e instanceof Error ? e.message : String(e);
+    // The wake-up request has already reached E2B, so the PC is usually awake by the next try.
+    if (/took too long/i.test(msg)) return { state: "waking", detail: "Cloud PC jaag raha hai (E2B se resume hone me der lag rahi hai). 30-40 second ruko aur Save & test dubara dabao: jagane ka request chala gaya hai, agli baar jaldi ho jana chahiye." };
+    return { state: "error", detail: msg.slice(0, 240) };
   }
 }
 
