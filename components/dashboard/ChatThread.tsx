@@ -8,6 +8,7 @@ import { splitSuggestions } from "@/lib/suggest";
 import { splitAttachmentBlock, type AttachKind } from "@/lib/attachments";
 import { previewFor } from "@/lib/attach-client";
 import AttachCard from "@/components/dashboard/AttachCard";
+import FountFeedback from "@/components/fount/FountFeedback";
 
 function Tool({ label, onClick, active, children }: { label: string; onClick: (e: React.MouseEvent) => void; active?: boolean; children: React.ReactNode }) {
   return (
@@ -36,6 +37,7 @@ function quoteOf(e: React.MouseEvent, body: string): string {
 }
 
 export default function ChatThread({
+  chatId,
   messages,
   pending,
   busy,
@@ -45,6 +47,7 @@ export default function ChatThread({
   onRetry,
   replyingAt,
 }: {
+  chatId?: string;
   messages: ChatMessage[];
   pending?: boolean;
   busy?: boolean;
@@ -116,6 +119,7 @@ export default function ChatThread({
                       <RotateCcw size={14} />
                     </Tool>
                   )}
+                  {isLast && chatId && <FountFeedback chatId={chatId} />}
                 </div>
               </div>
             )}
