@@ -8,6 +8,8 @@ import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { getExistingOpenAIKey } from "@/lib/voice-utils";
 import { resolveConnectorsSafe } from "@/lib/tools/connectors";
 import { appBaseUrl, getResolvedVoiceSecrets, getVoiceSettings, sayTag, signVoiceToken, xmlEscape, type VoiceSettings } from "@/lib/voice-server";
+import { waitUntil } from "@vercel/functions";
+import { localTts, resolveLanguage, speechLanguage, warmLocalVoice } from "@/lib/voice-local";
 
 export class VoiceError extends Error {
   constructor(message: string, public status = 400) { super(message); }
@@ -64,12 +66,15 @@ export type CallDoc = {
   summary?: string; finalizedAt?: number; createdAt?: number;
 };
 
+/** The number on the other end of the call: who phoned us (inbound) or whom we phoned (outbound). */
+export const callNumber = (c: Pick<CallDoc, "direction" | "to" | "from">): string => (c.direction === "inbound" ? c.from : c.to) ?? "";
+
 export async function voicePrompt(uid: string, agent: Agent, call: CallDoc, s: VoiceSettings): Promise<string> {
   const { role, mem } = await brain(uid, agent.chatId, call.goal || "");
-  const lang = s.language ?? "en-US";
+  const lang = resolveLanguage(s.language, callNumber(call));
   return [
     `You are ${agent.name}, an AI teammate, now on a live PHONE CALL. You are speaking, not writing.`,
-    `RULES: Your very first sentence must make clear you are an AI assistant. Speak 1-3 short, natural sentences. No lists, no markdown, no URLs, no emojis. Speak in the language of the caller (call language setting: ${lang}); if the caller uses Hindi or Hinglish, answer the same way.`,
+    `RULES: Your very first sentence must make clear you are an AI assistant. Speak 1-3 short, natural sentences. No lists, no markdown, no URLs, no emojis. Speak in the language of the caller (call language setting: ${lang}); if the caller switches language, switch with them; if the caller uses Hindi or Hinglish, answer in Hindi. Write every word in the normal script of the language you speak (Hindi in Devanagari, Arabic in Arabic script, never in Roman letters) so the voice pronounces it correctly. Say numbers and phone numbers as words, digit by digit.`,
     `Never claim you did something unless a tool result confirms it. During the call you may use READ-ONLY tools. For anything that changes something (send, book, buy, write, update), say you will take care of it right after the call and add [[TODO:<exact task with all details>]] at the end of your reply. If the goal is reached or the caller wants to end, say goodbye and add [[HANGUP]] at the end. Never say passwords, keys or private data.`,
     role ? `YOUR ROLE: ${role}` : "",
     mem ? `WHAT YOU REMEMBER:\n${mem}` : "",
@@ -147,10 +152,14 @@ async function ttsBytes(uid: string, text: string, s: VoiceSettings): Promise<{ 
 }
 
 /** XML that speaks `text`: the chosen voice provider, or the free Twilio voice when none works. */
-export async function speechXml(uid: string, base: string, text: string, s: VoiceSettings): Promise<string> {
+export async function speechXml(uid: string, base: string, text: string, s: VoiceSettings, chatId?: string): Promise<string> {
+  const language = s.language && s.language !== "auto" ? s.language : "en-US";
   if ((s.ttsProvider ?? "twilio") !== "twilio") {
     try {
-      const a = await ttsBytes(uid, text, s);
+      // "local" = the voice model on your cloud PC speaks the words the chat model wrote
+      const a = s.ttsProvider === "local"
+        ? await localTts(s, text, speechLanguage(text, language), { uid, chatId, wake: true })
+        : await ttsBytes(uid, text, s);
       if (a && a.bytes.length < 700_000) {
         const id = randomUUID().replace(/-/g, "");
         await userRef(uid).collection("voiceAudio").doc(id).set({ b64: a.bytes.toString("base64"), mime: a.mime, at: Date.now(), expireAt: new Date(Date.now() + 3600_000) });
@@ -159,7 +168,7 @@ export async function speechXml(uid: string, base: string, text: string, s: Voic
       }
     } catch { /* fall back to the built-in voice */ }
   }
-  return sayTag(text, s.language ?? "en-US");
+  return sayTag(text, language);
 }
 
 // ---------------- calls ----------------
@@ -167,6 +176,7 @@ export async function openingLine(uid: string, callId: string): Promise<string> 
   const ref = userRef(uid).collection("voiceCalls").doc(callId);
   const d = ((await ref.get()).data() ?? {}) as CallDoc;
   const s = await getVoiceSettings(uid);
+  s.language = resolveLanguage(s.language, callNumber(d));
   const hi = (s.language ?? "").startsWith("hi");
   let text = d.direction === "inbound"
     ? hi ? "Namaste! Main ek AI assistant hoon. Bataiye, main aapki kya madad kar sakta hoon?" : "Hello! I am an AI assistant. How can I help you today?"
@@ -209,6 +219,11 @@ export async function placeOutboundCall(uid: string, p: { to: string; goal?: str
   const snap = await calls.where("createdAt", ">=", today.getTime()).get();
   const limit = st.dailyLimit ?? 50;
   if (snap.docs.filter((d) => d.data().direction === "outbound").length >= limit) throw new VoiceError(`Daily outbound limit (${limit}) pura ho gaya.`, 429);
+
+  // While the phone rings, the cloud PC wakes up and the local voice loads, so the first sentence is fast.
+  if (st.ttsProvider === "local") {
+    try { waitUntil(warmLocalVoice(uid, agent.chatId, resolveLanguage(st.language, to)).then(() => undefined, () => undefined)); } catch { /* not on Vercel */ }
+  }
 
   const callId = randomUUID().replace(/-/g, "");
   const now = Date.now();
