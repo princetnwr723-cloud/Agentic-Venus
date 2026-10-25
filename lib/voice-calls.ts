@@ -9,7 +9,7 @@ import { getExistingOpenAIKey } from "@/lib/voice-utils";
 import { resolveConnectorsSafe } from "@/lib/tools/connectors";
 import { appBaseUrl, getResolvedVoiceSecrets, getVoiceSettings, sayTag, signVoiceToken, xmlEscape, type VoiceSettings } from "@/lib/voice-server";
 import { waitUntil } from "@vercel/functions";
-import { localTts, resolveLanguage, speechLanguage, warmLocalVoice } from "@/lib/voice-local";
+import { callingCodeOf, localTts, resolveLanguage, speechLanguage, warmLocalVoice } from "@/lib/voice-local";
 
 export class VoiceError extends Error {
   constructor(message: string, public status = 400) { super(message); }
@@ -194,21 +194,22 @@ export async function openingLine(uid: string, callId: string): Promise<string> 
   return text;
 }
 
-/** Turns "98765 43210", "09876543210" or "0091..." into +91... (a 10-digit number gets the default country code). */
+/** Turns "0091...", "00447..." or a local number such as "98765 43210" / "09876543210" into +country... The default country code is the one of your own Twilio number. */
 export function normalizePhone(raw: string, defaultCode = "91"): string {
   let s = raw.trim().replace(/[\s().-]/g, "");
   if (s.startsWith("00")) s = "+" + s.slice(2);
   if (s.startsWith("+")) return s;
-  if (/^0\d{10}$/.test(s)) return "+" + defaultCode + s.slice(1);
+  if (/^0\d{8,11}$/.test(s)) return "+" + defaultCode + s.slice(1);
   if (/^\d{10}$/.test(s)) return "+" + defaultCode + s;
   return "+" + s;
 }
 
 export async function placeOutboundCall(uid: string, p: { to: string; goal?: string; context?: string; chatId?: string; approved: boolean; req?: Request }) {
-  const to = normalizePhone(String(p.to || ""));
-  if (!/^\+[1-9]\d{5,14}$/.test(to)) throw new VoiceError("That number looks wrong. Use international format, e.g. +919876543210 (a 10-digit Indian number also works).");
   const sec = await getResolvedVoiceSecrets(uid);
   const st = sec.settings;
+  // Numbers without a + get the country code of YOUR Twilio number (a US number gets +1, an Indian one +91). A number with + works in every country.
+  const to = normalizePhone(String(p.to || ""), callingCodeOf(st.fromNumber) || "91");
+  if (!/^\+[1-9]\d{5,14}$/.test(to)) throw new VoiceError("That number looks wrong. Write it with the country code, e.g. +919876543210 or +14155550123.");
   if (!st.outboundEnabled) throw new VoiceError("Outgoing calls band hain. Voice page par Twilio connect karo.");
   if (st.approvalRequired !== false && !p.approved) throw new VoiceError("Call se pehle confirm karo.", 403);
   if (!sec.twilioSid || !sec.twilioToken || !st.fromNumber) throw new VoiceError("Pehle Voice page par Twilio key paste karke connect karo.");
@@ -222,7 +223,7 @@ export async function placeOutboundCall(uid: string, p: { to: string; goal?: str
 
   // While the phone rings, the cloud PC wakes up and the local voice loads, so the first sentence is fast.
   if (st.ttsProvider === "local") {
-    try { waitUntil(warmLocalVoice(uid, agent.chatId, resolveLanguage(st.language, to)).then(() => undefined, () => undefined)); } catch { /* not on Vercel */ }
+    try { waitUntil(warmLocalVoice(uid, agent.chatId, resolveLanguage(st.language, to), 24_000).then(() => undefined, () => undefined)); } catch { /* not on Vercel */ }
   }
 
   const callId = randomUUID().replace(/-/g, "");
