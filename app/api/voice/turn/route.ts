@@ -2,7 +2,8 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { callProvider, type ChatMsg } from "@/lib/ai-providers-server";
 import { getVoiceSettings, getResolvedVoiceSecrets, verifyVoiceToken, verifyTwilioSignature, appBaseUrl, gatherXml, hangupXml, sayTag, twimlResponse } from "@/lib/voice-server";
-import { loadAgent, parseSpoken, speechXml, voicePrompt, type CallDoc } from "@/lib/voice-calls";
+import { callNumber, loadAgent, parseSpoken, speechXml, voicePrompt, type CallDoc } from "@/lib/voice-calls";
+import { resolveLanguage } from "@/lib/voice-local";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
 import { makeCtx } from "@/lib/tools/connectors";
 import { extractToolCalls, toolPrompt } from "@/lib/tools/prompt";
@@ -47,7 +48,8 @@ export async function POST(req: Request) {
     if (!snap.exists || (callSid && call.providerCallId && call.providerCallId !== callSid)) return twimlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response>${sayTag("Call session not found.", "en-US")}<Hangup/></Response>`, 404);
 
     const settings = sec.settings;
-    language = settings.language ?? "en-US";
+    settings.language = resolveLanguage(settings.language, callNumber(call));
+    language = settings.language;
     const base = appBaseUrl(req);
     nextAction = `${base}/api/voice/turn?token=${encodeURIComponent(token)}`;
     if (!speech) return twimlResponse(gatherXml(sayTag("Sorry, I did not catch that. Please say it again.", language), language, nextAction));
@@ -86,7 +88,7 @@ export async function POST(req: Request) {
     }, { merge: true });
     await audit(uid, { kind: "voice_turn", chatId: agent.chatId, text: `Call ${claims.callId}: ${agent.provider} handled a turn` });
 
-    const inner = await speechXml(uid, base, sp.say, settings);
+    const inner = await speechXml(uid, base, sp.say, settings, agent.chatId);
     return twimlResponse(sp.hangup ? hangupXml(inner) : gatherXml(inner, language, nextAction));
   } catch {
     // never leave the caller in silence
