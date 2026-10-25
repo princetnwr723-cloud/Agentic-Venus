@@ -6,21 +6,22 @@ import { ArrowLeft, AudioLines, CheckCircle2, CircleAlert, LoaderCircle, Phone, 
 import { useAuth } from "@/lib/auth-context";
 import { listChats, type Chat } from "@/lib/chats";
 
-type TtsId = "twilio" | "openai" | "gemini" | "elevenlabs" | "deepgram";
+type TtsId = "twilio" | "local" | "openai" | "gemini" | "elevenlabs" | "deepgram";
 type Settings = {
   twilioConnected: boolean; fromNumber: string; ttsProvider: TtsId; ttsModel: string; ttsVoice: string;
-  ttsConnected: Record<string, boolean>; voiceChatId: string; language: string; inboundEnabled: boolean; outboundEnabled: boolean;
+  ttsConnected: Record<string, boolean>; voiceChatId: string; language: string; inboundEnabled: boolean; outboundEnabled: boolean; localReady: boolean;
 };
 type Call = { id: string; direction: string; to: string; from: string; status: string; createdAt: number; durationSeconds: number; goal: string; summary: string };
 
 const TTS: Record<TtsId, { label: string; models: string[]; voices: string[]; keyHint: string }> = {
   twilio: { label: "Free built-in voice (no key)", models: [""], voices: [""], keyHint: "" },
+  local: { label: "Local voice model on your cloud PC (free, any language)", models: [""], voices: [""], keyHint: "" },
   openai: { label: "OpenAI", models: ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"], voices: ["alloy", "ash", "coral", "echo", "nova", "onyx", "sage", "shimmer"], keyHint: "sk-…" },
   gemini: { label: "Google Gemini", models: ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"], voices: ["Kore", "Puck", "Zephyr", "Charon", "Fenrir", "Leda", "Aoede", "Orus"], keyHint: "AIza…" },
   elevenlabs: { label: "ElevenLabs", models: ["eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_turbo_v2_5"], voices: ["Rachel", "Adam", "Bella", "Antoni"], keyHint: "ElevenLabs API key" },
   deepgram: { label: "Deepgram", models: ["aura-2"], voices: ["aura-2-thalia-en", "aura-2-andromeda-en", "aura-2-helena-en", "aura-2-arcas-en", "aura-2-orpheus-en"], keyHint: "Deepgram API key" },
 };
-const DEFAULTS: Settings = { twilioConnected: false, fromNumber: "", ttsProvider: "twilio", ttsModel: "", ttsVoice: "", ttsConnected: {}, voiceChatId: "", language: "en-US", inboundEnabled: false, outboundEnabled: false };
+const DEFAULTS: Settings = { twilioConnected: false, fromNumber: "", ttsProvider: "twilio", ttsModel: "", ttsVoice: "", ttsConnected: {}, voiceChatId: "", language: "en-US", inboundEnabled: false, outboundEnabled: false, localReady: false };
 const box = "w-full rounded-xl border border-line bg-bg px-3 py-2.5 text-sm text-ink outline-none transition focus:border-ink/40";
 const label = "mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted";
 
@@ -77,7 +78,11 @@ export default function VoicePage() {
   const saveVoice = () => run("voice", async () => {
     const d = await api("/api/voice/settings", { method: "POST", body: JSON.stringify({ action: "save", ttsProvider: s.ttsProvider, ttsModel: s.ttsModel, ttsVoice: s.ttsVoice, ttsKey: ttsKey || undefined, language: s.language, voiceChatId: s.voiceChatId }) });
     setS({ ...DEFAULTS, ...d.settings }); setTtsKey("");
-    if (s.ttsProvider !== "twilio") {
+    if (s.ttsProvider === "local") {
+      const p = await api("/api/voice/settings", { method: "POST", body: JSON.stringify({ action: "prepare_local" }) });
+      setS({ ...DEFAULTS, ...p.settings });
+      setNote({ kind: p.ok ? "ok" : "error", text: p.message });
+    } else if (s.ttsProvider !== "twilio") {
       const t = await api("/api/voice/test", { method: "POST", body: JSON.stringify({ kind: "tts" }) });
       setNote({ kind: "ok", text: `Saved. ${t.label}` });
     } else setNote({ kind: "ok", text: "Saved. Free built-in voice use hogi." });
@@ -100,6 +105,7 @@ export default function VoicePage() {
   if (!user) return <main className="min-h-screen bg-bg p-8 text-ink"><Link href="/" className="text-sm text-muted">Sign in karo</Link></main>;
 
   const t = TTS[s.ttsProvider];
+  const usesKey = s.ttsProvider !== "twilio" && s.ttsProvider !== "local";
   const when = (n: number) => (n ? new Date(n).toLocaleString() : "—");
 
   return (
@@ -136,11 +142,12 @@ export default function VoicePage() {
           <div><h2 className="font-semibold">2. Voice provider (agent kis awaaz me bolega)</h2><p className="mt-1 text-sm text-muted">Bolne ka text chat wale model se aata hai. Ye sirf uski awaaz banata hai.</p></div>
           <div className="grid gap-3 sm:grid-cols-3">
             <div><label className={label}>Provider</label><select className={box} value={s.ttsProvider} onChange={(e) => { const p = e.target.value as TtsId; setS({ ...s, ttsProvider: p, ttsModel: TTS[p].models[0], ttsVoice: TTS[p].voices[0] }); setTtsKey(""); }}>{(Object.keys(TTS) as TtsId[]).map((id) => <option key={id} value={id}>{TTS[id].label}</option>)}</select></div>
-            {s.ttsProvider !== "twilio" && <div><label className={label}>Model</label><select className={box} value={s.ttsModel} onChange={(e) => setS({ ...s, ttsModel: e.target.value })}>{t.models.map((m) => <option key={m}>{m}</option>)}</select></div>}
-            {s.ttsProvider !== "twilio" && <div><label className={label}>Voice</label><select className={box} value={s.ttsVoice} onChange={(e) => setS({ ...s, ttsVoice: e.target.value })}>{t.voices.map((v) => <option key={v}>{v}</option>)}</select></div>}
+            {usesKey && <div><label className={label}>Model</label><select className={box} value={s.ttsModel} onChange={(e) => setS({ ...s, ttsModel: e.target.value })}>{t.models.map((m) => <option key={m}>{m}</option>)}</select></div>}
+            {usesKey && <div><label className={label}>Voice</label><select className={box} value={s.ttsVoice} onChange={(e) => setS({ ...s, ttsVoice: e.target.value })}>{t.voices.map((v) => <option key={v}>{v}</option>)}</select></div>}
           </div>
-          {s.ttsProvider !== "twilio" && <div><label className={label}>{t.label} API key {s.ttsConnected[s.ttsProvider] ? "· saved" : ""}</label><input className={box} type="password" autoComplete="new-password" value={ttsKey} onChange={(e) => setTtsKey(e.target.value)} placeholder={s.ttsConnected[s.ttsProvider] ? "Replace karne ke liye naya key paste karo" : t.keyHint} /></div>}
-          <button onClick={saveVoice} disabled={busy !== null || (s.ttsProvider !== "twilio" && !ttsKey.trim() && !s.ttsConnected[s.ttsProvider])} className="inline-flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-sm font-medium text-bg disabled:opacity-40">{busy === "voice" && <LoaderCircle size={15} className="animate-spin" />} Save & test</button>
+          {usesKey && <div><label className={label}>{t.label} API key {s.ttsConnected[s.ttsProvider] ? "· saved" : ""}</label><input className={box} type="password" autoComplete="new-password" value={ttsKey} onChange={(e) => setTtsKey(e.target.value)} placeholder={s.ttsConnected[s.ttsProvider] ? "Replace karne ke liye naya key paste karo" : t.keyHint} /></div>}
+          {s.ttsProvider === "local" && <p className="text-xs leading-relaxed text-muted">Awaaz ek local voice model (Piper) se aati hai jo is chat ke cloud PC me chalta hai, chat model sirf text likhta hai. Status: <b className={s.localReady ? "text-emerald-500" : "text-ink"}>{s.localReady ? "Ready" : "Abhi taiyaar nahi: Save & test dabao (pehli baar 1-2 minute lagte hain)"}</b>. Jab tak taiyaar nahi, built-in voice chalegi, call kabhi chup nahi hogi.</p>}
+          <button onClick={saveVoice} disabled={busy !== null || (usesKey && !ttsKey.trim() && !s.ttsConnected[s.ttsProvider])} className="inline-flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-sm font-medium text-bg disabled:opacity-40">{busy === "voice" && <LoaderCircle size={15} className="animate-spin" />} Save & test</button>
         </section>
 
         {/* 3. Agent */}
@@ -148,7 +155,7 @@ export default function VoicePage() {
           <h2 className="font-semibold">3. Kaun si chat call uthayegi</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             <div><label className={label}>Agent (chat)</label><select className={box} value={s.voiceChatId} onChange={(e) => void saveAgent({ voiceChatId: e.target.value })}>{!s.voiceChatId && <option value="">Latest chat</option>}{chats.map((c) => <option key={c.id} value={c.id}>{c.agentName} · {c.model}</option>)}</select></div>
-            <div><label className={label}>Bolne ki bhasha</label><select className={box} value={s.language} onChange={(e) => void saveAgent({ language: e.target.value })}><option value="en-US">English (US)</option><option value="en-IN">English (India)</option><option value="hi-IN">Hindi</option><option value="en-GB">English (UK)</option><option value="es-ES">Spanish</option><option value="fr-FR">French</option><option value="de-DE">German</option><option value="pt-BR">Portuguese (Brazil)</option><option value="ar-SA">Arabic</option></select></div>
+            <div><label className={label}>Bolne ki bhasha</label><select className={box} value={s.language} onChange={(e) => void saveAgent({ language: e.target.value })}><option value="auto">Auto (number ke country ke hisaab se)</option><option value="en-US">English (US)</option><option value="en-IN">English (India)</option><option value="hi-IN">Hindi</option><option value="en-GB">English (UK)</option><option value="es-ES">Spanish</option><option value="fr-FR">French</option><option value="de-DE">German</option><option value="pt-BR">Portuguese (Brazil)</option><option value="ar-SA">Arabic</option><option value="ja-JP">Japanese</option><option value="ko-KR">Korean</option><option value="zh-CN">Chinese</option><option value="ru-RU">Russian</option><option value="uk-UA">Ukrainian</option><option value="tr-TR">Turkish</option><option value="it-IT">Italian</option><option value="nl-NL">Dutch</option><option value="pl-PL">Polish</option><option value="sv-SE">Swedish</option><option value="el-GR">Greek</option><option value="id-ID">Indonesian</option><option value="th-TH">Thai</option><option value="vi-VN">Vietnamese</option><option value="bn-BD">Bengali</option><option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option><option value="mr-IN">Marathi</option><option value="ur-PK">Urdu</option><option value="fa-IR">Persian</option><option value="sw-KE">Swahili</option><option value="fil-PH">Filipino</option><option value="pt-PT">Portuguese (Portugal)</option><option value="es-MX">Spanish (Mexico)</option><option value="ar-AE">Arabic (UAE)</option></select></div>
           </div>
           <p className="text-xs text-muted">Is chat ka model, role, memory aur connected tools (Google, MCP…) call ke dauran use hote hain. Call khatam hone par summary aur follow-up tasks usi chat me aate hain.</p>
         </section>
