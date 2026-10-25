@@ -7,7 +7,7 @@
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "12";
+export const RUNNER_VERSION = "13";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -39,7 +39,9 @@ const EARLIER_AT = INSTR.indexOf("\n\n# Earlier work in this codespace");
 const TASK = (EARLIER_AT >= 0 ? INSTR.slice(0, EARLIER_AT) : INSTR).trim();
 const COMPLEX = TASK.length > 180;
 const READONLY = /^\s*(please\s+)?(read|explain|analy[sz]e|review|summari[sz]e|understand|audit|investigate|describe|explore|tell me|show me|what|how|why)\b/i;
-const BUDGET = job.budgetChars || 9000000;
+// Safety net against a runaway loop, NOT a leash: it starts high and extends itself while the agent keeps changing files.
+const BUDGET0 = Number(process.env.VENUS_BUDGET) || Math.max(Number(job.budgetChars) || 0, 40000000);
+let BUDGET = BUDGET0;
 let USED = 0, BASE_SHA = "", MEM0 = 0, HOOKS = {}, TOOLS_TXT = "", tainted = false;
 
 let state = {status: "running", step: 0, summary: "", startedAt: Date.now()};
@@ -65,8 +67,17 @@ const OPENAI_URLS = {
   perplexity: "https://api.perplexity.ai/chat/completions", groq: "https://api.groq.com/openai/v1/chat/completions",
   deepseek: "https://api.deepseek.com/chat/completions", apinex: "https://apinex.bond/v1/chat/completions"
 };
+// A request body with a screenshot is huge as text but cheap as tokens: count each image as a flat 6000 characters.
+function bodySize(o) {
+  let imgs = 0;
+  const t = JSON.stringify(o, (k, v) => {
+    if (typeof v === "string" && v.length > 4000 && /^[A-Za-z0-9+\/=]+$/.test(v.slice(0, 300))) { imgs++; return ""; }
+    return v;
+  });
+  return t.length + imgs * 6000;
+}
 async function post(url, headers, body) {
-  USED += JSON.stringify(body).length;
+  USED += bodySize(body);
   const res = await fetch(url, {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, headers), body: JSON.stringify(body), signal: AbortSignal.timeout(240000)});
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -957,7 +968,7 @@ async function gates(fin, ctx) {
   // only for build/create tasks: questions, analysis and read-only tasks may finish without changing any file
   const requiresImplementation = (/\b(build|create|make|implement|develop|website|web\s*app|webpage|landing\s*page|application|app|site|page|component|feature)\b/i.test(TASK) || skp().explicit) && !READONLY.test(TASK);
   const deliverables = changed.filter((f) => !/\.(md|mdx|mmd|txt|rst|adoc)$/i.test(f) && !/(^|\/)(LICENSE|CHANGELOG|CONTRIBUTING)(\.|$)/i.test(f));
-  if (requiresImplementation && deliverables.length === 0 && ctx.gates.impl >= 3) ctx.noChange = true;
+  if (requiresImplementation && changed.length === 0 && ctx.gates.impl >= 3) ctx.noChange = true; // really nothing changed (docs-only results are still a result)
   if (requiresImplementation && deliverables.length === 0 && ctx.gates.impl < 3) {
     ctx.gates.impl++;
     emit("info", "Gate: no implementation files changed; documentation-only completion blocked (" + ctx.gates.impl + "/3).");
@@ -1100,15 +1111,21 @@ async function main() {
   const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, thoughts: [], lastReset: -99, readSeen: {}, nativeOk: false, depsTried: false, gates: {tests: 0, ui: 0, mem: 0, review: 0, impl: 0, skill: 0, secrets: 0}};
   const first = buildFirst(savedState());
   if (NATIVE) nmsgs = [nUserMsg(first)]; else xmsgs = [{role: "user", content: first}];
-  const maxSteps = job.maxSteps || 250;
-  const deadline = Date.now() + (job.maxMinutes || 360) * 60000;
+  let maxSteps = job.maxSteps || 250;
+  let deadline = Date.now() + (job.maxMinutes || 360) * 60000;
+  const HARD_STEPS = 1500, HARD_END = Date.now() + 24 * 3600000;
+  // "making progress" = it changed project files within the last 40 steps
+  const progressing = (step) => step - ctx.lastProgress <= 40;
   let noTool = 0;
   const sigs = [];
 
   for (let step = 0; step < maxSteps; step++) {
     if (stopped()) { writeState(ctx); return end("stopped", "Stopped by the user.", ctx.memories); }
+    if (step >= maxSteps - 1 && maxSteps < HARD_STEPS && progressing(step)) { maxSteps += 150; emit("info", "Step limit extended automatically: the agent is still making progress."); }
+    if (Date.now() > deadline && deadline < HARD_END && progressing(step)) { deadline += 2 * 3600000; emit("info", "Time limit extended automatically: the agent is still making progress."); }
     if (Date.now() > deadline) { writeState(ctx); return end("error", "Time limit reached before the task was finished. Progress is saved (git history + .venus/state.json): send \"continue\" to resume.", ctx.memories); }
-    if (USED > BUDGET) { writeState(ctx); return end("error", "The compute budget for this job was reached before the task was finished. Progress is saved (git history + .venus/state.json): send \"continue\" to resume.", ctx.memories); }
+    if (USED > BUDGET && BUDGET < BUDGET0 * 10 && progressing(step)) { BUDGET += BUDGET0; emit("info", "Compute budget extended automatically: the agent is still making progress."); }
+    if (USED > BUDGET) { writeState(ctx); return end("error", "The agent stopped to protect your API credits: it used its compute budget without changing any file for a long time (it looks stuck). Progress is saved (git history + .venus/state.json): send \"continue\" to resume, or tell it exactly what to do next.", ctx.memories); }
     save({step: step + 1});
     ctx.touched = new Set();
     if (step > 0 && step % 8 === 0) writeState(ctx);
