@@ -1,6 +1,7 @@
 import { getAdminDb } from "@/lib/firebase-admin";
 import { getVoiceSettings, getResolvedVoiceSecrets, signVoiceToken, verifyVoiceToken, verifyTwilioSignature, appBaseUrl, gatherXml, sayTag, twimlResponse, voiceSafeError } from "@/lib/voice-server";
 import { defaultChatId, openingLine, speechXml } from "@/lib/voice-calls";
+import { resolveLanguage } from "@/lib/voice-local";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -21,15 +22,19 @@ export async function POST(req: Request) {
     const userRef = getAdminDb().collection("users").doc(claims.uid);
     const settings = await getVoiceSettings(claims.uid);
     let callId: string;
+    let chatId = "";
+    let number = "";
 
     if (claims.purpose === "inbound") {
       if (!settings.inboundEnabled) return bye("This AI assistant is not accepting calls right now.");
       const from = String(form.get("From") || "").slice(0, 40);
       const to = String(form.get("To") || "").slice(0, 40);
       callId = callSid;
+      number = from;
+      chatId = await defaultChatId(claims.uid);
       await userRef.collection("voiceCalls").doc(callId).set({
         direction: "inbound", from, to, providerCallId: callSid, status: "in-progress", createdAt: Date.now(), updatedAt: Date.now(),
-        chatId: await defaultChatId(claims.uid), history: [], transcript: [], followUps: [],
+        chatId, history: [], transcript: [], followUps: [],
       }, { merge: true });
       await audit(claims.uid, { kind: "voice_inbound_call", text: `Inbound call ${from}` });
     } else {
@@ -37,14 +42,18 @@ export async function POST(req: Request) {
       callId = claims.callId;
       const snap = await userRef.collection("voiceCalls").doc(callId).get();
       if (!snap.exists || (snap.data()?.providerCallId && snap.data()?.providerCallId !== callSid)) return bye("Call session was not found.", 404);
+      number = String(snap.data()?.to ?? "");
+      chatId = String(snap.data()?.chatId ?? "");
       await snap.ref.set({ status: "in-progress", answeredAt: Date.now(), updatedAt: Date.now() }, { merge: true });
     }
 
+    // "auto" language follows the country of the number (any country can be called or can call)
+    settings.language = resolveLanguage(settings.language, number);
     const base = appBaseUrl(req);
     const callToken = signVoiceToken({ uid: claims.uid, callId, purpose: "call", exp: Date.now() + 4 * 3600_000 });
     const action = `${base}/api/voice/turn?token=${encodeURIComponent(callToken)}`;
     const opening = await openingLine(claims.uid, callId);
-    const inner = await speechXml(claims.uid, base, opening, settings);
+    const inner = await speechXml(claims.uid, base, opening, settings, chatId);
     return twimlResponse(gatherXml(inner, settings.language ?? "en-US", action));
   } catch (e) {
     return bye(String(voiceSafeError(e)).replace(/[<&>"']/g, " "), 500);
