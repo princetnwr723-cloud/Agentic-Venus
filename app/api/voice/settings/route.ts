@@ -4,6 +4,7 @@ import { signChannelToken } from "@/lib/channels";
 import { audit } from "@/lib/audit";
 import { clearVoiceSecret, getVoiceSettings, saveVoiceSettings, signVoiceToken, appBaseUrl, voiceSafeError, TTS_PROVIDERS, type SecretField, type TtsProvider, type VoiceSettings } from "@/lib/voice-server";
 import { defaultChatId } from "@/lib/voice-calls";
+import { resolveLanguage, warmLocalVoice } from "@/lib/voice-local";
 import { readBody, requestStatus } from "@/lib/request";
 import { getExistingOpenAIKey } from "@/lib/voice-utils";
 
@@ -24,11 +25,12 @@ async function publicSettings(uid: string, s: VoiceSettings) {
   return {
     openaiConnected: openai,
     twilioConnected: Boolean(s.twilioSid && s.twilioToken),
-    ttsConnected: { twilio: true, openai, gemini: Boolean(s.geminiKey), elevenlabs: Boolean(s.elevenLabsKey), deepgram: Boolean(s.deepgramKey), azure: Boolean(s.azureSpeechKey), cartesia: Boolean(s.cartesiaKey), playht: Boolean(s.playhtKey) },
+    ttsConnected: { twilio: true, local: true, openai, gemini: Boolean(s.geminiKey), elevenlabs: Boolean(s.elevenLabsKey), deepgram: Boolean(s.deepgramKey), azure: Boolean(s.azureSpeechKey), cartesia: Boolean(s.cartesiaKey), playht: Boolean(s.playhtKey) },
     ttsProvider: s.ttsProvider ?? "twilio", ttsModel: s.ttsModel ?? "", ttsVoice: s.ttsVoice ?? "",
     fromNumber: s.fromNumber ?? "", voiceChatId: s.voiceChatId ?? "",
     language: s.language ?? "en-US", inboundEnabled: s.inboundEnabled ?? false, outboundEnabled: s.outboundEnabled ?? false,
     approvalRequired: s.approvalRequired ?? true, dailyLimit: s.dailyLimit ?? 50,
+    localReady: Boolean(s.localVoiceUrl && s.localVoiceSandbox),
   };
 }
 
@@ -95,6 +97,19 @@ export async function POST(req: Request) {
       });
     }
 
+    // Starts the local voice model on this chat's cloud PC (first time: it installs itself, 1-2 minutes).
+    if (body.action === "prepare_local") {
+      const current = await getVoiceSettings(uid);
+      const chatId = current.voiceChatId || (await defaultChatId(uid));
+      const st = await warmLocalVoice(uid, chatId || undefined, resolveLanguage(current.language, ""), 24_000);
+      await audit(uid, { kind: "voice_local_prepare", text: `Local voice: ${st.state}` });
+      return NextResponse.json({
+        ok: st.state === "ready", state: st.state,
+        message: st.state === "ready" ? "✅ Local voice taiyaar hai: ab call me awaaz aapke cloud PC ke voice model se aayegi." : st.detail,
+        settings: await publicSettings(uid, await getVoiceSettings(uid)),
+      });
+    }
+
     if (body.action === "disconnect") {
       const field = String(body.field || "");
       if (field === "twilio") { await clearVoiceSecret(uid, "twilioSid"); await clearVoiceSecret(uid, "twilioToken"); await saveVoiceSettings(uid, { inboundEnabled: false, outboundEnabled: false }); }
@@ -121,7 +136,7 @@ export async function POST(req: Request) {
     if (body.voiceChatId !== undefined) patch.voiceChatId = String(body.voiceChatId);
     if (body.language !== undefined) {
       const lang = String(body.language);
-      if (!/^[a-z]{2,3}(?:-[A-Z]{2})?$/.test(lang)) return err("Language tag galat hai (jaise en-IN, hi-IN).");
+      if (!/^(?:auto|[a-z]{2,3}(?:-[A-Z]{2})?)$/.test(lang)) return err("Language tag galat hai (jaise en-IN, hi-IN, ya auto).");
       patch.language = lang;
     }
     for (const f of ["inboundEnabled", "outboundEnabled", "approvalRequired"] as const) if (typeof body[f] === "boolean") patch[f] = body[f];
