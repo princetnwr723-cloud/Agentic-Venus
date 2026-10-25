@@ -6,6 +6,7 @@ import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { useKeys } from "@/lib/keys-context";
 import VaultHealth from "@/components/dashboard/VaultHealth";
 import PlansPanel from "@/components/dashboard/PlansPanel";
+import FountSettings from "@/components/fount/FountSettings";
 
 function mask(key?: string | null) {
   if (!key) return null;
@@ -99,6 +100,8 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
             </div>
 
             <div className="my-5 h-px bg-line" />
+
+            <FountSettings />
 
             <h3 className="mb-1.5 text-sm text-ink">Computer (E2B)</h3>
             <p className="mb-3 text-xs leading-relaxed text-muted">
