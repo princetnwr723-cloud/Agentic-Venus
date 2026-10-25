@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PROVIDERS, providerMeta, type ProviderId } from "@/lib/providers";
+import FountBadge from "@/components/fount/FountBadge";
 
 // Session-lifetime cache so switching between chats on the same
 // provider/key doesn't re-fetch every time.
@@ -144,6 +145,8 @@ export default function ModelPicker({
           className="w-44 rounded-md border border-line bg-panel2 px-2 py-1 text-xs text-ink placeholder:text-faint"
         />
       )}
+
+      <FountBadge model={model} />
 
       {keyError && <p className="w-full text-[11px] text-red-300">{keyError}</p>}
     </div>
