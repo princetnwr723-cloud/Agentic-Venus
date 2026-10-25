@@ -9,7 +9,7 @@ import { readBody, requestStatus } from "@/lib/request";
 import { getExistingOpenAIKey } from "@/lib/voice-utils";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 const err = (message: string, status = 400) => NextResponse.json({ error: message }, { status });
 
 const TTS_FIELD: Record<string, SecretField> = {
@@ -101,7 +101,7 @@ export async function POST(req: Request) {
     if (body.action === "prepare_local") {
       const current = await getVoiceSettings(uid);
       const chatId = current.voiceChatId || (await defaultChatId(uid));
-      const st = await warmLocalVoice(uid, chatId || undefined, resolveLanguage(current.language, ""), 24_000);
+      const st = await warmLocalVoice(uid, chatId || undefined, resolveLanguage(current.language, ""), 52_000);
       await audit(uid, { kind: "voice_local_prepare", text: `Local voice: ${st.state}` });
       return NextResponse.json({
         ok: st.state === "ready", state: st.state,
