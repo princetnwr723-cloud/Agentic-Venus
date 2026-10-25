@@ -21,6 +21,8 @@ export type VoiceSettings = {
   twilioSid?: string;
   twilioToken?: string;
   fromNumber?: string;
+  /** Your own phone number. Only a call with this number gets the full power of the chat (mail, calendar, send ...). */
+  ownerNumber?: string;
   /** The chat (agent) that answers calls. Its model, memory, role and tools are used. */
   voiceChatId?: string;
   /** Old field, kept so earlier saved settings still load. Calls now use the chat's model. */
@@ -68,6 +70,7 @@ export async function saveVoiceSettings(uid: string, patch: Partial<VoiceSetting
   if (typeof patch.ttsModel === "string" && patch.ttsModel.trim().length <= 120) next.ttsModel = patch.ttsModel.trim();
   if (typeof patch.ttsVoice === "string" && patch.ttsVoice.trim().length <= 160) next.ttsVoice = patch.ttsVoice.trim();
   if (typeof patch.fromNumber === "string") next.fromNumber = patch.fromNumber.trim();
+  if (typeof patch.ownerNumber === "string" && /^(?:\+[1-9]\d{5,14})?$/.test(patch.ownerNumber.trim())) next.ownerNumber = patch.ownerNumber.trim();
   if (typeof patch.voiceChatId === "string" && /^[A-Za-z0-9_-]{0,160}$/.test(patch.voiceChatId)) next.voiceChatId = patch.voiceChatId;
   if (patch.llmProvider && PROVIDERS.some((p) => p.id === patch.llmProvider)) next.llmProvider = patch.llmProvider;
   if (typeof patch.llmModel === "string" && patch.llmModel.trim().length <= 120) next.llmModel = patch.llmModel.trim();
@@ -178,7 +181,9 @@ export function sayTag(text: string, language: string) {
 }
 export function gatherXml(inner: string, language: string, actionUrl: string) {
   const lang = langOf(language);
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" language="${lang}" speechTimeout="auto" timeout="8">${inner}</Gather>${sayTag("I did not hear a response. Goodbye.", lang)}<Hangup/></Response>`;
+  // Nobody spoke: go back to the turn handler. It asks "are you there?" and hangs up only after a few quiet rounds.
+  const quiet = actionUrl + (actionUrl.includes("?") ? "&" : "?") + "noinput=1";
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" language="${lang}" speechTimeout="auto" timeout="10">${inner}</Gather><Redirect method="POST">${xmlEscape(quiet)}</Redirect></Response>`;
 }
 export function hangupXml(inner: string) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${inner}<Hangup/></Response>`;
