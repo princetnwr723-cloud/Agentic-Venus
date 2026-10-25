@@ -1,6 +1,6 @@
 import { getAdminDb } from "@/lib/firebase-admin";
 import { getVoiceSettings, getResolvedVoiceSecrets, signVoiceToken, verifyVoiceToken, verifyTwilioSignature, appBaseUrl, gatherXml, sayTag, twimlResponse, voiceSafeError } from "@/lib/voice-server";
-import { defaultChatId, openingLine, speechXml } from "@/lib/voice-calls";
+import { defaultChatId, openingLine, speechXml, watchInboundCall } from "@/lib/voice-calls";
 import { resolveLanguage } from "@/lib/voice-local";
 import { audit } from "@/lib/audit";
 
@@ -37,6 +37,8 @@ export async function POST(req: Request) {
         chatId, history: [], transcript: [], followUps: [],
       }, { merge: true });
       await audit(claims.uid, { kind: "voice_inbound_call", text: `Inbound call ${from}` });
+      // so that the summary of this call reaches the chat when it ends (never blocks the call for long)
+      await Promise.race([watchInboundCall(claims.uid, callId, callSid, req).catch(() => undefined), new Promise((r) => setTimeout(r, 2500))]);
     } else {
       if (!claims.callId) return bye("Call session was not found.", 404);
       callId = claims.callId;
