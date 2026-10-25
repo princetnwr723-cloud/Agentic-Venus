@@ -7,7 +7,7 @@
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "10";
+export const RUNNER_VERSION = "11";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -388,7 +388,35 @@ function addResults(calls, out, image, tail) {
   if (image) msg.image = image;
   xmsgs.push(msg);
 }
-function ctxSize() { return NATIVE ? JSON.stringify(nmsgs).length : xmsgs.reduce((n, m) => n + String(m.content).length, 0); }
+// Size of the conversation. A screenshot is base64 text (hundreds of thousands of characters) but costs only ~1.5k
+// tokens, so each image counts as a flat 6000 characters instead of its raw length. Counting the raw length made one
+// screenshot look like an overflowing context and reset the agent right after every look (an endless re-read loop).
+const CTX_LIMIT = Number(process.env.VENUS_CTX_LIMIT) || 110000;
+function ctxSize() {
+  let imgs = 0;
+  const text = JSON.stringify(NATIVE ? nmsgs : xmsgs, (k, v) => {
+    if (typeof v === "string" && v.length > 4000 && /^[A-Za-z0-9+\/=]+$/.test(v.slice(0, 300))) { imgs++; return ""; }
+    return v;
+  });
+  return text.length + imgs * 6000;
+}
+// Old screenshots are expensive and useless once the page changed: keep only the newest ones.
+function pruneImages(keep) {
+  if (!NATIVE) {
+    const idx = [];
+    xmsgs.forEach((m, i) => { if (m.image) idx.push(i); });
+    idx.slice(0, Math.max(0, idx.length - keep)).forEach((i) => { const m = xmsgs[i]; delete m.image; m.content = String(m.content) + "\n[earlier screenshot removed to save context]"; });
+    return;
+  }
+  const places = [];
+  nmsgs.forEach((m) => {
+    const arr = Array.isArray(m.content) ? m.content : null, parts = Array.isArray(m.parts) ? m.parts : null;
+    const list = arr || parts;
+    if (!list) return;
+    list.forEach((b, j) => { if (b && (b.type === "image" || b.type === "image_url" || b.inline_data)) places.push([list, j, !!parts]); });
+  });
+  places.slice(0, Math.max(0, places.length - keep)).forEach((p) => { p[0][p[1]] = p[2] ? {text: "[earlier screenshot removed to save context]"} : {type: "text", text: "[earlier screenshot removed to save context]"}; });
+}
 
 // ---------------- paths, safety, hooks, modes ----------------
 function resolveP(p, R) {
@@ -973,7 +1001,8 @@ function writeState(ctx) {
 function stateNote(ctx) {
   const plan = ctx.plan.length ? "Plan:\n" + ctx.plan.map((p) => "- [" + (p.done ? "x" : " ") + "] " + p.text).join("\n") : "";
   const ch = changedFiles().slice(0, 60);
-  return [plan, ch.length ? "Files changed so far: " + ch.join(", ") : "", ctx.memories.length ? "Notes: " + ctx.memories.slice(-12).join(" | ") : "", ctx.log.length ? "Recent actions:\n" + ctx.log.slice(-40).join("\n") : "", "Continue with the first unfinished plan item (or the task if there is no plan). Re-read files before editing them."].filter(Boolean).join("\n");
+  const seen = ctx.thoughts && ctx.thoughts.length ? "Your latest reasoning (what you already saw and decided - do not redo it):\n" + ctx.thoughts.slice(-4).join("\n---\n") : "";
+  return [plan, ch.length ? "Files changed so far: " + ch.join(", ") : "", ctx.memories.length ? "Notes: " + ctx.memories.slice(-12).join(" | ") : "", seen, ctx.log.length ? "Recent actions:\n" + ctx.log.slice(-40).join("\n") : "", "Continue with the first unfinished plan item (or the task if there is no plan). Open a file only to change it: do not re-read files just to refresh your memory, and do not start another dev server if one was already started (see Recent actions). Re-read a file right before you edit it."].filter(Boolean).join("\n");
 }
 function savedState() {
   try {
@@ -1017,6 +1046,7 @@ function resetContext(ctx, why) {
   const first = buildFirst(stateNote(ctx));
   if (NATIVE) nmsgs = [nUserMsg(first)]; else xmsgs = [{role: "user", content: first}];
   ctx.reads.clear();
+  ctx.lastReset = state.step || 0;
   emit("info", "Fresh context (" + why + "). Progress is saved in .venus/state.json.");
 }
 
@@ -1029,7 +1059,7 @@ async function main() {
   if (tl.ok && Array.isArray(tl.d.specs)) {
     TOOLS_TXT = tl.d.specs.filter((s) => !/^(web|verify|identity)\./.test(s.name)).slice(0, 40).map((s) => "- " + s.name + "(" + s.params + ")" + (s.risk === "write" ? " (write) " : " ") + "- " + s.description).join("\n");
   }
-  const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, nativeOk: false, depsTried: false, gates: {tests: 0, ui: 0, mem: 0, review: 0, impl: 0, secrets: 0}};
+  const ctx = {skills: job.skills || [], memories: [], plan: [], lastDone: 0, planned: false, reads: new Set(), touched: new Set(), uiDirty: false, lastTsc: 0, checks: [], log: [], lastProgress: 0, lastNudge: 0, thoughts: [], lastReset: -99, readSeen: {}, nativeOk: false, depsTried: false, gates: {tests: 0, ui: 0, mem: 0, review: 0, impl: 0, secrets: 0}};
   const first = buildFirst(savedState());
   if (NATIVE) nmsgs = [nUserMsg(first)]; else xmsgs = [{role: "user", content: first}];
   const maxSteps = job.maxSteps || 250;
@@ -1044,7 +1074,8 @@ async function main() {
     save({step: step + 1});
     ctx.touched = new Set();
     if (step > 0 && step % 8 === 0) writeState(ctx);
-    if (ctxSize() > 110000) resetContext(ctx, "the context was getting long");
+    pruneImages(2);
+    if (ctxSize() > CTX_LIMIT && (state.step || 0) - ctx.lastReset >= 8) resetContext(ctx, "the context was getting long");
 
     let turn;
     try { turn = NATIVE ? await withRetry(nTurn) : await xmlTurn(); }
@@ -1067,7 +1098,11 @@ async function main() {
     }
     if (NATIVE) ctx.nativeOk = true;
     const calls = turn.calls;
-    if (turn.thought) emit("thought", turn.thought.slice(0, 700));
+    if (turn.thought) {
+      emit("thought", turn.thought.slice(0, 700));
+      ctx.thoughts.push(String(turn.thought).slice(0, 600));
+      if (ctx.thoughts.length > 6) ctx.thoughts.shift();
+    }
 
     if (calls.length === 0) {
       noTool++;
@@ -1130,7 +1165,7 @@ async function main() {
     }
 
     const out = [];
-    let image = null, fin = null, mutated = false;
+    let image = null, fin = null, mutated = false, repeatRead = "";
     for (let ci = 0; ci < calls.length; ci++) {
       const c = calls[ci];
       if (fin !== null) break;
@@ -1148,7 +1183,17 @@ async function main() {
       if (blocked) { out.push(blocked); emit("result", blocked.slice(0, 300)); continue; }
       if (c.name === "write" || c.name === "edit") emit("diff", c.name, {path: c.attrs.path, lines: diffOf(c)});
       let res;
-      try { res = await runTool(c, ctx); } catch (e) { res = {text: "ERROR: " + (e && e.message ? e.message : "tool failed")}; }
+      if (c.name === "read") {
+        const rk = String(c.attrs.path) + ":" + String(c.attrs.offset || 1) + ":" + String(c.attrs.limit || "");
+        ctx.readSeen[rk] = (ctx.readSeen[rk] || 0) + 1;
+        if (ctx.readSeen[rk] >= 3) repeatRead = String(c.attrs.path);
+      }
+      if (c.name === "look" && ctx.lastLook !== undefined && !mutated && ctx.lastProgress <= ctx.lastLook) {
+        res = {text: "You already looked and nothing has changed since, so the screenshot would be identical. Do not look again: change something (edit/write) based on what you saw, or call finish if the work is done."};
+      } else {
+        try { res = await runTool(c, ctx); } catch (e) { res = {text: "ERROR: " + (e && e.message ? e.message : "tool failed")}; }
+        if (c.name === "look") ctx.lastLook = step;
+      }
       out.push(res.text);
       if (res.image) image = res.image;
       if (res.mutated) mutated = true;
@@ -1196,13 +1241,14 @@ async function main() {
       ctx.lastNudge = step;
       tail += "\nYou have changed nothing for 30 steps. Stop exploring: make the next concrete change, or if you are blocked say exactly what blocks you in finish.";
     }
+    if (repeatRead) tail += "\nYou have read " + repeatRead + " with the same range several times. You already know what it contains: make the change now (edit/write), or finish.";
     addResults(calls, out, image, tail);
 
     // milestone reached: clean context so a long project never drowns in its own history
     const doneNow = ctx.plan.filter((p) => p.done).length;
     if (doneNow > ctx.lastDone) {
       ctx.lastDone = doneNow;
-      if (ctx.plan.some((p) => !p.done) && ctxSize() > 30000) resetContext(ctx, "milestone " + doneNow + " of " + ctx.plan.length + " done");
+      if (ctx.plan.some((p) => !p.done) && ctxSize() > 30000 && (state.step || 0) - ctx.lastReset >= 8) resetContext(ctx, "milestone " + doneNow + " of " + ctx.plan.length + " done");
     }
   }
   writeState(ctx);
