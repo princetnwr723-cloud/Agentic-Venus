@@ -47,6 +47,7 @@ import RunBars from "@/components/dashboard/RunBars";
 import WorkingBar from "@/components/dashboard/WorkingBar";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
 import ModelPicker from "@/components/dashboard/ModelPicker";
+import { fountBegin } from "@/lib/fount/client";
 import NewChatModal from "@/components/dashboard/NewChatModal";
 import SettingsModal from "@/components/dashboard/SettingsModal";
 import RoutinesPanel from "@/components/dashboard/RoutinesPanel";
@@ -1369,12 +1370,13 @@ export default function DashboardPage() {
       }
 
       // 2) A normal answer: streaming, with the connected tools available
+      const fr = await fountBegin(chat.id, text, chat.model, chat.provider); // FOUNT: never throws, empty when off
       const system =
         `You are ${chat.agentName}, an AI teammate working inside AgenticVenus. Be direct and useful, and focus on getting real work done for the person you're talking to.` +
-        brainPrompt(brainOf(chat.id), text) + planNote + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(specs) + extraSystem + extraRepo + SUGGEST_PROMPT;
+        brainPrompt(brainOf(chat.id), text) + planNote + MEMORY_PROMPT + (chat.connectors?.vercel ? DEPLOY_PROMPT : "") + toolPrompt(fr.narrow(specs)) + extraSystem + extraRepo + SUGGEST_PROMPT;
       const base = chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [];
       const at = Date.now();
-      const userPrompt = history.pop()?.content ?? text;
+      const userPrompt = (history.pop()?.content ?? text) + fr.block; // FOUNT note rides on the user turn so the cached system prompt stays identical
 
       workSet(chat.id, "Jawab likh raha hoon…", "chat");
       setStreaming(true);
@@ -1419,6 +1421,7 @@ export default function DashboardPage() {
           patchChat(chat.id, { messages: [...base, { role: "assistant", content: `🔧 Using ${c.name}…`, at }] });
           workSet(chat.id, `🔧 ${c.name} chala raha hoon…`, "chat");
           const t = await execTool(chat, c.name, c.args, tainted);
+          fr.tool(c.name, !/^(ERROR:|The user declined)/.test(t.text), t.text);
           if (t.flagged) tainted = true;
           results.push(`### ${c.name}\n${t.text}`);
         }
@@ -1438,6 +1441,7 @@ export default function DashboardPage() {
       const body = parsed.clean || (cmds.length ? "Done." : "…");
       if (splitSuggestions(body).next.length) say(chat.id, body);
       else await sayNext(chat, body); // the model forgot the next-step line: a fast model writes it
+      void fr.end({ summary: body, verify: (task, summary, evidence) => verifyResult((s, p) => callLLM(chat, s, p, [], "verify"), { task, summary, evidence }) });
       // quietly learn about the owner from this message (profile memory)
       void fetch("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chatId: chat.id, user: text, reply: body.slice(0, 1500) }) }).then(() => loadChatBrain(chat.id)).catch(() => {});
     } catch (err) {
@@ -1520,6 +1524,7 @@ export default function DashboardPage() {
               <div className="flex-1 overflow-y-auto px-6 py-6">
                 <div className="mx-auto max-w-2xl">
                   <ChatThread
+                    chatId={activeChat.id}
                     messages={activeChat.messages}
                     pending={sending && !streaming && !activeWork}
                     busy={sending || Boolean(activeWork)}
