@@ -6,7 +6,8 @@
 // v7: stronger browser automation (select/check/hover/upload/tabs/downloads, cookie banners, dialogs, smarter click/type).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const PC_RUNNER_VERSION = "7";
+// v8: longer answers (output-token ladder), Anthropic prompt caching, lighter fallback model when the main one stays overloaded.
+export const PC_RUNNER_VERSION = "8";
 
 export const PC_RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -56,16 +57,63 @@ async function post(url, headers, body) {
   }
   return data;
 }
+// Output-token limit: ask for a lot, step down when a model allows fewer.
+let MAXTOK = 16000;
+const MAX_TIERS = [16000, 8192, 4096];
+async function withMax(run) {
+  for (;;) {
+    try { return await run(MAXTOK); }
+    catch (e) {
+      const m = String(e && e.message ? e.message : e);
+      const i = MAX_TIERS.indexOf(MAXTOK);
+      if (/ 400/.test(m) && /max_?tokens|maxOutputTokens|max_output|output tokens/i.test(m) && i >= 0 && i < MAX_TIERS.length - 1) { MAXTOK = MAX_TIERS[i + 1]; continue; }
+      throw e;
+    }
+  }
+}
+// Anthropic prompt caching: first and last message are cache breakpoints (turned off if the API rejects it).
+let CACHE = true;
+function cacheMark(msgs) {
+  if (!CACHE || !msgs.length) return msgs;
+  const mark = (m) => {
+    let content = m.content;
+    if (typeof content === "string") content = [{type: "text", text: content}];
+    if (!Array.isArray(content) || !content.length) return m;
+    const blocks = content.slice();
+    const last = blocks[blocks.length - 1];
+    if (!last || (last.type === "text" && !String(last.text || "").trim())) return m;
+    blocks[blocks.length - 1] = Object.assign({}, last, {cache_control: {type: "ephemeral"}});
+    return Object.assign({}, m, {content: blocks});
+  };
+  const out = msgs.slice();
+  out[0] = mark(out[0]);
+  if (out.length > 1) out[out.length - 1] = mark(out[out.length - 1]);
+  return out;
+}
+let FALLBACK_USED = false;
+function fallbackModelFor() {
+  if (job.provider === "anthropic") {
+    if (/opus/i.test(String(job.model))) return "claude-sonnet-5";
+    if (/sonnet/i.test(String(job.model))) return "claude-haiku-4-5-20251001";
+  }
+  return "";
+}
 async function callOnce(messages) {
   const p = job.provider, model = job.model;
   if (p === "anthropic") {
     const msgs = messages.map((m) => ({role: m.role, content: m.image ? [{type: "image", source: {type: "base64", media_type: m.image.mediaType, data: m.image.data}}, {type: "text", text: m.content}] : m.content}));
-    const d = await post("https://api.anthropic.com/v1/messages", {"x-api-key": KEY, "anthropic-version": "2023-06-01"}, {model: model, max_tokens: 4096, messages: msgs});
+    const run = () => withMax((mt) => post("https://api.anthropic.com/v1/messages", {"x-api-key": KEY, "anthropic-version": "2023-06-01"}, {model: model, max_tokens: mt, messages: cacheMark(msgs)}));
+    let d;
+    try { d = await run(); }
+    catch (e) {
+      if (CACHE && /cache_control/i.test(String(e && e.message ? e.message : e))) { CACHE = false; d = await run(); }
+      else throw e;
+    }
     return (d.content || []).map((b) => b.text || "").join("");
   }
   if (p === "gemini") {
     const contents = messages.map((m) => ({role: m.role === "assistant" ? "model" : "user", parts: m.image ? [{inline_data: {mime_type: m.image.mediaType, data: m.image.data}}, {text: m.content}] : [{text: m.content}]}));
-    const d = await post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {"x-goog-api-key": KEY}, {contents: contents, generationConfig: {maxOutputTokens: 4096}});
+    const d = await withMax((mt) => post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {"x-goog-api-key": KEY}, {contents: contents, generationConfig: {maxOutputTokens: mt}}));
     const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
     return parts.map((x) => x.text || "").join("");
   }
@@ -85,7 +133,16 @@ async function llm(messages) {
     try { return await callOnce(messages); }
     catch (e) {
       const m = String(e && e.message ? e.message : e);
-      if (attempt === 4 || !/( 429| 5\d\d|overloaded|rate limit|timeout|timed out|fetch failed|ECONN|socket)/i.test(m)) throw e;
+      if (attempt === 4 || !/( 429| 5\d\d|overloaded|rate limit|timeout|timed out|fetch failed|ECONN|socket)/i.test(m)) {
+        const fb = fallbackModelFor();
+        if (/( 429| 5\d\d|overloaded|rate limit)/i.test(m) && !FALLBACK_USED && fb) {
+          FALLBACK_USED = true;
+          emit("info", "The model " + job.model + " stays overloaded - continuing with " + fb + ".");
+          job.model = fb;
+          return await callOnce(messages);
+        }
+        throw e;
+      }
       emit("info", "Model busy, retrying in " + 2 * Math.pow(2, attempt) + "s...");
       await sleep(2000 * Math.pow(2, attempt));
     }
