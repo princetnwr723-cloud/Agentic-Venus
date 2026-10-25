@@ -7,20 +7,21 @@
 //     stuck detection, compute budget, and all the v3 gates (read-before-edit, plan, diagnostics, tests, UI look, review).
 // NOTE: the source below must not contain backticks or dollar-brace sequences (it lives in a template string).
 
-export const RUNNER_VERSION = "9";
+export const RUNNER_VERSION = "10";
 
 export const RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
 import {spawn, spawnSync} from "node:child_process";
 
 const id = process.argv[2];
-const BASE = "/home/user/runner/jobs/" + id;
+const HOME = process.env.VENUS_HOME || "/home/user";
+const BASE = HOME + "/runner/jobs/" + id;
 const job = JSON.parse(fs.readFileSync(BASE + "/job.json", "utf8"));
 const KEY = fs.readFileSync(BASE + "/key", "utf8").trim();
 try { fs.unlinkSync(BASE + "/key"); } catch (e) {}
 const WS = String(job.ws).replace(/[^A-Za-z0-9_-]/g, "");
-const ROOT = "/home/user/work/" + WS;
-const WT = "/home/user/work/" + WS + "-wt";
+const ROOT = HOME + "/work/" + WS;
+const WT = HOME + "/work/" + WS + "-wt";
 const APP = String(job.appUrl || "").replace(/\/+$/, "");
 const EV = BASE + "/events.jsonl";
 const SH = BASE + "/sh";
@@ -74,16 +75,16 @@ async function post(url, headers, body) {
   }
   return data;
 }
-async function callOnce(messages) {
-  const p = job.provider, model = job.model;
+async function callOnce(messages, modelOverride) {
+  const p = job.provider, model = modelOverride || job.model;
   if (p === "anthropic") {
     const msgs = messages.map((m) => ({role: m.role, content: m.image ? [{type: "image", source: {type: "base64", media_type: m.image.mediaType, data: m.image.data}}, {type: "text", text: m.content}] : m.content}));
-    const d = await post("https://api.anthropic.com/v1/messages", {"x-api-key": KEY, "anthropic-version": "2023-06-01"}, {model: model, max_tokens: 8192, messages: msgs});
+    const d = await anthropicSend(model, (mt) => ({model: model, max_tokens: mt, messages: cacheMark(msgs)}));
     return (d.content || []).map((b) => b.text || "").join("");
   }
   if (p === "gemini") {
     const contents = messages.map((m) => ({role: m.role === "assistant" ? "model" : "user", parts: m.image ? [{inline_data: {mime_type: m.image.mediaType, data: m.image.data}}, {text: m.content}] : [{text: m.content}]}));
-    const d = await post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {"x-goog-api-key": KEY}, {contents: contents, generationConfig: {maxOutputTokens: 8192}});
+    const d = await withMax((mt) => post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {"x-goog-api-key": KEY}, {contents: contents, generationConfig: {maxOutputTokens: mt}}));
     const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
     return parts.map((x) => x.text || "").join("");
   }
@@ -110,7 +111,7 @@ async function withRetry(fn) {
   }
   return "";
 }
-const llm = (messages) => withRetry(() => callOnce(messages));
+const llm = (messages, model) => withRetry(() => callOnce(messages, model));
 
 // ---------------- server calls (job token: the sandbox never holds your connector tokens) ----------------
 async function api(p, body) {
@@ -177,7 +178,7 @@ const SCHEMAS = [
   T("glob", "Find files by glob pattern.", {pattern: [S, "For example src/**/*.ts"]}, ["pattern"]),
   T("grep", "Regex search in files.", {pattern: [S, "Regex"], path: [S, "Folder or file"], glob: [S, "File glob filter"]}, ["pattern"]),
   T("write", "Create or overwrite a file with its COMPLETE content (never placeholders).", {path: [S, "File path"], content: [S, "Complete file content"]}, ["path", "content"]),
-  T("edit", "Replace exact text in a file. old must match exactly once unless replace_all.", {path: [S, "File path"], old: [S, "Exact existing text"], new: [S, "Replacement text"], replace_all: [B, "Replace every occurrence"]}, ["path", "old", "new"]),
+  T("edit", "Replace text in a file. old should match exactly once (small whitespace differences are tolerated) unless replace_all. For several changes send several edit calls in the same reply.", {path: [S, "File path"], old: [S, "Exact existing text"], new: [S, "Replacement text"], replace_all: [B, "Replace every occurrence"]}, ["path", "old", "new"]),
   T("bash", "Run a non-interactive shell command at the workspace root.", {command: [S, "The command"], timeout: [N, "Seconds to wait (default 120)"], background: [B, "Start and return at once (for servers)"]}, ["command"]),
   T("bash_output", "Read the output of a running or background command.", {job: [S, "Job id"]}, ["job"]),
   T("todo", "Write or update the visible plan. Mark finished items done. Use it for any task with several steps.", {items: ["array", "Plan items", {text: [S], done: [B]}]}, ["items"]),
@@ -239,13 +240,82 @@ async function postTools(url, headers, body, forced) {
   try { return await post(url, headers, forced(body)); }
   catch (e) {
     const m = String(e && e.message ? e.message : e);
-    if (/ 400/.test(m) && /tool_choice|toolConfig|tool_config|function_calling|functionCalling|tool choice|required|any/i.test(m)) {
+    if (/ 400/.test(m) && /tool_choice|toolConfig|tool_config|function_calling|functionCalling|tool choice|\btools?\b|\bfunction/i.test(m)) {
       FORCE_TOOLS = false;
       emit("info", "This provider does not accept forced tool calls - continuing with automatic tool choice.");
       return post(url, headers, body);
     }
     throw e;
   }
+}
+// Output-token limit: ask for a lot (long files do not get cut off), step down when a model allows fewer.
+let MAXTOK = 16000;
+const MAX_TIERS = [16000, 8192, 4096];
+async function withMax(run) {
+  for (;;) {
+    try { return await run(MAXTOK); }
+    catch (e) {
+      const m = String(e && e.message ? e.message : e);
+      const i = MAX_TIERS.indexOf(MAXTOK);
+      if (/ 400/.test(m) && /max_?tokens|maxOutputTokens|max_output|output tokens/i.test(m) && i >= 0 && i < MAX_TIERS.length - 1) {
+        MAXTOK = MAX_TIERS[i + 1];
+        emit("info", "This model allows fewer output tokens - using " + MAXTOK + ".");
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+// Anthropic prompt caching: the first message (big and stable) and the last message (grows every turn) are cache
+// breakpoints, so each step only pays full price for what is new. Turned off automatically if the API rejects it.
+let CACHE = true, CACHE_SEEN = false;
+function cacheMark(msgs) {
+  if (!CACHE || !msgs.length) return msgs;
+  const mark = (m) => {
+    let content = m.content;
+    if (typeof content === "string") content = [{type: "text", text: content}];
+    if (!Array.isArray(content) || !content.length) return m;
+    const blocks = content.slice();
+    const last = blocks[blocks.length - 1];
+    if (!last || (last.type === "text" && !String(last.text || "").trim())) return m;
+    blocks[blocks.length - 1] = Object.assign({}, last, {cache_control: {type: "ephemeral"}});
+    return Object.assign({}, m, {content: blocks});
+  };
+  const out = msgs.slice();
+  out[0] = mark(out[0]);
+  if (out.length > 1) out[out.length - 1] = mark(out[out.length - 1]);
+  return out;
+}
+function cacheStat(d) {
+  const u = d && d.usage;
+  const read = u ? Number(u.cache_read_input_tokens || 0) : 0;
+  if (read > 0 && !CACHE_SEEN) { CACHE_SEEN = true; emit("info", "Prompt caching is active (" + read + " tokens were read from the cache on this step)."); }
+}
+async function anthropicSend(model, build, forced) {
+  const url = "https://api.anthropic.com/v1/messages", hdr = {"x-api-key": KEY, "anthropic-version": "2023-06-01"};
+  const run = () => withMax((mt) => (forced ? postTools(url, hdr, build(mt), forced) : post(url, hdr, build(mt))));
+  let d;
+  try { d = await run(); }
+  catch (e) {
+    if (CACHE && /cache_control/i.test(String(e && e.message ? e.message : e))) { CACHE = false; emit("info", "Prompt caching is not accepted here - continuing without it."); d = await run(); }
+    else throw e;
+  }
+  cacheStat(d);
+  return d;
+}
+// Cheaper model for read-only exploring, and a lighter model to continue with when the main one stays overloaded.
+function cheaperModel() {
+  if (job.exploreModel) return String(job.exploreModel);
+  if (job.provider === "anthropic" && /opus/i.test(String(job.model))) return "claude-sonnet-5";
+  return "";
+}
+let FALLBACK_USED = false;
+function fallbackModelFor() {
+  if (job.provider === "anthropic") {
+    if (/opus/i.test(String(job.model))) return "claude-sonnet-5";
+    if (/sonnet/i.test(String(job.model))) return "claude-haiku-4-5-20251001";
+  }
+  return "";
 }
 function nUserMsg(text) {
   if (job.provider === "anthropic") return {role: "user", content: [{type: "text", text: text}]};
@@ -256,12 +326,12 @@ async function nTurn() {
   const p = job.provider, defs = activeSchemas();
   const calls = [], text = [];
   if (p === "anthropic") {
-    const d = await postTools("https://api.anthropic.com/v1/messages", {"x-api-key": KEY, "anthropic-version": "2023-06-01"}, {model: job.model, max_tokens: 8192, messages: nmsgs, tools: defs.map((t) => ({name: t.name, description: t.description, input_schema: jsonSchema(t)}))}, (b) => Object.assign({}, b, {tool_choice: {type: "any"}}));
+    const d = await anthropicSend(job.model, (mt) => ({model: job.model, max_tokens: mt, messages: cacheMark(nmsgs), tools: defs.map((t) => ({name: t.name, description: t.description, input_schema: jsonSchema(t)}))}), (b) => Object.assign({}, b, {tool_choice: {type: "any"}}));
     const content = Array.isArray(d.content) && d.content.length ? d.content : [{type: "text", text: "(no answer)"}];
     nmsgs.push({role: "assistant", content: content});
     for (const b of content) { if (b.type === "text") text.push(b.text); else if (b.type === "tool_use") calls.push(toCall(b.name, b.input, b.id)); }
   } else if (p === "gemini") {
-    const d = await postTools("https://generativelanguage.googleapis.com/v1beta/models/" + job.model + ":generateContent", {"x-goog-api-key": KEY}, {contents: nmsgs, tools: [{functionDeclarations: defs.map((t) => ({name: t.name, description: t.description, parameters: jsonSchema(t)}))}], generationConfig: {maxOutputTokens: 8192}}, (b) => Object.assign({}, b, {toolConfig: {functionCallingConfig: {mode: "ANY"}}}));
+    const d = await withMax((mt) => postTools("https://generativelanguage.googleapis.com/v1beta/models/" + job.model + ":generateContent", {"x-goog-api-key": KEY}, {contents: nmsgs, tools: [{functionDeclarations: defs.map((t) => ({name: t.name, description: t.description, parameters: jsonSchema(t)}))}], generationConfig: {maxOutputTokens: mt}}, (b) => Object.assign({}, b, {toolConfig: {functionCallingConfig: {mode: "ANY"}}})));
     const cand = d.candidates && d.candidates[0];
     const content = cand && cand.content && Array.isArray(cand.content.parts) && cand.content.parts.length ? cand.content : {role: "model", parts: []};
     if (!content.role) content.role = "model";
@@ -551,22 +621,41 @@ async function runTool(c, ctx) {
       if (gate) return {text: gate};
       const cur = fs.readFileSync(abs, "utf8");
       const count = cur.split(oldS).length - 1;
-      if (count === 0) {
-        const lines = cur.split("\n"), want = oldS.split("\n").map((l) => l.trim());
-        let at = -1;
-        for (let i = 0; i + want.length <= lines.length && at < 0; i++) {
-          let same = true;
-          for (let j = 0; j < want.length; j++) if (lines[i + j].trim() !== want[j]) { same = false; break; }
-          if (same) at = i;
-        }
-        if (at >= 0) {
-          fs.writeFileSync(abs, lines.slice(0, at).concat(newS.split("\n"), lines.slice(at + want.length)).join("\n"));
-          ctx.touched.add(abs); markUi(abs, ctx);
-          return {text: "Edited " + a.path + " (matched ignoring indentation).", mutated: true};
-        }
-        return {text: "ERROR: the old text was not found in " + a.path + ". Read the file again and copy the exact text."};
-      }
       const all = a.replace_all === "true";
+      if (count === 0) {
+        const eol = cur.indexOf("\r\n") >= 0 ? "\r\n" : "\n";
+        const lines = cur.split(/\r?\n/);
+        const wantL = oldS.split(/\r?\n/);
+        while (wantL.length && !wantL[0].trim()) wantL.shift();
+        while (wantL.length && !wantL[wantL.length - 1].trim()) wantL.pop();
+        const levels = [(l) => l.trim(), (l) => l.trim().replace(/\s+/g, " ")];
+        for (const f of levels) {
+          if (!wantL.length) break;
+          const want = wantL.map(f), hits = [];
+          for (let i = 0; i + want.length <= lines.length; i++) {
+            let same = true;
+            for (let j = 0; j < want.length; j++) if (f(lines[i + j]) !== want[j]) { same = false; break; }
+            if (same) hits.push(i);
+          }
+          if (hits.length > 1 && !all) return {text: "ERROR: the old text matches " + hits.length + " places in " + a.path + " (lines " + hits.slice(0, 5).map((x) => x + 1).join(", ") + "). Add more surrounding lines to make it unique, or set replace_all."};
+          if (hits.length) {
+            const rep = newS.split(/\r?\n/);
+            let out = lines.slice();
+            for (const at of hits.slice().reverse()) out = out.slice(0, at).concat(rep, out.slice(at + want.length));
+            fs.writeFileSync(abs, out.join(eol));
+            ctx.touched.add(abs); markUi(abs, ctx);
+            return {text: "Edited " + a.path + " (matched ignoring whitespace differences).", mutated: true};
+          }
+        }
+        // nothing matched: show the closest text so the next attempt can copy it exactly
+        const tok = (x) => new Set(String(x).toLowerCase().split(/[^a-z0-9_$]+/).filter((w) => w.length > 1));
+        const first = wantL.map((l) => l.trim()).filter(Boolean)[0] || "";
+        const ft = tok(first);
+        let best = -1, bestScore = 0;
+        lines.forEach((l, i) => { const t = tok(l); let n = 0; ft.forEach((w) => { if (t.has(w)) n++; }); const sc = ft.size ? n / Math.max(ft.size, t.size) : 0; if (sc > bestScore) { bestScore = sc; best = i; } });
+        const hint = best >= 0 && bestScore >= 0.4 ? " Closest text is at line " + (best + 1) + ":\n" + lines.slice(Math.max(0, best - 1), best + 4).map((l, k) => (Math.max(0, best - 1) + k + 1) + "| " + l).join("\n") : "";
+        return {text: "ERROR: the old text was not found in " + a.path + ". Read the file again and copy the exact text." + hint};
+      }
       if (count > 1 && !all) return {text: "ERROR: the old text appears " + count + " times in " + a.path + ". Add more surrounding lines to make it unique, or set replace_all."};
       fs.writeFileSync(abs, all ? cur.split(oldS).join(newS) : cur.replace(oldS, () => newS));
       ctx.touched.add(abs); markUi(abs, ctx);
@@ -674,9 +763,23 @@ async function runSub(prompt, o) {
   const msgs = [{role: "user", content: sys + "\n\nWorkspace files:\n" + treeText(R) + "\n\nTASK:\n" + prompt}];
   const sctx = {skills: [], memories: [], sub: true, root: R, reads: new Set(), touched: new Set(), planned: true, allow: write ? o.allow : null, plan: []};
   const okTools = write ? SUB_WRITE : SUB_READ;
+  let cheap = write ? "" : cheaperModel();
+  if (cheap) emit("info", "Explorer sub-agents use " + cheap + " (cheaper); the main work stays on " + job.model + ".");
+  const ask = async (m) => {
+    if (cheap) {
+      try { return await llm(m, cheap); }
+      catch (e) {
+        const em = String(e && e.message ? e.message : e);
+        if (!/ (400|404)/.test(em)) throw e;
+        emit("info", "The explorer model " + cheap + " is not available - using the main model.");
+        cheap = "";
+      }
+    }
+    return llm(m);
+  };
   for (let i = 0; i < (write ? 40 : 20); i++) {
     if (stopped()) return "Stopped.";
-    const reply = await llm(msgs);
+    const reply = await ask(msgs);
     const p = parseTools(reply);
     msgs.push({role: "assistant", content: reply});
     const fin = p.calls.find((c) => c.name === "finish");
@@ -947,6 +1050,13 @@ async function main() {
     try { turn = NATIVE ? await withRetry(nTurn) : await xmlTurn(); }
     catch (e) {
       const m = String(e && e.message ? e.message : e);
+      if (/( 429| 5\d\d|overloaded|rate limit)/i.test(m) && !FALLBACK_USED && fallbackModelFor()) {
+        FALLBACK_USED = true;
+        const fb = fallbackModelFor();
+        emit("info", "The model " + job.model + " stays overloaded - continuing with " + fb + ".");
+        job.model = fb;
+        continue;
+      }
       if (NATIVE && (/ 400/.test(m) || (/ (404|422)/.test(m) && /tool|function/i.test(m)))) {
         NATIVE = false;
         emit("info", "This model does not accept native tool-calling (" + m.slice(0, 120) + ") - switching to the text tool format.");
