@@ -27,7 +27,7 @@ async function publicSettings(uid: string, s: VoiceSettings) {
     twilioConnected: Boolean(s.twilioSid && s.twilioToken),
     ttsConnected: { twilio: true, local: true, openai, gemini: Boolean(s.geminiKey), elevenlabs: Boolean(s.elevenLabsKey), deepgram: Boolean(s.deepgramKey), azure: Boolean(s.azureSpeechKey), cartesia: Boolean(s.cartesiaKey), playht: Boolean(s.playhtKey) },
     ttsProvider: s.ttsProvider ?? "twilio", ttsModel: s.ttsModel ?? "", ttsVoice: s.ttsVoice ?? "",
-    fromNumber: s.fromNumber ?? "", voiceChatId: s.voiceChatId ?? "",
+    fromNumber: s.fromNumber ?? "", ownerNumber: s.ownerNumber ?? "", voiceChatId: s.voiceChatId ?? "",
     language: s.language ?? "en-US", inboundEnabled: s.inboundEnabled ?? false, outboundEnabled: s.outboundEnabled ?? false,
     approvalRequired: s.approvalRequired ?? true, dailyLimit: s.dailyLimit ?? 50,
     localReady: Boolean(s.localVoiceUrl && s.localVoiceSandbox),
@@ -149,6 +149,11 @@ export async function POST(req: Request) {
       const n = String(body.fromNumber).trim();
       if (n && !/^\+[1-9]\d{5,14}$/.test(n)) return err("Number E.164 format me do, jaise +14155550123.");
       patch.fromNumber = n;
+    }
+    if (body.ownerNumber !== undefined) {
+      const n = String(body.ownerNumber).trim();
+      if (n && !/^\+[1-9]\d{5,14}$/.test(n)) return err("Apna number country code ke saath likho, jaise +919876543210.");
+      patch.ownerNumber = n;
     }
     const saved = await saveVoiceSettings(uid, patch);
     await audit(uid, { kind: "voice_settings_saved", text: "Voice settings updated" });
