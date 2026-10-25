@@ -4,8 +4,8 @@ import { FieldValue } from "firebase-admin/firestore";
 import { resolveValue, vaultDelete, vaultPut } from "@/lib/vault";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 
-export type TtsProvider = "twilio" | "openai" | "gemini" | "elevenlabs" | "deepgram" | "azure" | "cartesia" | "playht";
-export const TTS_PROVIDERS: TtsProvider[] = ["twilio", "openai", "gemini", "elevenlabs", "deepgram", "azure", "cartesia", "playht"];
+export type TtsProvider = "twilio" | "local" | "openai" | "gemini" | "elevenlabs" | "deepgram" | "azure" | "cartesia" | "playht";
+export const TTS_PROVIDERS: TtsProvider[] = ["twilio", "local", "openai", "gemini", "elevenlabs", "deepgram", "azure", "cartesia", "playht"];
 
 export type VoiceSettings = {
   openaiKey?: string;
@@ -26,7 +26,12 @@ export type VoiceSettings = {
   /** Old field, kept so earlier saved settings still load. Calls now use the chat's model. */
   llmProvider?: ProviderId;
   llmModel?: string;
+  /** A language tag such as hi-IN, or "auto": the language follows the country of the phone number. */
   language?: string;
+  /** Set by the app when the local voice model on the cloud PC is ready. Never typed by the user. */
+  localVoiceUrl?: string;
+  localVoiceSandbox?: string;
+  localVoiceAt?: number;
   inboundEnabled?: boolean;
   outboundEnabled?: boolean;
   approvalRequired?: boolean;
@@ -66,7 +71,7 @@ export async function saveVoiceSettings(uid: string, patch: Partial<VoiceSetting
   if (typeof patch.voiceChatId === "string" && /^[A-Za-z0-9_-]{0,160}$/.test(patch.voiceChatId)) next.voiceChatId = patch.voiceChatId;
   if (patch.llmProvider && PROVIDERS.some((p) => p.id === patch.llmProvider)) next.llmProvider = patch.llmProvider;
   if (typeof patch.llmModel === "string" && patch.llmModel.trim().length <= 120) next.llmModel = patch.llmModel.trim();
-  if (typeof patch.language === "string" && /^[a-z]{2,3}(?:-[A-Z]{2})?$/.test(patch.language)) next.language = patch.language;
+  if (typeof patch.language === "string" && /^(?:auto|[a-z]{2,3}(?:-[A-Z]{2})?)$/.test(patch.language)) next.language = patch.language;
   for (const f of ["inboundEnabled", "outboundEnabled", "approvalRequired"] as const) if (typeof patch[f] === "boolean") next[f] = patch[f];
   if (typeof patch.dailyLimit === "number" && Number.isInteger(patch.dailyLimit)) next.dailyLimit = Math.max(1, Math.min(500, patch.dailyLimit));
   await ref.set({ voiceSettings: next }, { merge: true });
