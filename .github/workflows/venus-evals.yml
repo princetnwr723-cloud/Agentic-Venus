@@ -1,0 +1,53 @@
+name: Venus Code evals
+
+# Run it by hand: GitHub -> Actions -> "Venus Code evals" -> Run workflow.
+# Add your API key as a repository secret first (Settings -> Secrets and variables -> Actions),
+# for example ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY.
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "anthropic, openai, gemini, grok, openrouter, mistral, groq or deepseek"
+        default: "anthropic"
+      model:
+        description: "Model id, for example claude-opus-5-5"
+        default: "claude-opus-5-5"
+      only:
+        description: "Optional: comma separated task ids (empty = all tasks)"
+        default: ""
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies (TypeScript is used to load the real system prompt)
+        run: npm ci || npm install --no-audit --no-fund
+      - name: Check that the eval suite itself is valid
+        run: node scripts/eval.mjs --oracle
+      - name: Run the evals
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          ONLY="${{ inputs.only }}"
+          if [ -n "$ONLY" ]; then EXTRA="--only $ONLY"; else EXTRA=""; fi
+          node scripts/eval.mjs --provider "${{ inputs.provider }}" --model "${{ inputs.model }}" $EXTRA
+      - name: Show the result
+        if: always()
+        run: cat evals/results/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: venus-eval-results
+          path: evals/results
