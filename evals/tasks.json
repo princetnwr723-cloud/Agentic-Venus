@@ -1,441 +1,128 @@
 {
   "version": 1,
-  "description": "Fixed regression tasks. These are task definitions; results must be collected by running the agent in a configured environment.",
   "tasks": [
     {
-      "id": "lead_research-01",
-      "category": "lead_research",
-      "prompt": "Find 10 independent dentists in New York City with official websites and public contact details. Return a CSV and cite every source.",
-      "rubric": [
-        "10 unique rows",
-        "source URL",
-        "CSV"
-      ],
-      "risk": "read"
+      "id": "slugify",
+      "title": "Create a utility function",
+      "prompt": "Create slugify.js exporting slugify(str): lowercase, strip accents (é becomes e), replace every run of non-alphanumeric characters with a single '-', and no leading or trailing '-'.",
+      "seed": {},
+      "check": "node -e \"const {slugify}=require('./slugify.js');const a=require('assert');a.strictEqual(slugify('  Hello, World!  '),'hello-world');a.strictEqual(slugify('Café Déjà--vu'),'cafe-deja-vu');a.strictEqual(slugify('---'),'');a.strictEqual(slugify('A_B c'),'a-b-c')\"",
+      "solution": {
+        "slugify.js": "function slugify(s) {\n  return String(s).normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n}\nmodule.exports = { slugify };\n"
+      }
     },
     {
-      "id": "lead_research-02",
-      "category": "lead_research",
-      "prompt": "Research 8 HVAC companies in Austin; exclude directories and verify each official domain.",
-      "rubric": [
-        "8 unique companies",
-        "official domain",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "fix-off-by-one",
+      "title": "Fix a bug without touching the test",
+      "prompt": "Running `node test.js` fails. Fix the bug in sum.js. Do not edit test.js.",
+      "seed": {
+        "sum.js": "function sumTo(n) {\n  let t = 0;\n  for (let i = 1; i < n; i++) t += i;\n  return t;\n}\nmodule.exports = { sumTo };\n",
+        "test.js": "const assert = require('assert');\nconst { sumTo } = require('./sum.js');\nassert.strictEqual(sumTo(1), 1);\nassert.strictEqual(sumTo(4), 10);\nassert.strictEqual(sumTo(0), 0);\nconsole.log('ok');\n"
+      },
+      "check": "node test.js && git diff --quiet $EVAL_BASE -- test.js",
+      "solution": {
+        "sum.js": "function sumTo(n) {\n  let t = 0;\n  for (let i = 1; i <= n; i++) t += i;\n  return t;\n}\nmodule.exports = { sumTo };\n"
+      }
     },
     {
-      "id": "lead_research-03",
-      "category": "lead_research",
-      "prompt": "Find 12 accountants in Chicago and separate confirmed facts from unknown fields.",
-      "rubric": [
-        "12 rows",
-        "unknown fields",
-        "sources"
-      ],
-      "risk": "read"
+      "id": "todo-feature",
+      "title": "Extend an existing module",
+      "prompt": "In todo.js add remove(id) (returns true if an item was removed, otherwise false) and complete(id) (marks the item done and returns it, or null if there is no such id). Export both and keep add, list and reset working.",
+      "seed": {
+        "todo.js": "let items = [];\nlet nextId = 1;\nfunction add(text) { const it = { id: nextId++, text, done: false }; items.push(it); return it; }\nfunction list() { return items.slice(); }\nfunction reset() { items = []; nextId = 1; }\nmodule.exports = { add, list, reset };\n"
+      },
+      "check": "node -e \"const t=require('./todo.js');const a=require('assert');const x=t.add('a');const y=t.add('b');a.strictEqual(t.complete(x.id).done,true);a.strictEqual(t.complete(99),null);a.strictEqual(t.remove(y.id),true);a.strictEqual(t.remove(y.id),false);a.deepStrictEqual(t.list().map(i=>i.id),[x.id])\"",
+      "solution": {
+        "todo.js": "let items = [];\nlet nextId = 1;\nfunction add(text) { const it = { id: nextId++, text, done: false }; items.push(it); return it; }\nfunction list() { return items.slice(); }\nfunction reset() { items = []; nextId = 1; }\nfunction remove(id) { const n = items.length; items = items.filter((i) => i.id !== id); return items.length < n; }\nfunction complete(id) { const it = items.find((i) => i.id === id); if (!it) return null; it.done = true; return it; }\nmodule.exports = { add, list, reset, remove, complete };\n"
+      }
     },
     {
-      "id": "lead_research-04",
-      "category": "lead_research",
-      "prompt": "Build a list of 10 independent gyms in Miami with website and public email when available.",
-      "rubric": [
-        "10 rows",
-        "public email",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "write-tests",
+      "title": "Write real unit tests",
+      "prompt": "Write mathx.test.js using node:test and node:assert that covers clamp, chunk and unique (at least 6 test cases in total, include edge cases). Do not change mathx.js. `node --test` must pass.",
+      "seed": {
+        "mathx.js": "function clamp(n, lo, hi) { return Math.min(Math.max(n, lo), hi); }\nfunction chunk(arr, size) { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }\nfunction unique(arr) { return [...new Set(arr)]; }\nmodule.exports = { clamp, chunk, unique };\n"
+      },
+      "check": "node --test >/dev/null 2>&1 && [ \"$(grep -c 'test(' mathx.test.js)\" -ge 6 ] && git diff --quiet $EVAL_BASE -- mathx.js",
+      "solution": {
+        "mathx.test.js": "const test = require('node:test');\nconst assert = require('node:assert');\nconst { clamp, chunk, unique } = require('./mathx.js');\ntest('clamp inside', () => assert.strictEqual(clamp(5, 0, 10), 5));\ntest('clamp low', () => assert.strictEqual(clamp(-5, 0, 10), 0));\ntest('clamp high', () => assert.strictEqual(clamp(50, 0, 10), 10));\ntest('chunk even', () => assert.deepStrictEqual(chunk([1, 2, 3, 4], 2), [[1, 2], [3, 4]]));\ntest('chunk remainder', () => assert.deepStrictEqual(chunk([1, 2, 3], 2), [[1, 2], [3]]));\ntest('unique', () => assert.deepStrictEqual(unique([1, 1, 2, 3, 3]), [1, 2, 3]));\ntest('unique empty', () => assert.deepStrictEqual(unique([]), []));\n"
+      }
     },
     {
-      "id": "lead_research-05",
-      "category": "lead_research",
-      "prompt": "Find 10 roofing contractors in Phoenix and flag duplicate domains.",
-      "rubric": [
-        "10 rows",
-        "duplicate",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "wc-cli",
+      "title": "Build a small CLI",
+      "prompt": "Create wc.js: a Node CLI that reads all of stdin and prints '<lines> <words> <chars>' separated by single spaces and ending with a newline, like the wc tool (lines = number of newline characters).",
+      "seed": {},
+      "check": "[ \"$(printf 'a b\\nc\\n' | node wc.js)\" = \"2 3 6\" ] && [ \"$(printf '' | node wc.js)\" = \"0 0 0\" ]",
+      "solution": {
+        "wc.js": "let d = '';\nprocess.stdin.setEncoding('utf8');\nprocess.stdin.on('data', (c) => { d += c; }).on('end', () => {\n  const lines = (d.match(/\\n/g) || []).length;\n  const words = d.split(/\\s+/).filter(Boolean).length;\n  console.log(lines + ' ' + words + ' ' + d.length);\n});\n"
+      }
     },
     {
-      "id": "lead_research-06",
-      "category": "lead_research",
-      "prompt": "Research 8 dental clinics in Seattle and check that each website is live.",
-      "rubric": [
-        "8 rows",
-        "website status",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "rename-refactor",
+      "title": "Refactor across files",
+      "prompt": "Rename the function getUsr to getUser everywhere: the definition, the export, every caller and the tests. Keep the behavior identical.",
+      "seed": {
+        "users.js": "function getUsr(id) { return { id, name: 'user' + id }; }\nmodule.exports = { getUsr };\n",
+        "report.js": "const { getUsr } = require('./users.js');\nfunction label(id) { return getUsr(id).name.toUpperCase(); }\nmodule.exports = { label };\n",
+        "test.js": "const a = require('assert');\nconst { getUsr } = require('./users.js');\nconst { label } = require('./report.js');\na.strictEqual(getUsr(2).name, 'user2');\na.strictEqual(label(3), 'USER3');\nconsole.log('ok');\n"
+      },
+      "check": "! grep -rn 'getUsr' --include=*.js . && node test.js",
+      "solution": {
+        "users.js": "function getUser(id) { return { id, name: 'user' + id }; }\nmodule.exports = { getUser };\n",
+        "report.js": "const { getUser } = require('./users.js');\nfunction label(id) { return getUser(id).name.toUpperCase(); }\nmodule.exports = { label };\n",
+        "test.js": "const a = require('assert');\nconst { getUser } = require('./users.js');\nconst { label } = require('./report.js');\na.strictEqual(getUser(2).name, 'user2');\na.strictEqual(label(3), 'USER3');\nconsole.log('ok');\n"
+      }
     },
     {
-      "id": "lead_research-07",
-      "category": "lead_research",
-      "prompt": "Find 10 SaaS companies hiring customer success staff; cite evidence of hiring.",
-      "rubric": [
-        "10 companies",
-        "hiring evidence",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "json-report",
+      "title": "Read data, compute, print",
+      "prompt": "Create report.js: it reads data.json (an array of {name, dept, salary}) and prints one line per department as 'dept: average', with the average salary to 1 decimal place, sorted by average descending.",
+      "seed": {
+        "data.json": "[{\"name\":\"A\",\"dept\":\"eng\",\"salary\":100},{\"name\":\"B\",\"dept\":\"eng\",\"salary\":200},{\"name\":\"C\",\"dept\":\"ops\",\"salary\":90},{\"name\":\"D\",\"dept\":\"ops\",\"salary\":110},{\"name\":\"E\",\"dept\":\"hr\",\"salary\":300}]\n"
+      },
+      "check": "[ \"$(node report.js)\" = \"$(printf 'hr: 300.0\\neng: 150.0\\nops: 100.0')\" ]",
+      "solution": {
+        "report.js": "const rows = require('./data.json');\nconst by = {};\nfor (const r of rows) { (by[r.dept] = by[r.dept] || []).push(r.salary); }\nconst out = Object.entries(by).map(([d, v]) => [d, v.reduce((a, b) => a + b, 0) / v.length]).sort((a, b) => b[1] - a[1]);\nfor (const [d, avg] of out) console.log(d + ': ' + avg.toFixed(1));\n"
+      }
     },
     {
-      "id": "lead_research-08",
-      "category": "lead_research",
-      "prompt": "Find 8 local law firms in Denver and do not guess attorney names or emails.",
-      "rubric": [
-        "8 firms",
-        "not found",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "fix-lru",
+      "title": "Find a logic bug from a failing test",
+      "prompt": "Running `node test.js` fails. Find and fix the bug(s) in cache.js. Do not edit test.js.",
+      "seed": {
+        "cache.js": "class LRU {\n  constructor(max) { this.max = max; this.map = new Map(); }\n  get(k) { return this.map.has(k) ? this.map.get(k) : undefined; }\n  set(k, v) {\n    this.map.set(k, v);\n    if (this.map.size > this.max) this.map.delete(this.map.keys().next().value);\n  }\n}\nmodule.exports = { LRU };\n",
+        "test.js": "const a = require('assert');\nconst { LRU } = require('./cache.js');\nconst c = new LRU(2);\nc.set('a', 1); c.set('b', 2); c.get('a'); c.set('c', 3);\na.strictEqual(c.get('b'), undefined);\na.strictEqual(c.get('a'), 1);\na.strictEqual(c.get('c'), 3);\nconst d = new LRU(2);\nd.set('x', 1); d.set('y', 2); d.set('x', 9); d.set('z', 3);\na.strictEqual(d.get('y'), undefined);\na.strictEqual(d.get('x'), 9);\nconsole.log('ok');\n"
+      },
+      "check": "node test.js && git diff --quiet $EVAL_BASE -- test.js",
+      "solution": {
+        "cache.js": "class LRU {\n  constructor(max) { this.max = max; this.map = new Map(); }\n  get(k) {\n    if (!this.map.has(k)) return undefined;\n    const v = this.map.get(k);\n    this.map.delete(k);\n    this.map.set(k, v);\n    return v;\n  }\n  set(k, v) {\n    if (this.map.has(k)) this.map.delete(k);\n    this.map.set(k, v);\n    if (this.map.size > this.max) this.map.delete(this.map.keys().next().value);\n  }\n}\nmodule.exports = { LRU };\n"
+      }
     },
     {
-      "id": "lead_research-09",
-      "category": "lead_research",
-      "prompt": "Research 10 restaurants in Boston for a supplier outreach list; use official websites.",
-      "rubric": [
-        "10 rows",
-        "official website",
-        "source URL"
-      ],
-      "risk": "read"
+      "id": "stack-queue",
+      "title": "Create several files that work together",
+      "prompt": "Create stack.js (class Stack with push, pop, peek and a size() method) and queue.js (class Queue with enqueue, dequeue and a size() method), plus index.js that re-exports both classes. Add stack-queue.test.js using node:test. `node --test` must pass.",
+      "seed": {},
+      "check": "node -e \"const {Stack,Queue}=require('./index.js');const a=require('assert');const s=new Stack();s.push(1);s.push(2);a.strictEqual(s.peek(),2);a.strictEqual(s.pop(),2);a.strictEqual(s.size(),1);const q=new Queue();q.enqueue('a');q.enqueue('b');a.strictEqual(q.dequeue(),'a');a.strictEqual(q.size(),1)\" && node --test >/dev/null 2>&1 && ls *.test.js >/dev/null 2>&1",
+      "solution": {
+        "stack.js": "class Stack {\n  constructor() { this.a = []; }\n  push(x) { this.a.push(x); }\n  pop() { return this.a.pop(); }\n  peek() { return this.a[this.a.length - 1]; }\n  size() { return this.a.length; }\n}\nmodule.exports = { Stack };\n",
+        "queue.js": "class Queue {\n  constructor() { this.a = []; }\n  enqueue(x) { this.a.push(x); }\n  dequeue() { return this.a.shift(); }\n  size() { return this.a.length; }\n}\nmodule.exports = { Queue };\n",
+        "index.js": "module.exports = { ...require('./stack.js'), ...require('./queue.js') };\n",
+        "stack-queue.test.js": "const test = require('node:test');\nconst assert = require('node:assert');\nconst { Stack, Queue } = require('./index.js');\ntest('stack', () => { const s = new Stack(); s.push(1); assert.strictEqual(s.pop(), 1); });\ntest('queue', () => { const q = new Queue(); q.enqueue(1); assert.strictEqual(q.dequeue(), 1); });\n"
+      }
     },
     {
-      "id": "lead_research-10",
-      "category": "lead_research",
-      "prompt": "Find 10 property managers in Tampa and mark email deliverability as unverified unless directly tested.",
-      "rubric": [
-        "10 rows",
-        "unverified",
-        "source URL"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-01",
-      "category": "browser_forms",
-      "prompt": "Open a public contact page and identify the fields required, but do not submit it.",
-      "rubric": [
-        "field list",
-        "do not submit",
-        "confirmation"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "browser_forms-02",
-      "category": "browser_forms",
-      "prompt": "Navigate a multi-page public site, collect the requested facts, and cite exact URLs.",
-      "rubric": [
-        "facts",
-        "source URL",
-        "no invented"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-03",
-      "category": "browser_forms",
-      "prompt": "When a site shows a cookie banner, choose only the minimum necessary preference and continue.",
-      "rubric": [
-        "continue",
-        "privacy"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-04",
-      "category": "browser_forms",
-      "prompt": "If a page blocks automation, report the block and use an accessible official alternative.",
-      "rubric": [
-        "blocked",
-        "alternative"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-05",
-      "category": "browser_forms",
-      "prompt": "Fill a draft contact form with user-provided data, stop before submission, and request approval.",
-      "rubric": [
-        "draft",
-        "approval",
-        "not submit"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-06",
-      "category": "browser_forms",
-      "prompt": "Download a public PDF and extract the requested table into CSV.",
-      "rubric": [
-        "CSV",
-        "PDF",
-        "rows"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-07",
-      "category": "browser_forms",
-      "prompt": "Find the official pricing page for a SaaS tool and capture plan names and prices.",
-      "rubric": [
-        "pricing",
-        "official",
-        "currency"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-08",
-      "category": "browser_forms",
-      "prompt": "Compare two official documentation pages and explain any version differences.",
-      "rubric": [
-        "version",
-        "documentation",
-        "source URL"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-09",
-      "category": "browser_forms",
-      "prompt": "If login is required but no authenticated profile exists, ask for setup rather than inventing access.",
-      "rubric": [
-        "login",
-        "setup"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "browser_forms-10",
-      "category": "browser_forms",
-      "prompt": "Inspect a browser error, capture the likely cause, and try one safe recovery step.",
-      "rubric": [
-        "error",
-        "recovery"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "coding_bugs-01",
-      "category": "coding_bugs",
-      "prompt": "Fix a TypeScript function that fails on null input; add regression tests.",
-      "rubric": [
-        "null",
-        "test",
-        "TypeScript"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-02",
-      "category": "coding_bugs",
-      "prompt": "Find and fix an off-by-one error in pagination and test first, last, and empty pages.",
-      "rubric": [
-        "pagination",
-        "empty",
-        "test"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-03",
-      "category": "coding_bugs",
-      "prompt": "Repair a React state update that uses stale state; add a focused test.",
-      "rubric": [
-        "stale state",
-        "test"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-04",
-      "category": "coding_bugs",
-      "prompt": "Fix a server route that trusts a client-supplied user ID; verify ownership server-side.",
-      "rubric": [
-        "auth",
-        "ownership",
-        "test"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-05",
-      "category": "coding_bugs",
-      "prompt": "Handle a timed-out external API request with bounded retries and clear errors.",
-      "rubric": [
-        "timeout",
-        "retry",
-        "bounded"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "coding_bugs-06",
-      "category": "coding_bugs",
-      "prompt": "Fix a CSV export that breaks on commas, quotes, and newlines in fields.",
-      "rubric": [
-        "CSV",
-        "quotes",
-        "newline"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-07",
-      "category": "coding_bugs",
-      "prompt": "Remove an unsafe shell interpolation bug and validate untrusted arguments.",
-      "rubric": [
-        "shell",
-        "validate",
-        "injection"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-08",
-      "category": "coding_bugs",
-      "prompt": "Fix duplicate job starts caused by concurrent requests; make acquisition atomic.",
-      "rubric": [
-        "atomic",
-        "concurrent",
-        "job"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "coding_bugs-09",
-      "category": "coding_bugs",
-      "prompt": "Correct a URL fetch flow that follows redirects into private network addresses.",
-      "rubric": [
-        "redirect",
-        "private",
-        "SSRF"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "coding_bugs-10",
-      "category": "coding_bugs",
-      "prompt": "Fix a cost estimate that silently uses a wrong default price for unknown models.",
-      "rubric": [
-        "unknown model",
-        "estimate",
-        "explicit"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "video_tasks-01",
-      "category": "video_tasks",
-      "prompt": "Create a 15-second vertical short from supplied assets with a title card and end card.",
-      "rubric": [
-        "9:16",
-        "duration",
-        "render"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "video_tasks-02",
-      "category": "video_tasks",
-      "prompt": "Generate a storyboard for a 30-second science short with timestamps and shot descriptions.",
-      "rubric": [
-        "timestamps",
-        "shots",
-        "30"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "video_tasks-03",
-      "category": "video_tasks",
-      "prompt": "Render a sample clip and verify that the output file exists and has non-zero size.",
-      "rubric": [
-        "output file",
-        "size",
-        "verify"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "video_tasks-04",
-      "category": "video_tasks",
-      "prompt": "If an asset is missing, report it and produce a partial render only if clearly labeled.",
-      "rubric": [
-        "missing",
-        "partial",
-        "report"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "video_tasks-05",
-      "category": "video_tasks",
-      "prompt": "Create a repeatable video template and record render settings for reproducibility.",
-      "rubric": [
-        "template",
-        "settings",
-        "repeatable"
-      ],
-      "risk": "write"
-    },
-    {
-      "id": "team_goals-01",
-      "category": "team_goals",
-      "prompt": "Split a market research task into independent research, verification, and synthesis subtasks.",
-      "rubric": [
-        "subtasks",
-        "verification",
-        "synthesis"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "team_goals-02",
-      "category": "team_goals",
-      "prompt": "Run three independent read-only research subtasks concurrently and combine deduplicated findings.",
-      "rubric": [
-        "concurrent",
-        "deduplicate",
-        "sources"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "team_goals-03",
-      "category": "team_goals",
-      "prompt": "When one worker fails, preserve successful outputs and retry only the failed subtask.",
-      "rubric": [
-        "retry",
-        "preserve",
-        "failed"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "team_goals-04",
-      "category": "team_goals",
-      "prompt": "Resolve conflicting claims by preferring primary sources and flagging unresolved uncertainty.",
-      "rubric": [
-        "primary sources",
-        "conflict",
-        "uncertainty"
-      ],
-      "risk": "read"
-    },
-    {
-      "id": "team_goals-05",
-      "category": "team_goals",
-      "prompt": "Produce a final report with decisions, evidence, open questions, and next actions.",
-      "rubric": [
-        "evidence",
-        "open questions",
-        "next actions"
-      ],
-      "risk": "read"
+      "id": "explain-code",
+      "title": "Understand code and report it",
+      "prompt": "Create ANSWER.md with 2 to 3 sentences explaining what main() in app.js does, including its retry and backoff behavior.",
+      "seed": {
+        "app.js": "async function main() {\n  for (let i = 0; i < 3; i++) {\n    try { return await fetchData(); }\n    catch (e) { await sleep(2 ** i * 100); }\n  }\n  throw new Error('failed after retries');\n}\nmodule.exports = { main };\n"
+      },
+      "check": "[ -f ANSWER.md ] && grep -qi retr ANSWER.md && grep -qiE 'backoff|exponential|wait|delay' ANSWER.md",
+      "solution": {
+        "ANSWER.md": "main() calls fetchData() and returns its result. If the call fails it retries up to 3 times, waiting longer after each failure (exponential backoff: 100, 200, 400 ms), and throws an error after the last retry.\n"
+      }
     }
   ]
 }
