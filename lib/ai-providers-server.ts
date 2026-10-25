@@ -51,16 +51,28 @@ function anthropicMessages(messages: ChatMsg[]) {
     }));
 }
 
+/**
+ * A long system prompt (agent persona + memory + skills) is re-sent on every turn. Marking it cacheable makes the
+ * repeated part much cheaper and faster on Anthropic. Short prompts are left as plain text (nothing to gain).
+ */
+function anthropicSystem(system: string | undefined) {
+  if (!system) return undefined;
+  return system.length >= 3000 ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] : system;
+}
+
 async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number) {
   const system = messages.find((m) => m.role === "system")?.content;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const send = (sys: unknown) => fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: anthropicMessages(messages) }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, system: sys, messages: anthropicMessages(messages) }),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || "Anthropic request failed");
-  return data?.content?.[0]?.text ?? "";
+  let res = await send(anthropicSystem(system));
+  let data = await res.json().catch(() => ({}));
+  if (!res.ok && /cache_control/i.test(data?.error?.message ?? "")) { res = await send(system); data = await res.json().catch(() => ({})); }
+  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${data?.error?.message || "request failed"}`);
+  const text = (Array.isArray(data?.content) ? data.content : []).map((b: { type?: string; text?: string }) => (b?.type === "text" ? b.text ?? "" : "")).join("");
+  return text;
 }
 
 async function callGemini(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number) {
@@ -105,16 +117,30 @@ async function callCohere(apiKey: string, model: string, messages: ChatMsg[]) {
   return Array.isArray(parts) ? parts.map((p: { text?: string }) => p.text ?? "").join("") : "";
 }
 
+/** Short outages (rate limit, overloaded, 5xx, network blips) are retried with a growing pause before giving up. */
+const TRANSIENT = /(\b429\b|rate.?limit|overloaded|timeout|timed out|fetch failed|ECONN|socket|\b50[0234]\b|unavailable|capacity)/i;
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function callProvider({
   provider, apiKey, model, messages, maxTokens = 8192,
 }: {
   provider: ProviderId; apiKey: string; model: string; messages: ChatMsg[]; maxTokens?: number;
 }): Promise<string> {
-  switch (provider) {
-    case "anthropic": return callAnthropic(apiKey, model, messages, maxTokens);
-    case "gemini": return callGemini(apiKey, model, messages, maxTokens);
-    case "cohere": return callCohere(apiKey, model, messages);
-    default: return callOpenAICompatible(provider, apiKey, model, messages);
+  const once = () => {
+    switch (provider) {
+      case "anthropic": return callAnthropic(apiKey, model, messages, maxTokens);
+      case "gemini": return callGemini(apiKey, model, messages, maxTokens);
+      case "cohere": return callCohere(apiKey, model, messages);
+      default: return callOpenAICompatible(provider, apiKey, model, messages);
+    }
+  };
+  for (let attempt = 0; ; attempt++) {
+    try { return await once(); }
+    catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (attempt >= 2 || !TRANSIENT.test(msg)) throw e;
+      await wait(1200 * (attempt + 1));
+    }
   }
 }
 
@@ -169,14 +195,20 @@ async function readSSE(res: Response, onData: (j: any) => void) {
 
 async function streamAnthropic(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number, push: (s: string) => void) {
   const system = messages.find((m) => m.role === "system")?.content;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const send = (sys: unknown) => fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: anthropicMessages(messages), stream: true }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, system: sys, messages: anthropicMessages(messages), stream: true }),
   });
+  let res = await send(anthropicSystem(system));
   if (!res.ok || !res.body) {
     const d = await res.json().catch(() => ({}));
-    throw new Error(d?.error?.message || "Anthropic request failed");
+    if (/cache_control/i.test(d?.error?.message ?? "")) res = await send(system);
+    else throw new Error(`Anthropic ${res.status}: ${d?.error?.message || "request failed"}`);
+  }
+  if (!res.ok || !res.body) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error(`Anthropic ${res.status}: ${d?.error?.message || "request failed"}`);
   }
   await readSSE(res, (j) => { if (j.type === "content_block_delta" && j.delta?.type === "text_delta") push(j.delta.text); });
 }
