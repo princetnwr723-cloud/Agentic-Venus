@@ -27,18 +27,23 @@ const limit = <T,>(p: Promise<T>, ms: number, what: string): Promise<T> =>
 // The tool list (MCP servers can be slow) is built once and kept for a few minutes. A build that is still running keeps running between turns.
 const catCache = new Map<string, { t: number; specs: ToolSpec[] }>();
 const catBuilding = new Map<string, Promise<ToolSpec[]>>();
-async function loadSpecs(key: string, connectors: Record<string, string>, waitMs: number): Promise<ToolSpec[]> {
+const withoutMcp = (c: Record<string, string>) => Object.fromEntries(Object.entries(c).filter(([k]) => !k.startsWith("mcp:")));
+async function loadSpecs(key: string, connectors: Record<string, string>): Promise<ToolSpec[]> {
   const hit = catCache.get(key);
   if (hit && Date.now() - hit.t < 5 * 60_000) return hit.specs;
-  let p = catBuilding.get(key);
-  if (!p) {
-    p = buildCatalog(connectors)
+  let full = catBuilding.get(key);
+  if (!full) {
+    full = buildCatalog(connectors)
       .then((c) => { catCache.set(key, { t: Date.now(), specs: c.specs }); return c.specs; })
       .catch(() => [] as ToolSpec[])
       .finally(() => catBuilding.delete(key));
-    catBuilding.set(key, p);
+    catBuilding.set(key, full);
   }
-  return Promise.race([p, new Promise<ToolSpec[]>((res) => setTimeout(() => res([]), waitMs))]);
+  // A slow MCP server must never leave the call without tools: wait a moment for the full list,
+  // otherwise start right away with everything that needs no network (built-in tools, Gmail, connected apps).
+  const done = await Promise.race([full, new Promise<ToolSpec[]>((res) => setTimeout(() => res([]), 1200))]);
+  if (done.length) return done;
+  return (await buildCatalog(withoutMcp(connectors)).catch(() => ({ specs: [] as ToolSpec[] }))).specs;
 }
 
 const agentCache = new Map<string, { t: number; agent: Agent }>();
@@ -122,7 +127,7 @@ export async function POST(req: Request) {
 
     // ---- the agent: one of your chats (same model, role, memory and connected tools) ----
     const agent = await getAgent(uid, call.chatId);
-    const all = await loadSpecs(`${uid}:${agent.chatId}:${Object.keys(agent.connectors).sort().join(",")}`, agent.connectors, phaseWork ? 1500 : 4500);
+    const all = await loadSpecs(`${uid}:${agent.chatId}:${Object.keys(agent.connectors).sort().join(",")}`, agent.connectors);
     const specs = pickSpecs(all, owner, call.direction === "inbound");
     const work = phaseWork ? (call.work as Work) : null;
     const heard = (work ? work.speech : speech) || "(Your owner just sent you a live instruction. Carry it out now.)";
