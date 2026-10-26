@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { readBody, requestStatus } from "@/lib/request";
-import { createSignedDownload, removeObjects, supabaseConfigured } from "@/lib/supabase-server";
+import { createSignedDownload, createSignedUpload, removeObjects, supabaseConfigured } from "@/lib/supabase-server";
+import { voiceStatus } from "@/lib/venus-voice";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +15,8 @@ export async function GET() {
   });
 }
 
+const safeName = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(-60) || "video.mp4";
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req);
@@ -25,6 +28,19 @@ export async function POST(req: Request) {
       let url = await createSignedDownload(path);
       if (body.download) url += (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(String(body.download));
       return NextResponse.json({ url });
+    }
+
+    // The user's own video (edit mode): the browser uploads it straight to storage with this one-time link.
+    if (body.action === "source-upload-url") {
+      const pid = String(body.pid || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+      if (!pid) return NextResponse.json({ error: "Missing project id." }, { status: 400 });
+      const path = `${uid}/src/${pid}/${safeName(String(body.name || "video.mp4"))}`;
+      return NextResponse.json({ path, uploadUrl: await createSignedUpload(path) });
+    }
+
+    // Which voice will speak the voice-over (the same voice system as phone calls).
+    if (body.action === "voice-status") {
+      return NextResponse.json(await voiceStatus(uid));
     }
 
     if (body.action === "delete") {
