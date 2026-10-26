@@ -13,6 +13,7 @@ type Settings = {
 };
 type LiveCall = { id: string; status: string; lines: Array<{ who: "agent" | "person" | "you"; text: string; at: number }>; lastError: string; lastVoice: string };
 const FINISHED = ["completed", "busy", "failed", "no-answer", "canceled"];
+type SpeechRec = { lang: string; interimResults: boolean; continuous: boolean; onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null; start: () => void };
 type Call = { id: string; direction: string; to: string; from: string; status: string; createdAt: number; durationSeconds: number; goal: string; summary: string };
 
 const TTS: Record<TtsId, { label: string; models: string[]; voices: string[]; keyHint: string }> = {
@@ -137,12 +138,12 @@ export default function VoicePage() {
     setNote({ kind: "ok", text: "Call khatam kar rahe hain." });
   });
   const listen = () => {
-    const w = window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const w = window as unknown as { SpeechRecognition?: new () => SpeechRec; webkitSpeechRecognition?: new () => SpeechRec };
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
     if (!SR) { setNote({ kind: "error", text: "Is browser me mic se likhna nahi chalta. Type karke bhejo." }); return; }
     const rec = new SR();
     rec.lang = "hi-IN"; rec.interimResults = false; rec.continuous = false;
-    rec.onresult = (e: any) => { setMsg((m) => `${m ? m + " " : ""}${Array.from(e.results).map((r: any) => r[0].transcript).join(" ")}`); }; // eslint-disable-line @typescript-eslint/no-explicit-any
+    rec.onresult = (e) => { setMsg((m) => `${m ? m + " " : ""}${Array.from(e.results).map((r) => r[0].transcript).join(" ")}`); };
     rec.onend = () => setListening(false);
     rec.onerror = () => setListening(false);
     setListening(true); rec.start();
@@ -180,7 +181,7 @@ export default function VoicePage() {
             <button onClick={connect} disabled={busy !== null || !creds.trim()} className="inline-flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-sm font-medium text-bg disabled:opacity-40">{busy === "connect" && <LoaderCircle size={15} className="animate-spin" />} Connect & set up automatically</button>
             <a href="https://console.twilio.com" target="_blank" rel="noreferrer" className="text-xs text-muted underline">Twilio Console kholo</a>
           </div>
-          {s.twilioConnected && <p className="text-xs leading-relaxed text-amber-500">Trial account me call uthate hi Twilio khud bolta hai "press any key": ye Twilio ka apna message hai, code se nahi hatta. Twilio account upgrade (paid) karte hi ye band ho jata hai aur agent seedha bolta hai.</p>}
+          {s.twilioConnected && <p className="text-xs leading-relaxed text-amber-500">Trial account me call uthate hi Twilio khud bolta hai &quot;press any key&quot;: ye Twilio ka apna message hai, code se nahi hatta. Twilio account upgrade (paid) karte hi ye band ho jata hai aur agent seedha bolta hai.</p>}
           <p className="text-xs leading-relaxed text-muted">Is ek click me: key check hoti hai, aapka Twilio number milta hai, incoming-call webhook khud set hota hai, aur calling + accept dono ON ho jaate hain. Jis desh me call karni hai uska Voice Geo Permission Twilio Console me ON hona chahiye.</p>
           {s.twilioConnected && webhook && <details className="text-xs text-muted"><summary className="cursor-pointer">Webhook URL (agar Twilio me khud daalna ho)</summary><p className="mt-2 break-all font-mono">{webhook}</p></details>}
         </section>
