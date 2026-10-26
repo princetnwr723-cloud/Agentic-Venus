@@ -1,56 +1,16 @@
 "use client";
 
-import { useEffect, useId, useState, type ReactNode } from "react";
-import { Check, Copy, ImageOff } from "lucide-react";
+import { useId, useState, type ReactNode } from "react";
+import { AlertTriangle, Check, Copy, ImageOff, Info, Lightbulb } from "lucide-react";
+import { hostOk, imgAllowed, useImageUrl } from "@/components/rich/image-url";
+import { Collage, RICH_LANGS, RICH_LOADING, RichFence } from "@/components/rich/RichBlocks";
 
 /* ------------------------------------------------------------------ */
 /* Images                                                              */
 /* ------------------------------------------------------------------ */
 
-// Remote images are only shown from these hosts (a model-written image URL can otherwise leak data in its query string).
-const IMG_HOSTS = [
-  "upload.wikimedia.org", "images.unsplash.com", "images.pexels.com",
-  "raw.githubusercontent.com", "user-images.githubusercontent.com", "avatars.githubusercontent.com",
-];
-const hostOk = (h: string) => IMG_HOSTS.includes(h) || h.endsWith(".supabase.co");
-const urlCache = new Map<string, string>();
-
 function ChatImage({ src, alt }: { src: string; alt: string }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let dead = false;
-    setUrl(null);
-    setFailed(false);
-    (async () => {
-      try {
-        if (src.startsWith("vimg:")) {
-          const path = src.slice(5);
-          const hit = urlCache.get(path);
-          if (hit) { if (!dead) setUrl(hit); return; }
-          const res = await fetch("/api/venus/media", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "url", path }),
-          });
-          const d = await res.json().catch(() => ({}));
-          if (!res.ok || !d.url) throw new Error("no url");
-          urlCache.set(path, String(d.url));
-          if (!dead) setUrl(String(d.url));
-        } else if (/^data:image\/(png|jpe?g|webp|gif);base64,/i.test(src)) {
-          setUrl(src);
-        } else {
-          const u = new URL(src);
-          if (u.protocol === "https:" && hostOk(u.hostname)) setUrl(src);
-          else throw new Error("blocked");
-        }
-      } catch {
-        if (!dead) setFailed(true);
-      }
-    })();
-    return () => { dead = true; };
-  }, [src]);
+  const { url, failed, fail } = useImageUrl(src);
 
   if (failed) {
     return (
@@ -69,12 +29,12 @@ function ChatImage({ src, alt }: { src: string; alt: string }) {
             alt={alt}
             loading="lazy"
             referrerPolicy="no-referrer"
-            onError={() => setFailed(true)}
-            className="w-full rounded-lg border border-line bg-bg"
+            onError={fail}
+            className="w-full rounded-xl border border-line bg-bg"
           />
         </a>
       ) : (
-        <div className="h-40 w-full animate-pulse rounded-lg border border-line bg-bg" />
+        <div className="h-40 w-full animate-pulse rounded-xl border border-line bg-bg" />
       )}
       {alt && <figcaption className="mt-1 text-[11px] text-faint">{alt}</figcaption>}
     </figure>
@@ -465,6 +425,10 @@ function Drawing({ what }: { what: string }) {
 }
 
 function FenceBlock({ lang, code, closed }: { lang: string; code: string; closed: boolean }) {
+  if (RICH_LANGS.has(lang)) {
+    if (!closed) return <Drawing what={RICH_LOADING[lang] ?? "Building…"} />;
+    return <RichFence lang={lang} code={code} fallback={<CodeBlock code={code} lang={`${lang} (could not draw)`} />} />;
+  }
   if (lang === "chart") {
     if (!closed) return <Drawing what="Drawing chart…" />;
     try {
@@ -563,6 +527,37 @@ function tableStarts(lines: string[], i: number): boolean {
   return SEP.test(b) && b.includes("-") && (b.includes("|") || a.trim().startsWith("|"));
 }
 
+const IMG_LINE = /^\s*!\[([^\]\n]*)\]\(([^\s)]+)\)\s*$/;
+const CREDIT_LINE = /^\s*_[^_\n].*_\s*$/;
+const CALLOUT = /^\[!(tip|note|info|warning|success)\]\s*(.*)$/i;
+const CALLOUT_STYLE = {
+  tip: { Icon: Lightbulb, box: "border-gold/40 bg-goldSoft/40", icon: "text-gold" },
+  note: { Icon: Info, box: "border-avatar-sky/40 bg-avatar-sky/10", icon: "text-avatar-sky" },
+  info: { Icon: Info, box: "border-avatar-sky/40 bg-avatar-sky/10", icon: "text-avatar-sky" },
+  warning: { Icon: AlertTriangle, box: "border-avatar-coral/40 bg-avatar-coral/10", icon: "text-avatar-coral" },
+  success: { Icon: Check, box: "border-avatar-teal/40 bg-avatar-teal/10", icon: "text-avatar-teal" },
+} as const;
+
+/** Reads a run of picture lines (each with an optional "_Photo by …_" credit line below it) that follow each other. */
+function readImageRun(lines: string[], start: number) {
+  const items: Array<{ src: string; alt: string }> = [];
+  const credits: string[] = [];
+  let i = start;
+  while (i < lines.length) {
+    const m = IMG_LINE.exec(lines[i]);
+    if (!m || !imgAllowed(m[2].trim())) break;
+    items.push({ alt: m[1], src: m[2].trim() });
+    i++;
+    if (i < lines.length && CREDIT_LINE.test(lines[i])) { credits.push(lines[i].trim().replace(/^_|_$/g, "")); i++; }
+    else credits.push("");
+    let j = i;
+    while (j < lines.length && lines[j].trim() === "") j++;
+    if (j < lines.length && IMG_LINE.test(lines[j])) i = j;
+    else break;
+  }
+  return { items, credits, next: i };
+}
+
 const startsBlock = (lines: string[], i: number) =>
   isFence(lines[i]) || isHeading(lines[i]) || isListLine(lines[i]) || isHr(lines[i]) || isQuote(lines[i]) || tableStarts(lines, i);
 
@@ -576,8 +571,13 @@ export default function Markdown({ text }: { text: string }) {
 
   while (i < lines.length) {
     const line = lines[i];
+    const run = IMG_LINE.test(line) ? readImageRun(lines, i) : null;
 
-    if (isFence(line)) {
+    if (run && run.items.length >= 2) {
+      const k = key++;
+      out.push(<Collage key={k} items={run.items} credits={run.credits.map((c, n) => (c ? <span key={n}>{renderInline(c, `cr${k}-${n}`)}</span> : null))} />);
+      i = run.next;
+    } else if (isFence(line)) {
       const lang = line.trim().slice(3).trim().toLowerCase().split(/\s+/)[0] ?? "";
       const code: string[] = [];
       i++;
@@ -628,7 +628,19 @@ export default function Markdown({ text }: { text: string }) {
     } else if (isQuote(line)) {
       const q: string[] = [];
       while (i < lines.length && isQuote(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
-      out.push(<div key={key++} className="my-2 border-l-2 border-gold/70 pl-3 text-muted"><Markdown text={q.join("\n")} /></div>);
+      const co = CALLOUT.exec(q[0] ?? "");
+      if (co) {
+        const st = CALLOUT_STYLE[co[1].toLowerCase() as keyof typeof CALLOUT_STYLE];
+        const rest = [co[2], ...q.slice(1)].join("\n").trim();
+        out.push(
+          <div key={key++} className={`my-2 flex gap-2.5 rounded-lg border px-3 py-2.5 ${st.box}`}>
+            <st.Icon size={16} className={`mt-0.5 shrink-0 ${st.icon}`} />
+            <div className="min-w-0 flex-1 text-ink"><Markdown text={rest} /></div>
+          </div>
+        );
+      } else {
+        out.push(<div key={key++} className="my-2 border-l-2 border-gold/70 pl-3 text-muted"><Markdown text={q.join("\n")} /></div>);
+      }
     } else if (isListLine(line)) {
       const items: ReactNode[] = [];
       const k = key++;
