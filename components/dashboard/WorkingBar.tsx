@@ -23,9 +23,9 @@ const dur = (ms: number) => {
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 };
 
-/** Removes the emoji / arrow the page puts in front of a step so every row reads clean. */
+/** Removes every emoji / arrow from a step so only the proper icon shows. */
 const clean = (s: string) =>
-  s.replace(/^[\s▶▸✓🔧🎬💻👥🤝📒🩹⏸️]+/u, "").replace(/\s+/g, " ").trim() || s;
+  s.replace(/\p{Extended_Pictographic}|[\uFE0F\u200D▶▸✓]/gu, "").replace(/\s+/g, " ").trim() || s;
 
 /** Picks a small icon that tells you what kind of step this is. */
 function iconFor(text: string): LucideIcon {
