@@ -107,49 +107,73 @@ async function store(uid: string, chatId: string, bytes: Buffer, ext: string): P
 
 const safeAlt = (x: string) => x.replace(/[\[\]()\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
 
+/** Downloads and stores up to `count` of the candidates; returns one markdown block per saved picture. */
+async function gather(candidates: Found[], count: number, query: string, ctx: { uid: string; chatId: string }) {
+  const out: Array<{ md: string; path: string; alt: string; credit: string }> = [];
+  const seen = new Set<string>();
+  let lastErr: unknown = null;
+  for (const c of candidates) {
+    if (out.length >= count) break;
+    if (seen.has(c.url)) continue;
+    seen.add(c.url);
+    const got = await download(c.url);
+    if (!got) continue;
+    try {
+      const path = await store(ctx.uid, ctx.chatId, got.bytes, got.ext);
+      const alt = safeAlt(c.title || query || "Image");
+      const credit = [c.credit && `by ${c.credit}`, c.license, c.page && `[source](${c.page})`].filter(Boolean).join(" · ");
+      out.push({ md: `![${alt}](vimg:${path})${credit ? `\n_Photo ${credit}_` : ""}`, path, alt, credit: [c.credit && `by ${c.credit}`, c.license].filter(Boolean).join(" · ") });
+    } catch (e) { lastErr = e; }
+  }
+  if (!out.length && lastErr) throw lastErr;
+  return out;
+}
+
+async function find(query: string, count: number): Promise<Found[]> {
+  const [w, o] = await Promise.all([fromWikimedia(query, count).catch(() => []), fromOpenverse(query, count).catch(() => [])]);
+  return [...w, ...o];
+}
+
 export const VISUAL_TOOLS: Def[] = [
   {
     name: "image.search", risk: "read",
-    params: "query:string (what the picture shows, 2-6 words), count?:number (1-3, default 2), page_url?:string (instead of query: take the main picture of this web page)",
+    params: "query:string (what the picture shows, 2-6 words), count?:number (1-3, default 2), page_url?:string (instead of query: take the main picture of this web page), queries?:string[] (2-6 different things: ONE picture for each, for cards / a menu / a list)",
     description:
       "Find REAL pictures on the web (Wikimedia Commons and Openverse, or the main image of a page you give) and show them in the chat from our own site. " +
-      "Nothing is AI-generated. Returns markdown lines with source credit: paste them UNCHANGED in your reply, each image on its own line. " +
-      "Use it when a real photo helps (a place, product, person with a public page, landmark, animal, object). Never invent image URLs.",
+      "Nothing is AI-generated. With query/page_url it returns markdown lines with source credit: paste them UNCHANGED in your reply, each image on its own line (2 or more in a row become a collage automatically). " +
+      "With queries (one picture per item) it returns a vimg: path for each item: put it in the `image` field of that item inside a ```cards block. " +
+      "Use it when a real photo helps (a place, product, dish, landmark, animal, object). Never invent image URLs.",
     run: async (a, _cred, ctx) => {
       if (!ctx) throw new Error("Images can only be shown from a chat.");
       if (!supabaseConfigured()) throw new Error("Image storage is not set up: add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel.");
+
+      const many = (Array.isArray(a.queries) ? a.queries : []).map((q) => s(q, 120)).filter((q) => q.length >= 2).slice(0, 6);
+      if (many.length) {
+        const rows = await Promise.all(many.map(async (q) => {
+          try {
+            const got = await gather(await find(q, 1), 1, q, ctx);
+            return { q, hit: got[0] ?? null };
+          } catch { return { q, hit: null }; }
+        }));
+        const ok = rows.filter((r) => r.hit);
+        if (!ok.length) return `No real images found for these items (${many.join("; ")}). Try simpler English keywords, or show the cards without pictures (use an emoji instead).`;
+        const lines = rows.map((r, i) => (r.hit
+          ? `${i + 1}. "${r.q}" → image: vimg:${r.hit.path} · credit: ${r.hit.credit || "Wikimedia Commons / Openverse"}`
+          : `${i + 1}. "${r.q}" → no picture found (give that card an emoji instead)`));
+        return `PICTURES READY (${ok.length} of ${rows.length}). Use each vimg: value as the "image" of the matching card in your \`\`\`cards block (and the credit as its "credit"). Never change a path.\n\n${lines.join("\n")}`;
+      }
+
       const count = Math.min(3, Math.max(1, Math.floor(Number(a.count)) || 2));
       const pageUrl = s(a.page_url, 500);
       const query = s(a.query, 120);
-      if (!pageUrl && query.length < 2) throw new Error("Give a `query` (what the picture shows) or a `page_url`.");
+      if (!pageUrl && query.length < 2) throw new Error("Give a `query` (what the picture shows), a list of `queries`, or a `page_url`.");
 
-      let candidates: Found[] = [];
-      if (pageUrl) candidates = await fromPage(pageUrl);
-      else {
-        const [w, o] = await Promise.all([fromWikimedia(query, count).catch(() => []), fromOpenverse(query, count).catch(() => [])]);
-        candidates = [...w, ...o];
-      }
+      const candidates = pageUrl ? await fromPage(pageUrl) : await find(query, count);
       if (!candidates.length) return `No real images found for "${query || pageUrl}". Try other keywords (English works best), or answer without a picture.`;
 
-      const lines: string[] = [];
-      const seen = new Set<string>();
-      for (const c of candidates) {
-        if (lines.length >= count) break;
-        if (seen.has(c.url)) continue;
-        seen.add(c.url);
-        const got = await download(c.url);
-        if (!got) continue;
-        try {
-          const path = await store(ctx.uid, ctx.chatId, got.bytes, got.ext);
-          const alt = safeAlt(c.title || query || "Image");
-          const credit = [c.credit && `by ${c.credit}`, c.license, c.page && `[source](${c.page})`].filter(Boolean).join(" · ");
-          lines.push(`![${alt}](vimg:${path})${credit ? `\n_Photo ${credit}_` : ""}`);
-        } catch (e) {
-          if (!lines.length && candidates.indexOf(c) === candidates.length - 1) throw e;
-        }
-      }
-      if (!lines.length) return `Images were found for "${query || pageUrl}" but none could be downloaded. Try other keywords or another page.`;
-      return `IMAGES READY (${lines.length}). Paste these lines unchanged in your reply, each image on its own line:\n\n${lines.join("\n\n")}`;
+      const got = await gather(candidates, count, query, ctx);
+      if (!got.length) return `Images were found for "${query || pageUrl}" but none could be downloaded. Try other keywords or another page.`;
+      return `IMAGES READY (${got.length}). Paste these lines unchanged in your reply, each image on its own line${got.length > 1 ? " (they show as one collage)" : ""}:\n\n${got.map((g) => g.md).join("\n\n")}`;
     },
   },
 ];
