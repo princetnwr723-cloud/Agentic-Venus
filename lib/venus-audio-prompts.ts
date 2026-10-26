@@ -41,10 +41,30 @@ const API = `CONTRACT
 - Read only: A.seconds (video length), A.mood, A.bpm (0 = you decide), A.scenes = [{i, start, dur, type, headline, soundCue, sounds:[{at, kind}]}] in seconds.
 - Budget: at most ~700 tone/noise calls, nothing longer than 16s. The system normalizes the loudness and fades the ending, so do not worry about clipping.`;
 
-type Info = { brief: string; concept?: string; mood: string; bpm: number; seconds: number; scenes: unknown[] };
+type Info = { brief: string; concept?: string; mood: string; bpm: number; seconds: number; scenes: unknown[]; constraints?: string };
+
+const KEY_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+const MODE_NAMES = ["major (ionian)", "dorian", "phrygian", "lydian", "mixolydian", "natural minor (aeolian)", "harmonic minor", "minor pentatonic", "major pentatonic"];
+const LEADS = ["glassy bell arpeggio", "plucked triangle stabs", "soft detuned saw pad with slow filter sweep", "muted square-wave pulses", "airy sine melody with echo", "marimba-like decaying tones (fast tc, sine+tri)", "wide stereo saw chords played as a slow swell"];
+const BASSES = ["sub sine drones", "syncopated offbeat saw bass", "walking triangle bass", "none (pads and percussion only)", "pulsing eighth-note bass", "slow octave jumps"];
+const GROOVES = ["no drums, only soft pulses and a riser", "half-time kick and snare with light hats", "broken-beat kick pattern with a clap", "four-on-the-floor only in the last third", "skipping kick, ghost hats, no snare", "minimal clicks and ticks as rhythm"];
+const FORMS = ["slow build that blooms in the last scenes", "start busy, strip back to a pad in the middle, end with a lift", "two-part structure with a sudden change at the midpoint", "steady pulse with the harmony changing at every scene cut", "sparse and spacious, one big swell near the end"];
+const pick = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)];
+
+/** Random creative constraints (different on every call) so two videos never get the same music or the same cue style. */
+export function randomConstraints(part: "music" | "sfx"): string {
+  if (part === "sfx") {
+    return `- Sonic palette for this video: ${pick(["glassy and digital", "warm and analog", "percussive and woody", "airy and soft", "punchy and cinematic", "playful and bubbly"])}. Pitch centre: ${pick(KEY_NAMES)}. Do not use the plain presets for every cue; design at least 3 sounds yourself with A.tone, A.noise and A.layer.`;
+  }
+  return `- Key centre: ${pick(KEY_NAMES)}; scale: ${pick(MODE_NAMES)}.
+- Main voice: ${pick(LEADS)}. Bass: ${pick(BASSES)}. Rhythm: ${pick(GROOVES)}.
+- Form: ${pick(FORMS)}.
+- Tempo: pick any tempo that fits the mood within its natural range (do not default to 110). Progression: invent your own 3 to 5 chords, never the stock i-VI-III-VII loop.
+- Seed for your own choices: ${Math.floor(Math.random() * 100000)}.`;
+}
 
 export function audioCodePrompt(part: "music" | "sfx", o: Info): string {
-  const ctx = `VIDEO: "${o.brief.slice(0, 400)}"\nLOOK AND FEEL: ${o.concept ?? ""}\nMOOD: ${o.mood}${o.bpm ? `, tempo ${o.bpm} bpm` : ""}\nLENGTH: ${o.seconds}s\nSCENES (the real timeline): ${JSON.stringify(o.scenes).slice(0, 3500)}`;
+  const ctx = `CREATIVE CONSTRAINTS (follow them, they exist so that every video gets different audio):\n${o.constraints ?? randomConstraints(part)}\n\nVIDEO: "${o.brief.slice(0, 400)}"\nLOOK AND FEEL: ${o.concept ?? ""}\nMOOD: ${o.mood}${o.bpm ? `, tempo ${o.bpm} bpm` : ""}\nLENGTH: ${o.seconds}s\nSCENES (the real timeline): ${JSON.stringify(o.scenes).slice(0, 3500)}`;
   if (part === "music") {
     return `You are the composer of "Venus Pro", an AI motion-graphics studio. Write the BACKGROUND MUSIC of the video below as JavaScript code that synthesizes real audio. No samples, no vocals.
 
@@ -52,11 +72,11 @@ ${API}
 
 COMPOSITION RULES
 - Write a real arrangement, not a loop: a sparse intro (pad only), bass and arpeggio enter, drums build, a lift when the LAST scenes start (use A.scenes[k].start to place the builds and the lift), then a resolved ending chord that rings until about A.seconds - 1.5.
-- Use a scale and a chord progression that fit the mood (dark/epic/tech = minor, bright/playful/calm = major). Use a beat grid from the tempo. Make a riser into the main lift.
+- Follow the key, scale, voices, rhythm and form from the CREATIVE CONSTRAINTS below; the mood only guides the energy. Use a beat grid from the tempo. Make a riser into the main lift when the form calls for one.
 - Use stereo: detuned pairs panned left and right, arpeggio ping-pong, a little echo and reverb.
 - Voices stay quiet (pads about 0.05 each, bass about 0.2, arp about 0.05, drums up to 0.4) so a voice-over fits on top. Avoid constant busy 16th hats and avoid harsh high notes.
 
-EXAMPLE OF THE EXPECTED STYLE (write something new that fits THIS video):
+EXAMPLE THAT ONLY SHOWS THE API (never reuse its key, scale, progression, instruments, rhythm or structure; the result must sound completely different):
 \`\`\`js
 function compose(A) {
   const bpm = A.bpm || 110, beat = 60 / bpm, bar = beat * 4;
@@ -86,7 +106,7 @@ SOUND DESIGN RULES
 - Add your own design where it adds meaning: a signature logo hit built with A.layer, UI blips, a boot-up arpeggio, data ticks. Never put a sound on every beat, leave silence. Vary gain (0.4-1.0) and pan, about 60 sounds at most.
 - You may design new sounds with A.tone, A.noise and A.layer instead of A.sfx.
 
-EXAMPLE OF THE EXPECTED STYLE:
+EXAMPLE THAT ONLY SHOWS THE API (design your own sounds; do not copy these choices):
 \`\`\`js
 function compose(A) {
   A.scenes.forEach((s, i) => {
