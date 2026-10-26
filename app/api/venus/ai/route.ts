@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
-import { directorPrompt, editPrompt, reviewPrompt, sceneCodePrompt } from "@/lib/venus-prompts";
-import { checkCode, sanitizeScene, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
+import { directorPrompt, editPlanPrompt, editPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, type EditFacts } from "@/lib/venus-prompts";
+import { checkCode, sanitizeScene, sanitizeSource, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -20,6 +20,8 @@ function extractCode(text: string): string {
   return (m ? m[1] : text).trim();
 }
 const PATCH_KEYS = new Set(["fontScale", "transition", "headline", "subhead", "text", "label", "caption"]);
+const STYLE_KEYS = ["concept", "palette", "fonts", "bg", "grade", "audio"];
+const ASPECT_LIST = ["16:9", "9:16", "1:1"];
 
 export async function POST(req: Request) {
   try {
@@ -37,17 +39,60 @@ export async function POST(req: Request) {
       await addTokens(uid, estTokens(content.length + out.length));
       return out;
     };
+    const aspectOf = (v: unknown): Aspect => (ASPECT_LIST.includes(String(v)) ? String(v) : "16:9") as Aspect;
+    const context = typeof body.context === "string" ? body.context.slice(0, 3000) : undefined;
 
+    // ---- a storyboard for one video, or for ONE PART of a long video ----
     if (body.kind === "storyboard") {
-      const seconds = Math.min(60, Math.max(10, Number(body.seconds) || 45));
-      const aspect = (["16:9", "9:16", "1:1"].includes(body.aspect) ? body.aspect : "16:9") as Aspect;
+      const seconds = Math.min(90, Math.max(8, Number(body.seconds) || 45));
+      const aspect = aspectOf(body.aspect);
       const design = body.design === "library" ? "library" : "ai";
+      const part = body.part && typeof body.part === "object"
+        ? { index: Math.max(0, Number(body.part.index) || 0), total: Math.max(1, Number(body.part.total) || 1), title: String(body.part.title || "").slice(0, 120), summary: String(body.part.summary || "").slice(0, 700), seconds: Math.round(seconds) }
+        : undefined;
+      const style = body.style && typeof body.style === "object" ? body.style as Record<string, unknown> : undefined;
       const reply = await ask(
-        directorPrompt({ brief: String(body.brief || "").slice(0, 3000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design, context: typeof body.context === "string" ? body.context.slice(0, 3000) : undefined })
+        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design, context, part, style })
       );
       const raw = extractJson(reply);
       if (!raw) return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
+      if (style) for (const k of STYLE_KEYS) if (style[k] !== undefined) raw[k] = style[k]; // every part keeps the same look
       const storyboard = sanitizeStoryboard(raw, { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: seconds, keepFiles: false });
+      return NextResponse.json({ storyboard });
+    }
+
+    // ---- the chapter plan of a long video ----
+    if (body.kind === "outline") {
+      const seconds = Math.min(3600, Math.max(120, Number(body.seconds) || 600));
+      const chapters = Math.min(80, Math.max(2, Math.round(seconds / 55)));
+      const raw = extractJson(await ask(outlinePrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect: aspectOf(body.aspect), voice: Boolean(body.voice), chapters, context })));
+      const list = Array.isArray(raw?.chapters) ? raw.chapters : [];
+      if (!raw || list.length < 2) return NextResponse.json({ error: "The model did not return a chapter plan." }, { status: 422 });
+      const chs = list.slice(0, 90).map((c: any, i: number) => ({ title: String(c?.title ?? "Part " + (i + 1)).slice(0, 120), summary: String(c?.summary ?? "").slice(0, 700), seconds: Math.max(20, Math.min(90, Number(c?.seconds) || seconds / list.length)) }));
+      const sum = chs.reduce((a: number, c: { seconds: number }) => a + c.seconds, 0) || seconds;
+      const k = seconds / sum;
+      const chapterList = chs.map((c: { title: string; summary: string; seconds: number }) => ({ ...c, seconds: Math.max(15, Math.min(90, Math.round(c.seconds * k))) }));
+      const first = sanitizeStoryboard({ ...raw, scenes: [] }, { aspect: aspectOf(body.aspect), theme: String(body.theme || "midnight") });
+      const style: Record<string, unknown> = {};
+      for (const key of STYLE_KEYS) if ((first as any)[key] !== undefined) style[key] = (first as any)[key];
+      return NextResponse.json({ title: first.title, style, chapters: chapterList });
+    }
+
+    // ---- editing the user's own video ----
+    if (body.kind === "edit-plan") {
+      const facts = body.facts as EditFacts | undefined;
+      const source = sanitizeSource(body.source);
+      const img = body.image as { mediaType?: string; data?: string } | undefined;
+      if (!facts || !source) return NextResponse.json({ error: "The analysis of the video is missing." }, { status: 400 });
+      const aspect = aspectOf(body.aspect);
+      const seconds = Math.min(1200, Math.max(10, Number(body.seconds) || 60));
+      const prompt = editPlanPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, keepAll: Boolean(body.keepAll), aspect, captions: Boolean(body.captions), music: Boolean(body.music), facts, context });
+      const reply = await ask(prompt, img?.data ? { mediaType: img.mediaType || "image/jpeg", data: img.data } : undefined);
+      const raw = extractJson(reply);
+      if (!raw) return NextResponse.json({ error: "The model did not return an edit plan: " + reply.slice(0, 160) }, { status: 422 });
+      raw.source = source;
+      const storyboard = sanitizeStoryboard(raw, { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: body.keepAll ? Math.min(1200, source.duration + 120) : Math.min(1200, seconds * 1.15 + 6), keepFiles: false });
+      if (!storyboard.scenes.some((s) => s.type === "clip")) return NextResponse.json({ error: "The edit plan has no clips of your video. Try again or describe the edit more clearly." }, { status: 422 });
       return NextResponse.json({ storyboard });
     }
 
