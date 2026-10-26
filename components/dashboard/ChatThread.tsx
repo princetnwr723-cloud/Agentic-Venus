@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, CornerUpLeft, Repeat, Reply, RotateCcw } from "lucide-react";
+import { Check, Copy, CornerUpLeft, Repeat, Reply, RotateCcw, Wrench } from "lucide-react";
 import type { ChatMessage } from "@/lib/chats";
 import Markdown from "@/components/Markdown";
 import { splitSuggestions } from "@/lib/suggest";
+import { extractToolCalls } from "@/lib/tools/prompt";
 import { splitAttachmentBlock, type AttachKind } from "@/lib/attachments";
 import { previewFor } from "@/lib/attach-client";
 import AttachCard from "@/components/dashboard/AttachCard";
@@ -36,6 +37,15 @@ function quoteOf(e: React.MouseEvent, body: string): string {
   return body.trim().slice(0, 1200);
 }
 
+/** What to show for one message: the text without any tool-call markers, the next-step chips, and whether it is just noise. */
+function viewOf(m: ChatMessage) {
+  if (m.role !== "assistant") return { body: m.content, next: [] as string[], empty: false, toolName: "" };
+  const split = splitSuggestions(m.content);
+  const body = extractToolCalls(split.body).clean; // old messages that still hold a raw [[TOOL:...]] show clean
+  const tool = /^🔧\s*Using\s+(.+?)…?$/.exec(body.trim());
+  return { body, next: split.next, empty: /^[.\u2026\s]*$/.test(body), toolName: tool ? tool[1] : "" };
+}
+
 export default function ChatThread({
   chatId,
   messages,
@@ -63,8 +73,20 @@ export default function ChatThread({
     <div className="space-y-4">
       {messages.map((m, i) => {
         const isAssistant = m.role === "assistant";
-        const { body, next } = isAssistant ? splitSuggestions(m.content) : { body: m.content, next: [] as string[] };
+        const { body, next, empty, toolName } = viewOf(m);
         const isLast = i === messages.length - 1;
+        // an empty "…" bubble or an old "Using tool…" line is only a placeholder: once anything follows it, it is gone
+        if (isAssistant && (empty || toolName) && !(isLast && (busy || pending))) return null;
+        if (isAssistant && toolName) {
+          return (
+            <div key={i} data-msg={i} className="flex flex-col items-start">
+              <div className="flex items-center gap-2 rounded-full border border-line bg-panel px-3 py-1.5 text-xs text-muted">
+                <Wrench size={13} className="text-gold" aria-hidden="true" />
+                <span>Using <span className="font-mono text-ink">{toolName}</span>…</span>
+              </div>
+            </div>
+          );
+        }
         const active = replyingAt != null && replyingAt === m.at;
         return (
           <div key={i} data-msg={i} className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}>
@@ -119,7 +141,7 @@ export default function ChatThread({
                       <RotateCcw size={14} />
                     </Tool>
                   )}
-                  {isLast && chatId && <FountFeedback chatId={chatId} />}
+                  {isLast && chatId && !empty && <FountFeedback chatId={chatId} />}
                 </div>
               </div>
             )}
