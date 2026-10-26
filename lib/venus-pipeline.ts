@@ -1,8 +1,9 @@
 import { brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
 import { listChats } from "@/lib/chats";
 import { acquire, releaseNow, touch } from "@/lib/computers";
-import { saveProject, type Stage, type VenusProject } from "@/lib/venus";
+import { hydrateProject, saveProject, type Stage, type VenusProject } from "@/lib/venus";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
+import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
 import type { ProviderId } from "@/lib/providers";
 
 export type PipelineEnv = {
@@ -17,7 +18,7 @@ export type PipelineHooks = {
 };
 export type Run = { env: PipelineEnv; hooks: PipelineHooks; p: VenusProject; sid: string };
 
-export const STAGES: Stage[] = ["studio", "script", "design", "assets", "voice", "preview", "review", "final", "done"];
+export const STAGES: Stage[] = ["studio", "ingest", "script", "design", "assets", "voice", "preview", "review", "final", "done"];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // A different look for every video (this is what stops all videos from looking the same).
@@ -32,7 +33,33 @@ const STYLES: Array<[string, string]> = [
   ["Hand-drawn doodle", "wobbly strokes drawn on, marker underlines, paper texture, playful easing"],
   ["Cinematic dark", "letterboxed look, vignette, light leaks, slow push moves, serif titles, restrained color"],
   ["Bold gradient social", "huge gradient headlines, quick whip transitions, high energy, vertical-friendly stacks"],
+  ["Blueprint", "technical drawing lines on a flat colour, dimension marks, annotations, stepwise draw-on animation"],
+  ["Paper cut-out", "layered paper shapes with soft shadows, stop-motion timing, tactile textures"],
+  ["Memphis geometry", "confetti shapes, bold patterns, clashing but balanced colours, bouncy overshoot motion"],
+  ["Mono ink", "black ink on off-white, huge contrast, brush strokes, one accent colour used once per scene"],
+  ["Soft pastel 3D-ish", "rounded pastel objects with fake depth, gentle floating, calm pacing, friendly type"],
+  ["Terminal minimal", "monospace type, a single accent, blinking cursors, hard cuts, no decoration"],
+  ["Magazine collage", "cut-out blocks, overlapping text frames, tape and stamps, rotated elements, snappy staggered motion"],
+  ["Cosmic gradient", "deep space tones, slow drifting particles, glowing lines, wide cinematic type"],
+  ["Sports broadcast", "diagonal wipes, scoreboard-like data bars, condensed bold type, fast energetic motion"],
+  ["Infographic flat", "flat icons built from shapes, clear data stories, rounded bars, friendly colour coding"],
+  ["Noir film", "high-contrast black and white with one red accent, slow pans, big serif titles"],
+  ["Playful sticker book", "stickers, scribbles, hand-lettered feel, quirky transitions, bright candy colours"],
 ];
+// one extra creative rule per video, picked at random, so even the same style never repeats itself
+const TWISTS = [
+  "Build one recurring visual motif (a shape or object) that transforms from scene to scene.",
+  "Use an unusual layout rule: everything is aligned to one diagonal.",
+  "Use extreme scale contrast: one giant element and tiny supporting text in every scene.",
+  "Change the background kind and colour field in every scene.",
+  "Use only two accent colours but different backgrounds, and let the transitions be the personality.",
+  "Tell the story as if it were a physical object being assembled piece by piece.",
+  "Use a split-screen or multi-panel composition in at least a third of the scenes.",
+  "Use text that moves along paths or is revealed by masks in at least half of the scenes.",
+  "Alternate between very calm scenes and very energetic scenes.",
+  "Use a strong horizontal rhythm: elements enter from alternating sides.",
+];
+const rndSeed = () => Math.floor(Math.random() * 999_000) + 1;
 
 async function readJson(res: Response) {
   const text = await res.text();
@@ -101,6 +128,34 @@ async function upd(run: Run, patch: Partial<VenusProject>) {
   await saveProject(run.env.uid, run.p).catch(() => {});
 }
 const check = (run: Run) => { if (run.hooks.cancelled()) throw new Error("Stopped."); };
+
+async function mediaCall(env: PipelineEnv, action: string, extra: Record<string, unknown> = {}) {
+  const res = await fetch("/api/venus/media", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
+    body: JSON.stringify({ action, uid: env.uid, ...extra }),
+  });
+  const data = await readJson(res);
+  if (!res.ok) throw new Error(data?.error || "Media request failed.");
+  return data;
+}
+
+/** Waits for a background job on the studio computer. `map` turns the job's own percent into the overall progress bar. */
+async function waitJob(run: Run, jobId: string, label: string, total: number, maxMinutes: number, map?: (v: number | null) => number | null): Promise<{ ok: boolean; log: string }> {
+  const t0 = Date.now();
+  let lastLine = "";
+  for (;;) {
+    check(run);
+    if (Date.now() - t0 > maxMinutes * 60_000) throw new Error(`${label} is taking over ${maxMinutes} minutes — stopped.`);
+    await sleep(3500);
+    const s = await studioCall(run.env, "progress", { sandboxId: run.sid, jobId, total });
+    const pct = typeof s.percent === "number" ? s.percent : null;
+    run.hooks.progress({ label, value: map ? map(pct) : pct });
+    const line = String(s.log || "").split("\n").filter((l) => /^\[\d\/\d\]|^\[music\]/.test(l)).slice(-1)[0];
+    if (line && line !== lastLine) { lastLine = line; run.hooks.log("⚙️ " + line.slice(0, 120)); }
+    if (s.done) return { ok: s.exitCode === 0, log: String(s.log || "") };
+  }
+}
 
 const aspectOf = (sb: Storyboard) => (sb.height > sb.width ? "9:16" : sb.width === sb.height ? "1:1" : "16:9");
 const withScene = (sb: Storyboard, i: number, s: Scene): Storyboard => ({ ...sb, scenes: sb.scenes.map((x, j) => (j === i ? s : x)) });
@@ -189,7 +244,7 @@ async function designAll(run: Run, sbIn: Storyboard): Promise<Storyboard> {
       run.hooks.progress({ label: `Designing scenes ${done}/${todo.length}`, value: done / todo.length });
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  await Promise.all([worker(), worker(), worker(), worker()]);
   return sb;
 }
 
@@ -219,71 +274,98 @@ async function prepareRepair(run: Run, sbIn: Storyboard): Promise<Storyboard> {
 // ---------- Rendering ----------
 
 export async function renderKind(run: Run, kind: "preview" | "final" | "scene", opts: { sceneIndex?: number } = {}): Promise<string> {
+  run.p = await hydrateProject(run.env.uid, run.p); // long videos keep the scene code in separate documents
   let sb = parseSb(run.p);
   if (!sb) throw new Error("No storyboard yet.");
   let repairs = 0;
+  const tries = new Map<number, number>();
+  const doneParts = new Set<number>();
 
   for (;;) {
     sb = await prepareRepair(run, sb);
     await upd(run, { storyboardJson: JSON.stringify(sb) });
 
     const layout = sceneLayout(sb);
-    let total = totalFramesOf(sb);
-    let frames: string | undefined;
-    if (kind === "scene") {
-      const L = layout[opts.sceneIndex ?? 0];
-      frames = `${L.from}-${L.from + L.dur - 1}`;
-      total = L.dur;
-    }
+    const totalAll = totalFramesOf(sb);
     const scale = kind === "final" ? (run.p.quality === "1080p" ? 1.5 : 1) : 0.5;
     const label = kind === "scene" ? "Scene preview" : kind === "preview" ? "Preview render" : "Final render";
-    const { jobId } = await studioCall(run.env, "render", { sandboxId: run.sid, projectId: run.p.id, kind, scale, frames });
-    run.hooks.log(`🎞️ ${label} started.`);
 
-    const t0 = Date.now();
+    // a long video is rendered in parts (each one is its own job), then joined
+    let ranges: Array<{ frames?: string; total: number }>;
+    if (kind === "scene") {
+      const L = layout[opts.sceneIndex ?? 0];
+      ranges = [{ frames: `${L.from}-${L.from + L.dur - 1}`, total: L.dur }];
+    } else if (totalAll > PART_FRAMES * 1.25) {
+      const n = Math.ceil(totalAll / PART_FRAMES);
+      ranges = Array.from({ length: n }, (_, k) => {
+        const from = Math.floor((k * totalAll) / n);
+        const to = Math.floor(((k + 1) * totalAll) / n) - 1;
+        return { frames: `${from}-${to}`, total: to - from + 1 };
+      });
+    } else ranges = [{ total: totalAll }];
+    const n = ranges.length;
+    if (n > 1) run.hooks.log(`🎞️ ${label}: ${Math.round(totalAll / 30 / 60 * 10) / 10} minutes, rendered in ${n} parts.`);
+    else run.hooks.log(`🎞️ ${label} started.`);
+
     let failedLog = "";
-    for (;;) {
-      check(run);
-      if (Date.now() - t0 > 50 * 60_000) throw new Error("Render is taking over 50 minutes — stopped.");
-      await sleep(3500);
-      const s = await studioCall(run.env, "progress", { sandboxId: run.sid, jobId, total });
-      run.hooks.progress({ label, value: s.percent });
-      if (s.done) { if (s.exitCode !== 0) failedLog = String(s.log); break; }
+    for (let k = 0; k < n && !failedLog; k++) {
+      if (doneParts.has(k)) continue;
+      const lab = n > 1 ? `${label} (part ${k + 1}/${n})` : label;
+      const { jobId } = await studioCall(run.env, "render", { sandboxId: run.sid, projectId: run.p.id, kind, scale, frames: ranges[k].frames, ...(n > 1 ? { part: k } : {}) });
+      const res = await waitJob(run, jobId, lab, ranges[k].total, 45, (v) => (v === null ? null : (k + v) / n));
+      if (res.ok) doneParts.add(k);
+      else failedLog = res.log;
     }
 
     if (failedLog) {
       const m = new RegExp(`custom/${run.p.id}_([A-Za-z0-9]+)\\.tsx`).exec(failedLog);
       const idx = m ? sb.scenes.findIndex((s) => s.type === "custom" && s.id === m[1]) : -1;
-      if (idx >= 0 && repairs < 3) {
+      if (idx >= 0 && repairs < 14) {
         repairs++;
-        run.hooks.log(`🛠️ Scene ${idx + 1} crashed while rendering — ${repairs <= 2 ? "the agent is rewriting it" : "using a fallback"}.`);
-        sb = repairs <= 2
+        const t = (tries.get(idx) ?? 0) + 1;
+        tries.set(idx, t);
+        run.hooks.log(`🛠️ Scene ${idx + 1} crashed while rendering — ${t <= 2 ? "the agent is rewriting it" : "using a fallback"}.`);
+        sb = t <= 2
           ? withScene(sb, idx, { ...sb.scenes[idx], code: await genCode(run.env, run.p, sb, idx, { previousCode: String(sb.scenes[idx].code ?? ""), error: failedLog.slice(-1200) }) })
           : withScene(sb, idx, fallbackScene(sb.scenes[idx]));
-        continue;
+        continue; // parts that already finished stay valid: only the scene's own part is rendered again
       }
       throw new Error("Render failed:\n" + failedLog.slice(-700));
     }
 
+    if (n > 1) {
+      run.hooks.progress({ label: "Joining the parts", value: null });
+      const { jobId } = await studioCall(run.env, "concat", { sandboxId: run.sid, projectId: run.p.id, kind, parts: n });
+      const j = await waitJob(run, jobId, "Joining the parts", 0, 30);
+      if (!j.ok) throw new Error("Joining the parts failed:\n" + j.log.slice(-400));
+    }
+
     run.hooks.progress({ label: "Uploading", value: null });
     const up = await studioCall(run.env, "upload", { sandboxId: run.sid, projectId: run.p.id, kind });
-    run.hooks.log(`☁️ ${label} uploaded (${Math.round(((up.bytes || 0) / 1024 / 1024) * 10) / 10} MB).`);
+    const u = await waitJob(run, up.jobId, "Uploading", 0, 90);
+    const info = parseUpload(u.log);
+    if (!u.ok || info.code !== 200) {
+      throw new Error(`Upload failed (HTTP ${info.code || "?"}). ${info.code === 413 ? "The video is larger than the storage limit of your Supabase plan: use 720p, a shorter video, or raise the file size limit in Supabase Storage settings." : info.detail}`);
+    }
+    run.hooks.log(`☁️ ${label} uploaded (${Math.round((info.bytes / 1024 / 1024) * 10) / 10} MB).`);
     if (kind === "preview") await upd(run, { previewPath: up.path });
     if (kind === "final") await upd(run, { finalPath: up.path });
     return up.path as string;
   }
 }
 
+async function ttsPatch(run: Run, sb: Storyboard, index: number): Promise<Partial<Scene> | null> {
+  const narration = String(sb.scenes[index].narration ?? "").trim();
+  if (!narration) return null;
+  const t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: run.p.voiceName });
+  const s = sb.scenes[index];
+  return { voice: t.file, seconds: t.seconds ? Math.min(30, Math.max(Number(s.seconds), Math.round((t.seconds + 0.6) * 10) / 10)) : s.seconds };
+}
+
+/** Voice-over for one scene, spoken by the user's voice system (Settings -> Voice). */
 export async function regenVoice(run: Run, sbIn: Storyboard, index: number): Promise<Storyboard> {
-  const openaiKey = run.env.apiKeys.openai;
-  const narration = String(sbIn.scenes[index].narration ?? "").trim();
-  if (!openaiKey || !narration) return sbIn;
-  const t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, openaiKey, voice: run.p.voiceName });
-  const s = sbIn.scenes[index];
-  return withScene(sbIn, index, {
-    ...s, voice: t.file,
-    seconds: t.seconds ? Math.min(14, Math.max(Number(s.seconds), Math.round((t.seconds + 0.6) * 10) / 10)) : s.seconds,
-  });
+  const patch = await ttsPatch(run, sbIn, index);
+  return patch ? withScene(sbIn, index, { ...sbIn.scenes[index], ...patch } as Scene) : sbIn;
 }
 
 function isDark(sb: Storyboard): boolean {
@@ -298,7 +380,7 @@ function isDark(sb: Storyboard): boolean {
 // ---------- The full pipeline ----------
 
 export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start: VenusProject, from: Stage): Promise<VenusProject> {
-  const run = newRun(env, hooks, start);
+  const run = newRun(env, hooks, await hydrateProject(env.uid, start));
   const todo = (s: Stage) => STAGES.indexOf(from) <= STAGES.indexOf(s);
   const say = hooks.log;
   // memory and skills belong to the chat this video was ordered in (nothing is shared between chats)
@@ -313,28 +395,127 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     brain = await loadBrain({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }).catch(() => brain);
     say("✅ Ready.");
 
+    // ---- edit mode: take in the user's own video (download, convert, find shots / silences / speech, sample frames) ----
+    if (run.p.mode === "edit" && todo("ingest")) {
+      check(run);
+      await upd(run, { stage: "ingest" });
+      const src = run.p.source;
+      if (!src) throw new Error("No video was given to edit.");
+      say("📥 Taking in your video…");
+      hooks.progress({ label: "Preparing your video", value: null });
+      const st = await studioCall(env, "ingest-start", { sandboxId: run.sid, projectId: run.p.id, source: src });
+      if (!st.speech) say("ℹ️ No OpenAI key found for reading the speech: the edit continues without captions or transcript.");
+      const res = await waitJob(run, st.jobId, "Preparing your video", 0, 60);
+      if (!res.ok) {
+        const m = /ERR: ([^\n]+)/.exec(res.log);
+        throw new Error(m ? m[1] : "Your video could not be prepared:\n" + res.log.slice(-400));
+      }
+      if (src.kind === "upload" && src.path) void mediaCall(env, "delete", { paths: [src.path] }).catch(() => {}); // the studio computer has its own copy now
+      say("✅ Your video is ready for editing.");
+    }
+
     if (todo("script")) {
       check(run);
       await upd(run, { stage: "script" });
-      say("✍️ The agent is writing the storyboard and art direction…");
-      hooks.progress({ label: "Storyboard", value: null });
+      const voiceOn = run.p.voice ? Boolean((await mediaCall(env, "voice-status").catch(() => ({ ready: false }))).ready) : false;
+      if (run.p.voice && !voiceOn) say("ℹ️ No voice provider is connected (Settings → Voice), so there will be no voice-over.");
+      if (voiceOn !== run.p.voice) await upd(run, { voice: voiceOn });
       const style = STYLES[Math.floor(Math.random() * STYLES.length)];
-      const files = (await pcCall(env, "listassets", { sandboxId: run.sid }).catch(() => ({ files: [] as string[] }))).files as string[];
-      const context =
-        brainPrompt(brain, run.p.brief, { noSkills: true }) +
-        `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. Variation seed ${Math.floor(Math.random() * 9999)}. Pick a palette that matches this style.` +
-        (files.length ? `\n\nAssets the computer already downloaded (use up to 6 by setting a scene's "assetFile" to the EXACT file name; images → type "image", videos → type "footage"): ${files.slice(0, 40).join(", ")}` : "");
-      const body = {
-        kind: "storyboard", brief: run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme,
-        voice: run.p.voice && Boolean(env.apiKeys.openai), captions: run.p.captions, design: run.p.design ?? "ai", context,
-      };
-      let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
-      if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
-      if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
-      const sbNew = r.storyboard as Storyboard;
-      sbNew.concept = `${style[0]} — ${style[1]}. ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout; avoid concentric rotating rings.`.slice(0, 600);
-      await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
-      say(`📋 ${sbNew.scenes.length} scenes planned in the “${style[0]}” style.`);
+      const twist = TWISTS[Math.floor(Math.random() * TWISTS.length)];
+      const files = run.p.mode === "edit" ? [] : ((await pcCall(env, "listassets", { sandboxId: run.sid }).catch(() => ({ files: [] as string[] }))).files as string[]);
+      const memory = brainPrompt(brain, run.p.brief, { noSkills: true });
+      const assetsNote = files.length ? `\n\nAssets the computer already downloaded (use up to 6 by setting a scene's "assetFile" to the EXACT file name; images → type "image", videos → type "footage"): ${files.slice(0, 40).join(", ")}` : "";
+
+      if (run.p.mode === "edit") {
+        // ---------- the agent edits the user's own video ----------
+        say("🎞️ The agent is watching your video and planning the edit…");
+        hooks.progress({ label: "Planning the edit", value: null });
+        const ing = await studioCall(env, "ingest-read", { sandboxId: run.sid, projectId: run.p.id });
+        const an = ing.analysis as { duration: number; width: number; height: number; hasAudio: boolean; cuts: number[]; silences: Array<[number, number]>; transcript: Array<{ s: number; e: number; t: string }>; tiles: number[] };
+        const srcAspect = an.height > an.width ? "9:16" : an.width === an.height ? "1:1" : "16:9";
+        const aspect = run.p.matchSource ? srcAspect : run.p.aspect;
+        if (aspect !== run.p.aspect) await upd(run, { aspect: aspect as VenusProject["aspect"] });
+        const body = {
+          kind: "edit-plan", brief: run.p.brief, seconds: run.p.seconds, keepAll: Boolean(run.p.keepAll), aspect, theme: run.p.theme,
+          captions: run.p.captions && an.transcript.length > 0, music: run.p.music === true,
+          facts: { duration: an.duration, width: an.width, height: an.height, fps: 30, hasAudio: an.hasAudio, cuts: an.cuts, silences: an.silences, transcript: an.transcript, tiles: an.tiles },
+          source: ing.source, image: { mediaType: ing.mediaType, data: ing.image },
+          context: memory + `\n\nA visual style for anything you ADD to this video (titles, graphics): ${style[0]} — ${style[1]}. ${twist}`,
+        };
+        let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
+        if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
+        if (!r.storyboard) throw new Error(r.error || "Could not plan the edit.");
+        const sbNew = r.storyboard as Storyboard;
+        sbNew.seed = rndSeed();
+        sbNew.source = ing.source;
+        if (body.captions && an.transcript.length) sbNew.transcript = an.transcript;
+        sbNew.scenes = sbNew.scenes.map((x) => (x.type === "clip" || x.useSource === true ? { ...x, video: ing.source.path } : x));
+        const clean = sanitizeStoryboard(sbNew, { aspect: aspect as VenusProject["aspect"], theme: run.p.theme, captions: Boolean(body.captions), keepFiles: true });
+        const len = Math.round(totalFramesOf(clean) / 30);
+        await upd(run, { storyboardJson: JSON.stringify(clean), title: clean.title || run.p.title, sourceInfo: ing.source, seconds: len });
+        const nClips = clean.scenes.filter((x) => x.type === "clip").length;
+        say(`📋 Edit planned: ${nClips} clips + ${clean.scenes.length - nClips} designed scenes, about ${len}s.`);
+      } else if (run.p.seconds > 120) {
+        // ---------- a long video (up to one hour): chapter plan first, then every chapter is written on its own ----------
+        say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
+        hooks.progress({ label: "Chapter plan", value: null });
+        const ctx = memory + `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.` + assetsNote;
+        const ob = { kind: "outline", brief: run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, context: ctx };
+        let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
+        if (!o.chapters) { say("First attempt failed — trying again…"); o = await aiCall(env, run.p, ob); }
+        if (!o.chapters) throw new Error(o.error || "Could not plan the chapters.");
+        const chapters = o.chapters as Array<{ title: string; summary: string; seconds: number }>;
+        const styleLock = o.style as Record<string, unknown>;
+        const parts: Scene[][] = chapters.map(() => []);
+        let done = 0;
+        const queue = chapters.map((_, k) => k);
+        const worker = async () => {
+          while (queue.length) {
+            const k = queue.shift() as number;
+            check(run);
+            const ch = chapters[k];
+            const pb = {
+              kind: "storyboard", brief: run.p.brief, seconds: ch.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, captions: run.p.captions,
+              design: run.p.design ?? "ai", context: memory + assetsNote, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
+            };
+            let r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
+            if (!r.storyboard) r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
+            const scenes = r.storyboard ? ((r.storyboard as Storyboard).scenes as Scene[]) : [{ type: "kinetic", seconds: Math.min(14, ch.seconds), text: ch.title.slice(0, 80) } as Scene];
+            if (!r.storyboard) say(`⚠️ Chapter ${k + 1} could not be written — a title card is used instead.`);
+            parts[k] = scenes.map((x) => (x.type === "custom" && !String(x.id).startsWith("p" + k) ? { ...x, id: ("p" + k + String(x.id)).slice(0, 20) } : x));
+            done++;
+            hooks.progress({ label: `Writing chapters ${done}/${chapters.length}`, value: done / chapters.length });
+          }
+        };
+        await Promise.all([worker(), worker(), worker()]);
+        const all = parts.flat();
+        const total = chapters.reduce((a, c) => a + c.seconds, 0);
+        const sbNew = sanitizeStoryboard({ ...styleLock, title: o.title, scenes: all }, { aspect: run.p.aspect, theme: run.p.theme, captions: run.p.captions, maxSeconds: Math.max(run.p.seconds, total) * 1.05, maxScenes: 450 });
+        sbNew.seed = rndSeed();
+        sbNew.concept = `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`.slice(0, 600);
+        await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
+        say(`📋 ${sbNew.scenes.length} scenes planned in ${chapters.length} chapters (“${style[0]}” style).`);
+      } else {
+        // ---------- a normal video ----------
+        say("✍️ The agent is writing the storyboard and art direction…");
+        hooks.progress({ label: "Storyboard", value: null });
+        const context =
+          memory +
+          `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.` +
+          assetsNote;
+        const body = {
+          kind: "storyboard", brief: run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
+          voice: voiceOn, captions: run.p.captions, design: run.p.design ?? "ai", context,
+        };
+        let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
+        if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
+        if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
+        const sbNew = r.storyboard as Storyboard;
+        sbNew.seed = rndSeed();
+        sbNew.concept = `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`.slice(0, 600);
+        await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
+        say(`📋 ${sbNew.scenes.length} scenes planned in the “${style[0]}” style.`);
+      }
     }
 
     if (todo("design")) {
@@ -379,7 +560,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
               check(run);
               hooks.progress({ label: `Media ${n + 1}/${idxs.length}`, value: n / idxs.length });
               try {
-                const a = await studioCall(env, "assets", { sandboxId: run.sid, projectId: run.p.id, storyboard: cur, index: i });
+                const one = { ...cur, scenes: cur.scenes.map((x, j) => (j === i ? x : ({ type: "title", seconds: 1.5 } as Scene))) };
+                const a = await studioCall(env, "assets", { sandboxId: run.sid, projectId: run.p.id, storyboard: one, index: i });
                 if (a.image || a.video) cur = withScene(cur, i, { ...cur.scenes[i], ...(a.image ? { image: a.image } : {}), ...(a.video ? { video: a.video } : {}) });
               } catch (e) {
                 if (String((e as Error).message) === "Stopped.") throw e;
@@ -397,26 +579,50 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       await upd(run, { stage: "voice" });
       let sb = parseSb(run.p)!;
       if (run.p.voice) {
-        if (!env.apiKeys.openai) say("ℹ️ No OpenAI key — skipping the voiceover.");
-        else {
-          for (let i = 0; i < sb.scenes.length; i++) {
-            check(run);
-            if (!String(sb.scenes[i].narration ?? "").trim()) continue;
-            hooks.progress({ label: `Voiceover ${i + 1}/${sb.scenes.length}`, value: i / sb.scenes.length });
-            sb = await regenVoice(run, sb, i);
-          }
+        const idxs = sb.scenes.map((x, i) => (String(x.narration ?? "").trim() && !x.voice ? i : -1)).filter((i) => i >= 0);
+        if (idxs.length) {
+          say(`🎙️ Recording the voice-over (${idxs.length} scenes) with your voice system…`);
+          const queue = [...idxs];
+          const patches = new Map<number, Partial<Scene>>();
+          let n = 0;
+          const worker = async () => {
+            while (queue.length) {
+              const i = queue.shift() as number;
+              check(run);
+              try {
+                const pt = await ttsPatch(run, sb, i);
+                if (pt) patches.set(i, pt);
+              } catch (e) {
+                if (String((e as Error).message) === "Stopped.") throw e;
+                say(`⚠️ Voice-over of scene ${i + 1} failed: ${(e as Error).message.slice(0, 100)}`);
+              }
+              n++;
+              hooks.progress({ label: `Voice-over ${n}/${idxs.length}`, value: n / idxs.length });
+            }
+          };
+          await Promise.all([worker(), worker(), worker()]);
+          sb = { ...sb, scenes: sb.scenes.map((x, i) => (patches.has(i) ? ({ ...x, ...patches.get(i) } as Scene) : x)) };
           await upd(run, { storyboardJson: JSON.stringify(sb) });
-          const total = Math.round(totalFramesOf(sb) / 30);
-          say(`🎙️ Voiceover ready. Video length ≈ ${total}s${total > 60 ? " (⚠️ over 60s — shorten the narration)" : ""}.`);
+          say(`🎙️ Voice-over ready (${patches.size}/${idxs.length} scenes). Video length ≈ ${Math.round(totalFramesOf(sb) / 30)}s.`);
         }
       }
-      if (run.p.music !== false) {
+      const musicOn = run.p.mode === "edit" ? run.p.music === true : run.p.music !== false;
+      if (musicOn && !sb.music) {
         try {
+          const secs = Math.ceil(totalFramesOf(sb) / 30) + 2;
           hooks.progress({ label: "Music", value: null });
-          const m = await studioCall(env, "music", { sandboxId: run.sid, projectId: run.p.id, seconds: Math.ceil(totalFramesOf(sb) / 30) + 2, dark: isDark(sb) });
+          if (secs <= 80) {
+            await studioCall(env, "compose", { sandboxId: run.sid, projectId: run.p.id, seconds: secs }).catch(() => null); // the agent writes music + sound design as code
+          }
+          const m = await studioCall(env, "music", { sandboxId: run.sid, projectId: run.p.id, seconds: secs, dark: isDark(sb), skipCompose: true, job: secs > 80 });
+          if (m.jobId) {
+            say(`🎵 Composing ${Math.ceil(secs / 70)} music parts for a long video…`);
+            const j = await waitJob(run, m.jobId as string, "Music", 0, 30);
+            if (!j.ok) throw new Error("the music job failed: " + j.log.slice(-160));
+          }
           sb = { ...sb, music: m.file as string };
           await upd(run, { storyboardJson: JSON.stringify(sb) });
-          say("🎵 Ambient music bed added.");
+          say("🎵 A new music track was composed for this video" + (m.note ? ` (${String(m.note).slice(0, 90)})` : "") + ".");
         } catch (e) {
           if (String((e as Error).message) === "Stopped.") throw e;
           say("ℹ️ Music skipped: " + (e as Error).message.slice(0, 100));
