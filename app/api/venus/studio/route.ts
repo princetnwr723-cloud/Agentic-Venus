@@ -1,12 +1,19 @@
 import { NextResponse } from "next/server";
 import { connect, createSandbox, exec } from "@/lib/e2b-server";
 import { readBody, requestStatus } from "@/lib/request";
-import { createSignedUpload } from "@/lib/supabase-server";
-import { DIR, jobStatus, prepareProject, safeId, setupStudio, startJob, studioState, writeBinary, writeFiles } from "@/lib/venus-server";
+import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
+import { DIR, jobStatus, safeId, setupStudio, startJob, studioState, writeBinary, writeFiles } from "@/lib/venus-server";
+import { prepareProjectBatched } from "@/lib/venus-prepare";
 import { AUDIO_MOODS, sanitizeStoryboard, sceneLayout, totalFramesOf, type Storyboard } from "@/lib/venus-schema";
-import { MAIN_SOURCE, UI_SOURCE } from "@/lib/venus-kit";
-import { SYNTH_V2_SOURCE } from "@/lib/venus-audio";
-import { audioCodePrompt, checkAudioCode, extractAudioCode, timelineOf } from "@/lib/venus-audio-prompts";
+import { UI_SOURCE } from "@/lib/venus-kit";
+import { MAIN_SOURCE } from "@/lib/venus-main";
+import { BACKDROP_SOURCE } from "@/lib/venus-backdrop";
+import { CLIP_SOURCE, SHELL_SOURCE } from "@/lib/venus-clip";
+import { SYNTH_V3_SOURCE } from "@/lib/venus-music";
+import { concatScript, ingestScript, longMusicScript, parseAnalysis, renderScript, uploadScript, verifyScript } from "@/lib/venus-jobs";
+import { synthVoiceOver } from "@/lib/venus-voice";
+import { getExistingOpenAIKey } from "@/lib/voice-utils";
+import { audioCodePrompt, checkAudioCode, extractAudioCode, randomConstraints, timelineOf } from "@/lib/venus-audio-prompts";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider } from "@/lib/ai-providers-server";
 import { resolveValue } from "@/lib/vault";
@@ -80,7 +87,7 @@ function buildCues(sb: Storyboard): Cue[] {
     const at = L[i].from / 30;
     const type = String(s.type);
     const declared = typeof s.soundCue === "string" ? s.soundCue.trim() : "";
-    let kind = declared || (i === 0 ? "impact" : i === n - 1 ? "chime" : "whoosh");
+    let kind = declared || (type === "clip" ? "none" : i === 0 ? "impact" : i === n - 1 ? "chime" : "whoosh");
     if (!CUE_KINDS.has(kind)) kind = "whoosh";
     if (kind !== "none") {
       const when = i === 0 ? 0.2 : kind === "whoosh" || kind === "riser" ? Math.max(0, at - 0.12) : at + 0.05;
@@ -103,7 +110,7 @@ function buildCues(sb: Storyboard): Cue[] {
       });
     }
   });
-  return cues.filter((c) => Number.isFinite(c.at) && c.at >= 0).slice(0, 150);
+  return cues.filter((c) => Number.isFinite(c.at) && c.at >= 0).slice(0, 1500);
 }
 
 // ---------- the agent writes the music and the sound design as code ----------
@@ -130,16 +137,21 @@ async function composeCode(uid: string, project: any, part: "music" | "sfx", inf
     const ph = udata?.apiKeys?.[provider];
     if (!ph) return null;
     const apiKey = await resolveValue(uid, ph);
-    const prompt = audioCodePrompt(part, info);
+    const prompt = audioCodePrompt(part, { ...info, constraints: randomConstraints(part) });
     const reply = await Promise.race([
       callProvider({ provider, apiKey, model, maxTokens: 5000, messages: [{ role: "user", content: prompt }] }),
-      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("slow")), 34_000)),
+      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("slow")), 26_000)),
     ]);
     addTokens(uid, estTokens(prompt.length + reply.length)).catch(() => {});
     const code = extractAudioCode(reply);
     return checkAudioCode(code) ? null : code;
   } catch { return null; }
 }
+
+const SAFE_URL = /^https:\/\/[A-Za-z0-9.\-_\/%?=&:~+,;@]+$/;
+const hashPid = (pid: string) => { let h = 7; for (let i = 0; i < pid.length; i++) h = (Math.imul(h, 31) + pid.charCodeAt(i)) >>> 0; return (h % 900000) + 1000; };
+const rndSeed = () => Math.floor(Math.random() * 2_000_000_000) + 1;
+const cat = async (sb: Awaited<ReturnType<typeof connect>>, path: string, max = 400_000) => (await exec(sb, `test -f '${path}' && head -c ${max} '${path}' || true`, 15_000)).stdout;
 
 export async function POST(req: Request) {
   try {
@@ -175,19 +187,23 @@ export async function POST(req: Request) {
         await writeFiles(sb, {
           [`${DIR}/src/ui.tsx`]: UI_SOURCE,
           [`${DIR}/src/Main.tsx`]: MAIN_SOURCE,
-          [`${DIR}/synth.cjs`]: SYNTH_V2_SOURCE,
+          [`${DIR}/src/backdrop.tsx`]: BACKDROP_SOURCE,
+          [`${DIR}/src/shell2.tsx`]: SHELL_SOURCE,
+          [`${DIR}/src/clip.tsx`]: CLIP_SOURCE,
+          [`${DIR}/synth.cjs`]: SYNTH_V3_SOURCE,
         });
 
         // Sound effects: the agent's own sound-design code when it exists, otherwise the preset cue list.
         // Optional: a failure never blocks the render.
         try {
-          const cues = buildCues(storyboard);
           const total = totalFramesOf(storyboard) / 30 + 1;
-          const code = (await readAudioCode(uid, pid)).sfx;
+          const cues = total > 250 ? [] : buildCues(storyboard); // very long videos have no effects track (it would not fit in memory)
+          const code = total > 95 ? undefined : (await readAudioCode(uid, pid)).sfx;
+          const sfxSeed = hashPid(pid); // stable for a project, different between projects
           if (code || cues.length) {
             const job = code
-              ? { kind: "sfx", code, seconds: total - 1, scenes: timelineOf(storyboard), seed: 5, fallback: { total, cues } }
-              : { total, cues };
+              ? { kind: "sfx", code, seconds: total - 1, scenes: timelineOf(storyboard), seed: sfxSeed, fallback: { total, cues, seed: sfxSeed } }
+              : { total, cues, seed: sfxSeed };
             await writeFiles(sb, { [`${DIR}/work/${pid}/sfx.json`]: JSON.stringify(job) });
             const r = await exec(
               sb,
@@ -198,7 +214,7 @@ export async function POST(req: Request) {
           }
         } catch { /* SFX are optional */ }
 
-        return NextResponse.json(await prepareProject(sb, pid, storyboard));
+        return NextResponse.json(await prepareProjectBatched(sb, pid, storyboard));
       }
 
       // One scene at a time: a stock photo (image scenes) or a stock video clip (footage scenes).
@@ -244,7 +260,7 @@ export async function POST(req: Request) {
                   return scoreA - scoreB;
                 })[0];
                 const src = picked?.src?.large2x ?? picked?.src?.large ?? picked?.src?.original;
-                if (src && /^https:\/\/images\.pexels\.com\//.test(src)) {
+                if (src && /^https:\/\/images\.pexels\.com\//.test(src) && SAFE_URL.test(src)) {
                   const dl = await exec(sb, `mkdir -p ${dir}/img && curl -fsSL --max-time 30 -o '${DIR}/public/${rel}' '${src}'`, 40_000);
                   if (dl.exitCode === 0) return NextResponse.json({ image: rel, source: "pexels" });
                 }
@@ -259,7 +275,7 @@ export async function POST(req: Request) {
           const need = Math.max(1.5, Number(s.seconds) || 5);
           const targetRatio = sbd.width / Math.max(1, sbd.height);
           const candidates = (data.videos ?? []).flatMap((v) => (v.video_files ?? [])
-            .filter((f) => f.file_type === "video/mp4" && f.link && /^https:\/\/[a-z0-9.-]*pexels\.com\//.test(f.link))
+            .filter((f) => f.file_type === "video/mp4" && f.link && /^https:\/\/[a-z0-9.-]*pexels\.com\//.test(f.link) && SAFE_URL.test(f.link))
             .map((f) => {
               const w = f.width ?? v.width ?? 0;
               const h = f.height ?? v.height ?? 0;
@@ -282,37 +298,45 @@ export async function POST(req: Request) {
         return NextResponse.json({});
       }
 
+      // Voice-over: the same voice system as phone calls (the TTS provider, model and voice saved in Settings -> Voice).
       case "tts": {
+        const uid = String(body.uid);
         const pid = safeId(body.projectId);
-        const index = Math.max(0, Math.min(40, Number(body.index) || 0));
-        const text = String(body.text || "").slice(0, 700);
-        const openaiKey = String(body.openaiKey || "");
-        if (!text || !openaiKey) return fail("Voiceover needs narration text and an OpenAI key.", 400);
-        const voice = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(String(body.voice)) ? String(body.voice) : "nova";
-        const r = await fetch("https://api.openai.com/v1/audio/speech", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${openaiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "tts-1", voice, input: text, response_format: "mp3", speed: 1.05 }),
-          signal: AbortSignal.timeout(40_000),
-        });
-        if (!r.ok) {
-          const e = (await r.json().catch(() => ({}))) as { error?: { message?: string } };
-          return fail("OpenAI TTS error: " + (e.error?.message ?? r.status));
-        }
-        const bytes = Buffer.from(await r.arrayBuffer());
-        const rel = `p/${pid}/vo/scene-${index}.mp3`;
-        await writeBinary(sb, `${DIR}/public/${rel}`, bytes);
+        const index = Math.max(0, Math.min(900, Number(body.index) || 0));
+        const text = String(body.text || "").slice(0, 900);
+        if (!text.trim()) return fail("Voiceover needs narration text.", 400);
+        const audio = await synthVoiceOver(uid, text, typeof body.voice === "string" && body.voice !== "system" ? body.voice : undefined);
+        const rel = `p/${pid}/vo/scene-${index}.${audio.ext}`;
+        await writeBinary(sb, `${DIR}/public/${rel}`, audio.bytes);
         const d = await exec(sb, `ffprobe -v error -show_entries format=duration -of csv=p=0 '${DIR}/public/${rel}'`, 15_000);
         const seconds = Number(d.stdout.trim());
-        return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0 });
+        return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0, provider: audio.provider });
       }
 
-      // Music: the AGENT writes the music as code (and the sound-design code in parallel, used at the next prepare).
-      // If the model is slow or the code fails, the built-in composer is the fallback. Every call writes a NEW composition.
+      // The agent writes the music and the sound design as code (needs the AI model, so it is its own request).
+      case "compose": {
+        const uid = String(body.uid);
+        const pid = safeId(body.projectId);
+        const secs = Math.min(95, Math.max(8, Math.ceil(Number(body.seconds) || 30)));
+        if (secs > 80) return NextResponse.json({ ok: true, skipped: "long" });
+        const project = await readProject(uid, pid);
+        let sbNow: Storyboard | null = null;
+        try { sbNow = project?.storyboardJson ? sanitizeStoryboard(JSON.parse(project.storyboardJson), { keepFiles: true }) : null; } catch { /* no storyboard yet */ }
+        const a = sbNow?.audio;
+        const mood = AUDIO_MOODS.includes(body.mood) ? String(body.mood) : a && (AUDIO_MOODS as readonly string[]).includes(a.mood) ? a.mood : body.dark ? "dark" : "bright";
+        const bpm = Number(body.bpm) || (a && Number(a.bpm) >= 70 && Number(a.bpm) <= 140 ? Number(a.bpm) : 0);
+        const info = { brief: String(project?.brief ?? sbNow?.title ?? ""), concept: sbNow?.concept, mood, bpm, seconds: secs, scenes: sbNow ? timelineOf(sbNow) : [] };
+        const [mc, sc] = await Promise.all([composeCode(uid, project, "music", info), composeCode(uid, project, "sfx", info)]);
+        if (mc || sc) await audioDoc(uid, pid).set({ ...(mc ? { music: mc } : {}), ...(sc ? { sfx: sc } : {}), at: Date.now() }, { merge: true }).catch(() => {});
+        return NextResponse.json({ ok: true, music: Boolean(mc), sfx: Boolean(sc) });
+      }
+
+      // Music: a NEW composition on every call (key, scale, chords, tempo, instruments, groove and form are chosen from a random seed).
+      // Up to 80 s it is made in this request; longer videos get several tracks joined together by a background job.
       case "music": {
         const uid = String(body.uid);
         const pid = safeId(body.projectId);
-        const secs = Math.min(75, Math.max(8, Math.ceil(Number(body.seconds) || 30)));
+        const total = Math.min(3700, Math.max(8, Math.ceil(Number(body.seconds) || 30)));
         const project = await readProject(uid, pid);
         let sbNow: Storyboard | null = null;
         try { sbNow = project?.storyboardJson ? sanitizeStoryboard(JSON.parse(project.storyboardJson), { keepFiles: true }) : null; } catch { /* no storyboard yet */ }
@@ -321,30 +345,47 @@ export async function POST(req: Request) {
         let bpm = Number(body.bpm) || 0;
         const a = sbNow?.audio;
         if (!body.mood && a && (AUDIO_MOODS as readonly string[]).includes(a.mood)) { mood = a.mood; if (Number(a.bpm) >= 70 && Number(a.bpm) <= 140) bpm = Number(a.bpm); }
+        const rel = `p/${pid}/music.mp3`;
 
+        if (total > 80 && body.job === true) {
+          const per = 70;
+          const n = Math.ceil(total / per);
+          const files: Record<string, string> = { [`${DIR}/synth.cjs`]: SYNTH_V3_SOURCE };
+          for (let i = 0; i < n; i++) files[`${DIR}/work/${pid}/m_${i}.json`] = JSON.stringify({ seconds: i === n - 1 ? Math.max(8, total - per * i + 4) : per + 4, mood, ...(bpm ? { bpm } : {}), seed: rndSeed() });
+          await writeFiles(sb, files);
+          const jobId = "m" + Date.now().toString(36);
+          await startJob(sb, jobId, longMusicScript(DIR, pid, n));
+          return NextResponse.json({ jobId, file: rel, mood, source: "generated-long", parts: n });
+        }
+
+        const secs = Math.min(80, total);
         const scenes = sbNow ? timelineOf(sbNow) : [];
         const info = { brief: String(project?.brief ?? sbNow?.title ?? ""), concept: sbNow?.concept, mood, bpm, seconds: secs, scenes };
-        const [mc, sc] = await Promise.all([composeCode(uid, project, "music", info), composeCode(uid, project, "sfx", { ...info, seconds: Math.round(secs) })]);
-        const old = await readAudioCode(uid, pid);
-        if (mc || sc) await audioDoc(uid, pid).set({ ...(mc ? { music: mc } : {}), ...(sc ? { sfx: sc } : {}), at: Date.now() }, { merge: true }).catch(() => {});
-        const code = mc ?? old.music ?? null;
+        let code: string | null = null;
+        if (!body.skipCompose) {
+          const [mc, sc] = await Promise.all([composeCode(uid, project, "music", info), composeCode(uid, project, "sfx", { ...info, seconds: Math.round(secs) })]);
+          if (mc || sc) await audioDoc(uid, pid).set({ ...(mc ? { music: mc } : {}), ...(sc ? { sfx: sc } : {}), at: Date.now() }, { merge: true }).catch(() => {});
+          code = mc ?? (await readAudioCode(uid, pid)).music ?? null;
+        } else {
+          code = (await readAudioCode(uid, pid)).music ?? null;
+        }
 
-        const rel = `p/${pid}/music.mp3`;
-        const seed = pid.length * 31 + secs + (Date.now() % 997);
+        const seed = rndSeed();
         const preset = { seconds: secs, mood, ...(bpm ? { bpm } : {}), seed };
         const job = code ? { kind: "music", code, seconds: secs, mood, bpm, scenes, seed, fallback: preset } : preset;
         await writeFiles(sb, {
-          [`${DIR}/synth.cjs`]: SYNTH_V2_SOURCE,
+          [`${DIR}/synth.cjs`]: SYNTH_V3_SOURCE,
           [`${DIR}/work/${pid}/music.json`]: JSON.stringify(job),
         });
         const r = await exec(
           sb,
           `cd ${DIR} && mkdir -p public/p/${pid} && node synth.cjs ${code ? "code" : "music"} work/${pid}/music.json public/p/${pid}/music.wav && ffmpeg -y -loglevel error -i public/p/${pid}/music.wav -codec:a libmp3lame -b:a 160k public/${rel} && rm -f public/p/${pid}/music.wav`,
-          55_000
+          30_000
         );
         if (r.exitCode !== 0) return fail("Music generation failed: " + (r.stderr || r.stdout).slice(0, 200));
         const fell = /AUDIO_FALLBACK/.test(r.stdout);
-        return NextResponse.json({ file: rel, mood, source: code && !fell ? "agent-code" : "preset", note: fell ? r.stdout.split("\n").find((l) => l.startsWith("AUDIO_FALLBACK")) : undefined });
+        const line = r.stdout.split("\n").find((l) => l.startsWith("MUSIC "));
+        return NextResponse.json({ file: rel, mood, source: code && !fell ? "agent-code" : "generated", note: fell ? r.stdout.split("\n").find((l) => l.startsWith("AUDIO_FALLBACK")) : line });
       }
 
       case "render": {
@@ -353,25 +394,21 @@ export async function POST(req: Request) {
         const scale = Math.min(2, Math.max(0.25, Number(body.scale) || 1));
         const crf = kind === "final" ? (scale > 1 ? 26 : 23) : 30;
         const frames = /^\d+-\d+$/.test(String(body.frames || "")) ? String(body.frames) : "";
+        const part = body.part === undefined || body.part === null ? -1 : Math.max(0, Math.min(99, Math.floor(Number(body.part) || 0)));
+        const name = `${pid}-${kind}${part >= 0 ? "-p" + part : ""}`;
         const jobId = "r" + Date.now().toString(36);
-        const renderArgs = `src/index.ts Main out/${pid}-${kind}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --codec=h264 --crf=${crf} --log=info --overwrite`;
-        const script = [
-          "set -u",
-          `cd ${DIR}`,
-          "mkdir -p out",
-          `echo '[Venus Pro] Starting Remotion render with concurrency=1'`,
-          `if npx remotion render ${renderArgs} --concurrency=1; then`,
-          `  test -s 'out/${pid}-${kind}.mp4' || { echo '[Venus Pro] Render exited successfully but MP4 is missing/empty'; exit 1; }`,
-          "else",
-          "  first_code=$?",
-          `  echo "[Venus Pro] First render attempt failed (exit $first_code); retrying once with a fresh single-worker render."`,
-          `  rm -f 'out/${pid}-${kind}.mp4'`,
-          `  npx remotion render ${renderArgs} --concurrency=1 || exit $?`,
-          `  test -s 'out/${pid}-${kind}.mp4' || { echo '[Venus Pro] Retry finished but MP4 is missing/empty'; exit 1; }`,
-          "fi",
-          `echo '[Venus Pro] Render output verified: out/${pid}-${kind}.mp4'`,
-        ].join("\n");
-        await startJob(sb, jobId, script);
+        const renderArgs = `src/index.ts Main out/${name}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --codec=h264 --crf=${crf} --log=info --overwrite`;
+        await startJob(sb, jobId, renderScript(DIR, renderArgs) + "\n" + verifyScript(`out/${name}.mp4`));
+        return NextResponse.json({ jobId });
+      }
+
+      // joins the rendered parts of a long video into one file
+      case "concat": {
+        const pid = safeId(body.projectId);
+        const kind = body.kind === "final" ? "final" : "preview";
+        const parts = Math.max(1, Math.min(100, Math.floor(Number(body.parts) || 1)));
+        const jobId = "c" + Date.now().toString(36);
+        await startJob(sb, jobId, concatScript(DIR, pid, kind, parts));
         return NextResponse.json({ jobId });
       }
 
@@ -401,27 +438,49 @@ base64 -w0 sheet.jpg`;
         return NextResponse.json({ image: r.stdout.trim(), mediaType: "image/jpeg" });
       }
 
+      // The finished video goes to storage as a background job (long videos are far too big for one request).
       case "upload": {
         const uid = String(body.uid);
         const pid = safeId(body.projectId);
         const kind = ["final", "scene"].includes(String(body.kind)) ? String(body.kind) : "preview";
         const objectPath = `${uid}/${pid}/${kind}.mp4`;
-        const upUrl = await createSignedUpload(objectPath);
-        const file = `${DIR}/out/${pid}-${kind}.mp4`;
-        const r = await exec(
-          sb,
-          `test -f '${file}' || { echo MISSING; exit 3; }
-size=$(stat -c %s '${file}')
-code=$(curl -sS -o /tmp/up.out -w '%{http_code}' --max-time 50 -X PUT '${upUrl}' -H 'Content-Type: video/mp4' -H 'x-upsert: true' --data-binary @'${file}')
-echo "$code $size"
-head -c 300 /tmp/up.out`,
-          55_000
-        );
-        const first = r.stdout.trim().split("\n")[0] ?? "";
-        const [code, size] = first.split(" ");
-        if (first.startsWith("MISSING")) return fail("The rendered file was not found.");
-        if (code !== "200") return fail(`Supabase upload failed (HTTP ${code}). ${r.stdout.split("\n").slice(1).join(" ").slice(0, 200)}`);
-        return NextResponse.json({ path: objectPath, bytes: Number(size) || 0 });
+        await writeFiles(sb, { [`${DIR}/work/${pid}/upurl.txt`]: await createSignedUpload(objectPath) });
+        const jobId = "u" + Date.now().toString(36);
+        await startJob(sb, jobId, uploadScript(DIR, pid, kind));
+        return NextResponse.json({ jobId, path: objectPath });
+      }
+
+      // ---- edit mode: take in the user's own video, find shots / silences / speech ----
+      case "ingest-start": {
+        const uid = String(body.uid);
+        const pid = safeId(body.projectId);
+        const src = (body.source ?? {}) as { kind?: string; path?: string; url?: string };
+        let url = "";
+        if (src.kind === "upload") {
+          if (!String(src.path || "").startsWith(uid + "/")) return fail("This is not your upload.", 403);
+          url = await createSignedDownload(String(src.path));
+        } else if (src.kind === "url") {
+          url = String(src.url || "").trim();
+          if (!SAFE_URL.test(url)) return fail("Use a direct https link to the video file.", 400);
+        } else return fail("No video was given.", 400);
+        const files: Record<string, string> = { [`${DIR}/work/${pid}/url.txt`]: url };
+        const key = await getExistingOpenAIKey(uid).catch(() => null);
+        if (key) files[`${DIR}/work/${pid}/hdr.txt`] = `Authorization: Bearer ${key}`; // used once to read the speech, then deleted
+        await exec(sb, `mkdir -p ${DIR}/work/${pid}`, 10_000);
+        await writeFiles(sb, files);
+        const jobId = "i" + Date.now().toString(36);
+        await startJob(sb, jobId, ingestScript(DIR, pid));
+        return NextResponse.json({ jobId, speech: Boolean(key) });
+      }
+
+      case "ingest-read": {
+        const pid = safeId(body.projectId);
+        const W = `${DIR}/work/${pid}`;
+        const [info, cuts, sil, whisper, tiles] = await Promise.all([cat(sb, `${W}/info.json`), cat(sb, `${W}/cuts.txt`), cat(sb, `${W}/sil.log`), cat(sb, `${W}/whisper.json`, 900_000), cat(sb, `${W}/tiles.txt`)]);
+        if (!info.trim()) return fail("The video analysis is not ready.", 409);
+        const analysis = parseAnalysis({ info, cuts, sil, whisper, tiles });
+        const img = await exec(sb, `base64 -w0 '${W}/sheet.jpg'`, 20_000);
+        return NextResponse.json({ analysis, source: { path: `p/${pid}/vid/src.mp4`, duration: analysis.duration, width: analysis.width, height: analysis.height, hasAudio: analysis.hasAudio }, image: img.stdout.trim(), mediaType: "image/jpeg" });
       }
 
       default:
