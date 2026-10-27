@@ -329,7 +329,16 @@ export const Backdrop = ({sb, i, T}: any) => {
   const kind = own.kind && DRAW[own.kind] ? own.kind : family[(i + off) % family.length];
   const seed = Number(own.seed) || vs * 31 + (i + 1) * 7919;
   const raw = (own.colors || g.colors || []).filter(hexOk);
-  const roles = raw.length >= 2 ? raw.slice() : [T.accent, T.accent2, T.bg2, T.text].filter(hexOk);
+  const mixHex = (a: string, b: string, t: number) => {
+    const pa = a.replace("#", "");
+    const pb = b.replace("#", "");
+    const ch = (k: number) => Math.round(parseInt(pa.slice(k, k + 2), 16) * (1 - t) + parseInt(pb.slice(k, k + 2), 16) * t).toString(16).padStart(2, "0");
+    return "#" + ch(0) + ch(2) + ch(4);
+  };
+  // colour roles come from the accents (never the white text colour: that washes the picture out to grey)
+  const acc = [T.accent, T.accent2].filter(hexOk);
+  const auto = acc.length === 2 ? [acc[0], acc[1], mixHex(acc[0], acc[1], 0.5), hexOk(T.bg2) ? mixHex(acc[1], T.bg2, 0.45) : acc[1]] : [T.accent, T.accent2, T.muted, T.bg2].filter(hexOk);
+  const roles = raw.length >= 2 ? raw.slice() : auto.length ? auto : ["#6c8cff", "#a56bff"];
   const rot = Math.floor(R(seed, "rot") * roles.length);
   const cols = roles.map((_: any, k: number) => roles[(k + rot) % roles.length]);
   const baseOpts = [own.base || g.base, T.bg1, T.bg2].filter(hexOk);
