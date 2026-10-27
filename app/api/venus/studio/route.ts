@@ -8,6 +8,7 @@ import { AUDIO_MOODS, sanitizeStoryboard, sceneLayout, totalFramesOf, type Story
 import { UI_SOURCE } from "@/lib/venus-kit";
 import { MAIN_SOURCE } from "@/lib/venus-main";
 import { BACKDROP_SOURCE } from "@/lib/venus-backdrop";
+import { GUARD_SOURCE } from "@/lib/venus-guard";
 import { CLIP_SOURCE, SHELL_SOURCE } from "@/lib/venus-clip";
 import { SYNTH_V3_SOURCE } from "@/lib/venus-music";
 import { concatScript, ingestScript, longMusicScript, parseAnalysis, renderScript, uploadScript, verifyScript } from "@/lib/venus-jobs";
@@ -188,6 +189,7 @@ export async function POST(req: Request) {
           [`${DIR}/src/ui.tsx`]: UI_SOURCE,
           [`${DIR}/src/Main.tsx`]: MAIN_SOURCE,
           [`${DIR}/src/backdrop.tsx`]: BACKDROP_SOURCE,
+          [`${DIR}/src/guard.tsx`]: GUARD_SOURCE,
           [`${DIR}/src/shell2.tsx`]: SHELL_SOURCE,
           [`${DIR}/src/clip.tsx`]: CLIP_SOURCE,
           [`${DIR}/synth.cjs`]: SYNTH_V3_SOURCE,
@@ -410,6 +412,19 @@ export async function POST(req: Request) {
         const jobId = "c" + Date.now().toString(36);
         await startJob(sb, jobId, concatScript(DIR, pid, kind, parts));
         return NextResponse.json({ jobId });
+      }
+
+      // The real reason a job failed: the first error in the whole log (not just its tail) and the scene file that crashed, if any.
+      case "joblog": {
+        const jobId = String(body.jobId || "");
+        if (!/^[a-z0-9]+$/.test(jobId)) return fail("Bad job id.", 400);
+        const pid = safeId(body.projectId);
+        const f = `/tmp/jobs/${jobId}.log`;
+        const first = await exec(sb, `test -f ${f} && sed 's/\\x1b\\[[0-9;?]*[A-Za-z]//g' ${f} | tr '\\r' '\\n' | grep -n -m1 -B2 -A8 -E "Error|Minified React|Cannot read|is not defined|is not a function|Failed|failed" | head -c 2400 || true`, 15_000);
+        const scene = await exec(sb, `test -f ${f} && grep -o "custom/${pid}_[A-Za-z0-9]*\\.tsx" ${f} | head -1 || true`, 10_000);
+        const guards = await exec(sb, `test -f ${f} && grep -o "VENUS_GUARD .*" ${f} | head -5 || true`, 10_000);
+        const m = /custom\/[A-Za-z0-9]+_([A-Za-z0-9]+)\.tsx/.exec(scene.stdout);
+        return NextResponse.json({ firstError: first.stdout.trim(), sceneId: m ? m[1] : null, guarded: guards.stdout.trim() });
       }
 
       case "progress":
