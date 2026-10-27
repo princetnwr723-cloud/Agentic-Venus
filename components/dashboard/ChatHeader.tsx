@@ -15,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
+import PaymentApprovals from "@/components/dashboard/PaymentApprovals";
 import { avatarFor, getActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import type { AvatarColor } from "@/lib/bots";
 
@@ -106,58 +107,61 @@ export default function ChatHeader({
     : "Computer";
 
   return (
-    <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
-      <button
-        type="button"
-        onClick={onIdentity}
-        title="Open profile · change avatar"
-        className="flex min-w-0 items-center gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-panel2/60"
-      >
-        <BotAvatar color={shown} size={40} working={busy || teamRunning} />
-        <span className="min-w-0 truncate text-sm font-medium text-ink">
-          {name}
-        </span>
-      </button>
-
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-0.5">
-        <IconBtn label="Profile & email" onClick={onIdentity}>
-          <User size={16} />
-        </IconBtn>
-        <IconBtn label="Venus Code" onClick={onCode}>
-          <Code2 size={16} />
-        </IconBtn>
-        <IconBtn label="Venus Pro (video)" onClick={onVenus}>
-          <Film size={16} />
-        </IconBtn>
-        <IconBtn label="Memory & Skills" onClick={onSkills}>
-          <Brain size={16} />
-        </IconBtn>
-        <IconBtn label="Runs" onClick={onRuns}>
-          <Activity size={16} />
-        </IconBtn>
-        <IconBtn label="vPassword" onClick={onVpassword}>
-          <KeyRound size={16} />
-        </IconBtn>
-        <IconBtn label="Connectors" onClick={onConnectors} dot={hasConnectors}>
-          <Plug size={16} />
-        </IconBtn>
-        <IconBtn label="Routines" onClick={onRoutines} dot={hasRoutines}>
-          <Clock size={16} />
-        </IconBtn>
-        <IconBtn label="Team" onClick={onTeam} active={teamOpen} dot={teamRunning}>
-          <Users size={16} />
-        </IconBtn>
-        <IconBtn label={pcLabel} onClick={onPc} active={pcOpen} dot={hasComputer && !pcPaused}>
-          <Monitor size={16} />
-        </IconBtn>
-        <IconBtn
-          label={focusMode ? "Exit focus mode" : "Focus mode"}
-          onClick={onToggleFocus}
-          active={focusMode}
+    <>
+      <PaymentApprovals />
+      <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
+        <button
+          type="button"
+          onClick={onIdentity}
+          title="Open profile · change avatar"
+          className="flex min-w-0 items-center gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-panel2/60"
         >
-          {focusMode ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-        </IconBtn>
-      </div>
-    </header>
+          <BotAvatar color={shown} size={40} working={busy || teamRunning} />
+          <span className="min-w-0 truncate text-sm font-medium text-ink">
+            {name}
+          </span>
+        </button>
+
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-0.5">
+          <IconBtn label="Profile & email" onClick={onIdentity}>
+            <User size={16} />
+          </IconBtn>
+          <IconBtn label="Venus Code" onClick={onCode}>
+            <Code2 size={16} />
+          </IconBtn>
+          <IconBtn label="Venus Pro (video)" onClick={onVenus}>
+            <Film size={16} />
+          </IconBtn>
+          <IconBtn label="Memory & Skills" onClick={onSkills}>
+            <Brain size={16} />
+          </IconBtn>
+          <IconBtn label="Runs" onClick={onRuns}>
+            <Activity size={16} />
+          </IconBtn>
+          <IconBtn label="vPassword" onClick={onVpassword}>
+            <KeyRound size={16} />
+          </IconBtn>
+          <IconBtn label="Connectors" onClick={onConnectors} dot={hasConnectors}>
+            <Plug size={16} />
+          </IconBtn>
+          <IconBtn label="Routines" onClick={onRoutines} dot={hasRoutines}>
+            <Clock size={16} />
+          </IconBtn>
+          <IconBtn label="Team" onClick={onTeam} active={teamOpen} dot={teamRunning}>
+            <Users size={16} />
+          </IconBtn>
+          <IconBtn label={pcLabel} onClick={onPc} active={pcOpen} dot={hasComputer && !pcPaused}>
+            <Monitor size={16} />
+          </IconBtn>
+          <IconBtn
+            label={focusMode ? "Exit focus mode" : "Focus mode"}
+            onClick={onToggleFocus}
+            active={focusMode}
+          >
+            {focusMode ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </IconBtn>
+        </div>
+      </header>
+    </>
   );
 }
