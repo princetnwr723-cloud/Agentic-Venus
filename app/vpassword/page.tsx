@@ -246,14 +246,14 @@ export default function VPasswordPage() {
               </select>
             </>)}
             {kind === "proxy" && (<>
-              <p className="text-xs leading-relaxed text-muted">The computer's browser goes through this proxy so shopping sites see a home-like IP instead of a data-centre IP. Use an http/https proxy (a residential proxy works best). The browser will not start without it if it fails the check.</p>
+              <p className="text-xs leading-relaxed text-muted">The computer&apos;s browser goes through this proxy so shopping sites see a home-like IP instead of a data-centre IP. Use an http/https proxy (a residential proxy works best). The browser will not start without it if it fails the check.</p>
               <div className="grid grid-cols-3 gap-2">
                 <select className={input} value={f.scheme} onChange={(e) => setF({ ...f, scheme: e.target.value })}><option value="http">http</option><option value="https">https</option></select>
                 <div className="col-span-2">{field("host", "Proxy host (for example proxy.example.com)")}</div>
               </div>
               <div className="grid grid-cols-3 gap-2">{field("port", "Port")}{field("username", "Username")}{field("password", "Password", "password")}</div>
               <div className="grid grid-cols-2 gap-2">{field("tz", "Time zone (optional, Asia/Kolkata)")}{field("lang", "Language (optional, en-IN)")}</div>
-              <p className="text-[11px] leading-relaxed text-faint">Set the time zone and language to match the proxy's country: sites compare them with the IP.</p>
+              <p className="text-[11px] leading-relaxed text-faint">Set the time zone and language to match the proxy&apos;s country: sites compare them with the IP.</p>
             </>)}
             <div><p className="mb-1.5 text-[11px] uppercase tracking-wider text-faint">Which agents may use it</p><Access value={allowed} chats={chats} onChange={setAllowed} /></div>
             <button onClick={submit} disabled={busy} className="flex items-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-medium text-bg disabled:opacity-50">
