@@ -8,6 +8,7 @@ import {Camera} from "./camera";
 import {FootageScene} from "./footage";
 import {CUSTOM} from "./custom/registry";
 import {Backdrop} from "./backdrop";
+import {Guard} from "./guard";
 import {Shell} from "./shell2";
 import {ClipScene, gradeCss} from "./clip";
 import * as S from "./scenes";
@@ -93,15 +94,33 @@ export const Main = (sb: any) => {
         {L.map(({s, from, dur}: any, i: number) => {
           const isClip = s.type === "clip";
           const C = s.type === "custom" ? CUSTOM[s.id] || S.TitleScene : SCENES[s.type] || S.TitleScene;
+          const text = String(s.headline || s.fallbackText || s.text || s.label || "");
+          // what is shown if a scene crashes: a plain title card (never a failed render)
+          const plain = (
+            <Guard name={"fallback " + i} fallback={null}>
+              <S.TitleScene p={{type: "title", headline: text, subhead: s.subhead ? String(s.subhead) : ""}} T={T} dur={dur} />
+            </Guard>
+          );
+          const safeScene = sb.safe === true && s.type === "custom";
           return (
             <Sequence key={i} from={from} durationInFrames={dur}>
-              <Backdrop sb={sb} i={i} T={T} />
-              <Shell transition={s.transition} dur={dur} last={i === L.length - 1}>
-                <Camera moves={s.camera} dur={dur}>
-                  {isClip ? <ClipScene p={s} T={T} dur={dur} sb={sb} /> : <C p={s} T={T} dur={dur} />}
-                </Camera>
-              </Shell>
-              {sb.captions && s.narration && !isClip ? <Captions text={s.narration} dur={dur} T={T} /> : null}
+              {sb.safe === true ? null : (
+                <Guard name={"background " + i} fallback={null}>
+                  <Backdrop sb={sb} i={i} T={T} />
+                </Guard>
+              )}
+              <Guard name={"scene " + i} fallback={plain}>
+                <Shell transition={s.transition} dur={dur} last={i === L.length - 1}>
+                  <Camera moves={s.camera} dur={dur}>
+                    {safeScene ? plain : isClip ? <ClipScene p={s} T={T} dur={dur} sb={sb} /> : <C p={s} T={T} dur={dur} />}
+                  </Camera>
+                </Shell>
+              </Guard>
+              {sb.captions && s.narration && !isClip ? (
+                <Guard name={"captions " + i} fallback={null}>
+                  <Captions text={s.narration} dur={dur} T={T} />
+                </Guard>
+              ) : null}
               {s.voice ? (
                 <Sequence from={8}>
                   <Audio src={staticFile(s.voice)} />
