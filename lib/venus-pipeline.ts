@@ -308,29 +308,42 @@ export async function renderKind(run: Run, kind: "preview" | "final" | "scene", 
     else run.hooks.log(`🎞️ ${label} started.`);
 
     let failedLog = "";
+    let failedJob = "";
     for (let k = 0; k < n && !failedLog; k++) {
       if (doneParts.has(k)) continue;
       const lab = n > 1 ? `${label} (part ${k + 1}/${n})` : label;
       const { jobId } = await studioCall(run.env, "render", { sandboxId: run.sid, projectId: run.p.id, kind, scale, frames: ranges[k].frames, ...(n > 1 ? { part: k } : {}) });
       const res = await waitJob(run, jobId, lab, ranges[k].total, 45, (v) => (v === null ? null : (k + v) / n));
       if (res.ok) doneParts.add(k);
-      else failedLog = res.log;
+      else { failedLog = res.log; failedJob = jobId; }
     }
 
     if (failedLog) {
-      const m = new RegExp(`custom/${run.p.id}_([A-Za-z0-9]+)\\.tsx`).exec(failedLog);
-      const idx = m ? sb.scenes.findIndex((s) => s.type === "custom" && s.id === m[1]) : -1;
+      // the real reason: the FIRST error of the whole log (the tail of a React stack trace says nothing) and the scene file that crashed
+      const info = await studioCall(run.env, "joblog", { sandboxId: run.sid, projectId: run.p.id, jobId: failedJob }).catch(() => null);
+      const first = String(info?.firstError ?? "").slice(0, 900);
+      const fromTail = new RegExp(`custom/${run.p.id}_([A-Za-z0-9]+)\\.tsx`).exec(failedLog);
+      const sceneId = (info?.sceneId as string | null) ?? (fromTail ? fromTail[1] : null);
+      const idx = sceneId ? sb.scenes.findIndex((s) => s.type === "custom" && s.id === sceneId) : -1;
+      const reason = (first || failedLog).slice(-1200);
       if (idx >= 0 && repairs < 14) {
         repairs++;
         const t = (tries.get(idx) ?? 0) + 1;
         tries.set(idx, t);
         run.hooks.log(`🛠️ Scene ${idx + 1} crashed while rendering — ${t <= 2 ? "the agent is rewriting it" : "using a fallback"}.`);
         sb = t <= 2
-          ? withScene(sb, idx, { ...sb.scenes[idx], code: await genCode(run.env, run.p, sb, idx, { previousCode: String(sb.scenes[idx].code ?? ""), error: failedLog.slice(-1200) }) })
+          ? withScene(sb, idx, { ...sb.scenes[idx], code: await genCode(run.env, run.p, sb, idx, { previousCode: String(sb.scenes[idx].code ?? ""), error: reason }) })
           : withScene(sb, idx, fallbackScene(sb.scenes[idx]));
         continue; // parts that already finished stay valid: only the scene's own part is rendered again
       }
-      throw new Error("Render failed:\n" + failedLog.slice(-700));
+      if (!sb.safe) {
+        // the culprit is unknown: render once more in safe mode (plain cards instead of AI scenes and generated backgrounds) so the video always gets finished
+        run.hooks.log(`⚠️ The render crashed (${(first.split("\n").find((l) => /error/i.test(l)) || "unknown error").slice(0, 140)}). Rendering again in safe mode so the video still gets finished.`);
+        sb = { ...sb, safe: true };
+        doneParts.clear();
+        continue;
+      }
+      throw new Error("Render failed:\n" + (first || failedLog.slice(-700)));
     }
 
     if (n > 1) {
