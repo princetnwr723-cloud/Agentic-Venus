@@ -1,6 +1,8 @@
 import { brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
 import { listChats } from "@/lib/chats";
 import { acquire, releaseNow, touch } from "@/lib/computers";
+import { doc, getDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import { hydrateProject, saveProject, type Stage, type VenusProject } from "@/lib/venus";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
 import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
@@ -81,6 +83,17 @@ export async function studioCall(env: PipelineEnv, action: string, extra: Record
   if (!res.ok) throw new Error(data?.error || "Studio request failed.");
   if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
   return data;
+}
+
+/** The AGENT's computer of the chat this video was started from (its downloads live there; the studio is a different machine). */
+async function agentComputer(run: Run): Promise<string | null> {
+  const chatId = run.p.chatId;
+  if (!chatId) return null;
+  try {
+    const snap = await getDoc(doc(db, "users", run.env.uid, "chats", chatId));
+    const id = (snap.data() as { computers?: Record<string, string> } | undefined)?.computers?.code;
+    return id && id !== run.sid ? id : null;
+  } catch { return null; }
 }
 
 async function pcCall(env: PipelineEnv, action: string, extra: Record<string, unknown>) {
@@ -226,6 +239,10 @@ export async function genCode(
 
 async function designAll(run: Run, sbIn: Storyboard): Promise<Storyboard> {
   let sb = sbIn;
+  if (run.p.design === "library") {
+    // library mode: no scene is written as code (a custom scene that the model added anyway becomes a clean library scene)
+    return { ...sb, scenes: sb.scenes.map((s) => (s.type === "custom" ? fallbackScene(s) : s)) };
+  }
   const todo = sb.scenes.map((s, i) => (s.type === "custom" && !s.code ? i : -1)).filter((i) => i >= 0);
   if (todo.length === 0) return sb;
   let done = 0;
@@ -435,7 +452,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       if (voiceOn !== run.p.voice) await upd(run, { voice: voiceOn });
       const style = STYLES[Math.floor(Math.random() * STYLES.length)];
       const twist = TWISTS[Math.floor(Math.random() * TWISTS.length)];
-      const files = run.p.mode === "edit" ? [] : ((await pcCall(env, "listassets", { sandboxId: run.sid }).catch(() => ({ files: [] as string[] }))).files as string[]);
+      const agentSid = run.p.mode === "edit" ? null : await agentComputer(run);
+      const files = agentSid ? (((await pcCall(env, "listassets", { sandboxId: agentSid }).catch(() => ({ files: [] as string[] }))).files ?? []) as string[]) : [];
       const memory = brainPrompt(brain, run.p.brief, { noSkills: true });
       const assetsNote = files.length ? `\n\nAssets the computer already downloaded (use up to 6 by setting a scene's "assetFile" to the EXACT file name; images → type "image", videos → type "footage"): ${files.slice(0, 40).join(", ")}` : "";
 
@@ -554,7 +572,9 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
           check(run);
           const isVid = /\.(mp4|webm|mov|m4v)$/i.test(name);
           try {
-            const r = await pcCall(env, "copyasset", { sandboxId: run.sid, pid: run.p.id, name, kind: isVid ? "vid" : "img", index: i });
+            const fromSid = await agentComputer(run);
+            if (!fromSid) throw new Error("the agent's computer was not found");
+            const r = await studioCall(env, "pullasset", { sandboxId: run.sid, fromSandboxId: fromSid, projectId: run.p.id, name, kind: isVid ? "vid" : "img", index: i });
             cur = withScene(cur, i, { ...cur.scenes[i], type: isVid ? "footage" : "image", [isVid ? "video" : "image"]: r.path });
             say(`📎 Scene ${i + 1} uses ${name}`);
           } catch (e) {
