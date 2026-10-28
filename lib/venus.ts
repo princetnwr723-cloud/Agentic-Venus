@@ -11,7 +11,7 @@ export type SourceRef = { kind: "upload" | "url"; path?: string; url?: string; n
 export type VenusProject = {
   id: string; title: string; brief: string; seconds: number; aspect: Aspect; theme: string;
   voice: boolean; voiceName: string; captions: boolean; quality: "720p" | "1080p"; review: boolean;
-  design?: "ai" | "library"; music?: boolean; origin?: "venus" | "chat"; chatId?: string;
+  design?: "ai" | "mixed" | "library"; music?: boolean; origin?: "venus" | "chat"; chatId?: string;
   /** "edit" = the user supplied a video and wants it edited; "make" (default) = built from scratch with motion graphics. */
   mode?: "make" | "edit"; source?: SourceRef; sourceInfo?: SourceInfo; keepAll?: boolean; matchSource?: boolean;
   provider: ProviderId; model: string; stage: Stage; status: "idle" | "running" | "done" | "error";
