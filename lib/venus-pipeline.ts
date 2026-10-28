@@ -490,7 +490,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         // ---------- a long video (up to one hour): chapter plan first, then every chapter is written on its own ----------
         say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
         hooks.progress({ label: "Chapter plan", value: null });
-        const ctx = memory + `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.` + assetsNote;
+        const aiOwn = (run.p.design ?? "ai") === "ai";
+        const ctx = memory + (aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
         const ob = { kind: "outline", brief: run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, context: ctx };
         let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
         if (!o.chapters) { say("First attempt failed — trying again…"); o = await aiCall(env, run.p, ob); }
@@ -523,16 +524,19 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const total = chapters.reduce((a, c) => a + c.seconds, 0);
         const sbNew = sanitizeStoryboard({ ...styleLock, title: o.title, scenes: all }, { aspect: run.p.aspect, theme: run.p.theme, captions: run.p.captions, maxSeconds: Math.max(run.p.seconds, total) * 1.05, maxScenes: 450 });
         sbNew.seed = rndSeed();
-        sbNew.concept = `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`.slice(0, 600);
+        sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""}` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`).slice(0, 600);
+        if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
-        say(`📋 ${sbNew.scenes.length} scenes planned in ${chapters.length} chapters (“${style[0]}” style).`);
+        say(`📋 ${sbNew.scenes.length} scenes planned in ${chapters.length} chapters${aiOwn ? " (designed by the agent)" : ` (“${style[0]}” style)`}.`);
       } else {
         // ---------- a normal video ----------
         say("✍️ The agent is writing the storyboard and art direction…");
         hooks.progress({ label: "Storyboard", value: null });
         const context =
           memory +
-          `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.` +
+          ((run.p.design ?? "ai") === "ai"
+            ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject, and it must not look like a template video): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.`
+            : `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.`) +
           assetsNote;
         const body = {
           kind: "storyboard", brief: run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
@@ -543,9 +547,11 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
         const sbNew = r.storyboard as Storyboard;
         sbNew.seed = rndSeed();
-        sbNew.concept = `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`.slice(0, 600);
+        const aiOwn = (run.p.design ?? "ai") === "ai";
+        sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`).slice(0, 600);
+        if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
-        say(`📋 ${sbNew.scenes.length} scenes planned in the “${style[0]}” style.`);
+        say(`📋 ${sbNew.scenes.length} scenes planned${aiOwn ? " (designed by the agent)" : ` in the “${style[0]}” style`}.`);
       }
     }
 
