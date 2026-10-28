@@ -3,6 +3,7 @@ import { safeFetch } from "@/lib/tools/net";
 import { saveSkillServer } from "@/lib/learning";
 import { parseSkillMarkdown } from "@/lib/skills-core";
 import { INJECTION_PATTERNS } from "@/lib/shield";
+import { sanitizeFiles, validateSkillPath } from "@/lib/learn-utils";
 
 const UA = { "User-Agent": "agenticvenus", Accept: "text/plain, text/markdown, application/vnd.github+json, */*" };
 type Ref = { kind: "url"; url: string } | { kind: "repo"; owner: string; name: string; skill?: string };
@@ -47,19 +48,34 @@ async function getText(url: string, max = 60_000): Promise<string> {
   return (await r.text()).slice(0, max);
 }
 
-async function repoSkillFiles(owner: string, name: string, skill?: string): Promise<Array<{ path: string; text: string }>> {
+type RepoSkill = { path: string; text: string; files: Record<string, string> };
+
+/** Every SKILL.md of a repo, together with the files that sit next to it in references/, scripts/, templates/, assets/ or examples/. */
+async function repoSkillFiles(owner: string, name: string, skill?: string): Promise<RepoSkill[]> {
   const r = await safeFetch(`https://api.github.com/repos/${owner}/${name}/git/trees/HEAD?recursive=1`, { headers: UA }, 15_000);
   if (!r.ok) throw new Error(`GitHub repo ${owner}/${name}: HTTP ${r.status}`);
-  const j = (await r.json()) as { tree?: Array<{ path: string; type: string }> };
-  let paths = (j.tree ?? []).filter((x) => x.type === "blob" && /(^|\/)SKILL\.md$/i.test(x.path)).map((x) => x.path);
+  const j = (await r.json()) as { tree?: Array<{ path: string; type: string; size?: number }> };
+  const blobs = (j.tree ?? []).filter((x) => x.type === "blob");
+  let paths = blobs.filter((x) => /(^|\/)SKILL\.md$/i.test(x.path)).map((x) => x.path);
   if (skill) paths = paths.filter((p) => p.toLowerCase().includes(skill.toLowerCase()));
   if (!paths.length) throw new Error(`No SKILL.md found in ${owner}/${name}${skill ? ` for "${skill}"` : ""}.`);
-  const out: Array<{ path: string; text: string }> = [];
+  const raw = (p: string) => `https://raw.githubusercontent.com/${owner}/${name}/HEAD/${p.split("/").map(encodeURIComponent).join("/")}`;
+  const out: RepoSkill[] = [];
   for (const p of paths.slice(0, 12)) {
     try {
-      const enc = p.split("/").map(encodeURIComponent).join("/");
-      out.push({ path: p, text: await getText(`https://raw.githubusercontent.com/${owner}/${name}/HEAD/${enc}`) });
-    } catch { /* skip this file */ }
+      const text = await getText(raw(p));
+      const dir = p.slice(0, p.length - "SKILL.md".length);
+      const side = blobs
+        .filter((b) => b.path !== p && b.path.startsWith(dir) && (b.size ?? 0) > 0 && (b.size ?? 0) <= 20_000)
+        .map((b) => ({ path: b.path, rel: b.path.slice(dir.length) }))
+        .filter((b) => validateSkillPath(b.rel))
+        .slice(0, 8);
+      const files: Record<string, string> = {};
+      for (const f of side) {
+        try { files[f.rel] = await getText(raw(f.path), 20_000); } catch { /* skip this file */ }
+      }
+      out.push({ path: p, text, files: sanitizeFiles(files).files });
+    } catch { /* skip this skill */ }
   }
   return out;
 }
@@ -80,7 +96,7 @@ export async function installFromInput(
   const names: string[] = [];
   const errors: string[] = [];
   const flagged: string[] = [];
-  const jobs: Array<{ text: string; src: string; hint: string }> = [];
+  const jobs: Array<{ text: string; src: string; hint: string; files?: Record<string, string> }> = [];
   const refs = refsOf(input);
 
   for (const r of refs) {
@@ -91,7 +107,7 @@ export async function installFromInput(
         jobs.push({ text, src: r.url, hint: slugFromUrl(r.url) });
       } else {
         for (const f of await repoSkillFiles(r.owner, r.name, r.skill)) {
-          jobs.push({ text: f.text, src: `github:${r.owner}/${r.name}/${f.path}`, hint: f.path.split("/").slice(-2, -1)[0] || r.name });
+          jobs.push({ text: f.text, src: `github:${r.owner}/${r.name}/${f.path}`, hint: f.path.split("/").slice(-2, -1)[0] || r.name, files: f.files });
         }
       }
     } catch (e) { errors.push(e instanceof Error ? e.message : "fetch failed"); }
@@ -107,9 +123,10 @@ export async function installFromInput(
         ? { name: j.hint, description: j.text.trim().split("\n")[0].replace(/^#+\s*/, "").slice(0, 200), instructions: j.text.trim() }
         : null);
     if (!parsed) { errors.push(`${j.src}: could not read it as a skill.`); continue; }
-    const bad = INJECTION_PATTERNS.filter(([n, re]) => DANGEROUS.has(n) && re.test(j.text)).map(([n]) => n);
+    const scan = j.text + "\n" + Object.values(j.files ?? {}).join("\n");
+    const bad = INJECTION_PATTERNS.filter(([n, re]) => DANGEROUS.has(n) && re.test(scan)).map(([n]) => n);
     try {
-      const sk = await saveSkillServer(uid, chatId, { ...parsed, trial: o.trial ?? false, source: j.src, disabled: bad.length > 0 });
+      const sk = await saveSkillServer(uid, chatId, { ...parsed, trial: o.trial ?? false, source: j.src, disabled: bad.length > 0, files: j.files && Object.keys(j.files).length ? j.files : undefined });
       names.push(bad.length ? `${sk.name} (paused: it contains instruction-like text, review it on the Skills page)` : sk.name);
       if (bad.length) flagged.push(sk.name);
     } catch (e) { errors.push(`${parsed.name}: ${e instanceof Error ? e.message : "could not save"}`); }
