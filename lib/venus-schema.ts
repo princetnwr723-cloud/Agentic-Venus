@@ -23,7 +23,7 @@ export const TRANSITIONS = ["fade", "slide", "zoom", "wipe", "blur", "cut", "up"
 // every video gets its own seed, so the same kind never looks the same twice.
 export const BG_KINDS = [
   "mesh", "aurora", "grid", "halftone", "stripes", "rings", "waves", "noise", "spot", "blocks",
-  "flow", "stars", "paper", "conic", "topo", "checker", "rays", "bokeh", "circuit", "glass",
+  "flow", "stars", "paper", "conic", "topo", "checker", "rays", "bokeh", "circuit", "glass", "scenery",
 ] as const;
 export const CLIP_FILTERS = ["none", "warm", "cool", "mono", "noir", "vivid", "fade", "teal-orange", "vhs", "dream"];
 export const CLIP_FITS = ["auto", "cover", "contain"];
@@ -53,11 +53,11 @@ export type Storyboard = {
 };
 
 const ALLOWED_IMPORTS = ["react", "remotion", "../kit", "../theme", "../ui"];
-const MAX_CODE = 16000;
+const MAX_CODE = 24000;
 
 export function checkCode(code: string): string | null {
   if (!code || code.length < 40) return "The scene code is empty.";
-  if (code.length > MAX_CODE) return "The scene code is too long (max ~220 lines).";
+  if (code.length > MAX_CODE) return "The scene code is too long (max ~300 lines).";
   if (!/export\s+default/.test(code)) return "Missing `export default` component.";
   for (const m of code.matchAll(/(?:from\s+|import\s+)["']([^"']+)["']/g)) {
     if (!ALLOWED_IMPORTS.includes(m[1])) return `Import "${m[1]}" is not allowed (only react, remotion, ../kit, ../theme, ../ui).`;
@@ -111,6 +111,22 @@ export function sanitizeBg(v: unknown): Record<string, unknown> | "none" | undef
   if (r.seed !== undefined) out.seed = Math.round(fin(r.seed, 1, 0, 999999));
   if (typeof r.grain === "boolean") out.grain = r.grain;
   if (r.vignette !== undefined) out.vignette = fin(r.vignette, 0.4, 0, 0.9);
+  // scenery: a drawn world (see src/scenery.tsx)
+  const pick = (v: unknown, list: string[]) => (list.includes(String(v)) ? String(v) : undefined);
+  const biome = pick(r.biome, ["mountains", "valley", "desert", "forest", "sea", "plains", "snow", "city"]);
+  const time = pick(r.time, ["dawn", "day", "sunset", "dusk", "night"]);
+  const figure = pick(r.figure, ["rider", "horse", "army"]);
+  const dir = pick(r.figDir, ["left", "right"]);
+  if (biome) out.biome = biome;
+  if (time) out.time = time;
+  if (figure) out.figure = figure;
+  if (dir) out.figDir = dir;
+  for (const k of ["river", "fort", "trees", "birds", "mist", "sun", "stars"]) if (typeof r[k] === "boolean") out[k] = r[k];
+  if (r.layers !== undefined) out.layers = Math.round(fin(r.layers, 5, 2, 7));
+  if (r.drift !== undefined) out.drift = fin(r.drift, 1, 0, 4);
+  if (r.figX !== undefined) out.figX = fin(r.figX, 0.42, 0, 1);
+  if (r.figY !== undefined) out.figY = fin(r.figY, 0.8, 0.4, 1);
+  if (r.figScale !== undefined) out.figScale = fin(r.figScale, 1, 0.4, 3);
   return Object.keys(out).length ? out : undefined;
 }
 
