@@ -46,7 +46,7 @@ export async function POST(req: Request) {
     if (body.kind === "storyboard") {
       const seconds = Math.min(90, Math.max(8, Number(body.seconds) || 45));
       const aspect = aspectOf(body.aspect);
-      const design = body.design === "library" ? "library" : "ai";
+      const design = body.design === "library" ? "library" : body.design === "mixed" ? "mixed" : "ai";
       const part = body.part && typeof body.part === "object"
         ? { index: Math.max(0, Number(body.part.index) || 0), total: Math.max(1, Number(body.part.total) || 1), title: String(body.part.title || "").slice(0, 120), summary: String(body.part.summary || "").slice(0, 700), seconds: Math.round(seconds) }
         : undefined;
@@ -56,8 +56,23 @@ export async function POST(req: Request) {
       );
       const raw = extractJson(reply);
       if (!raw) return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
-      if (style) for (const k of STYLE_KEYS) if (style[k] !== undefined) raw[k] = style[k]; // every part keeps the same look
-      const storyboard = sanitizeStoryboard(raw, { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: seconds, keepFiles: false });
+      const opts = { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: seconds, keepFiles: false };
+      const fixStyle = (r: any) => { if (style) for (const k of STYLE_KEYS) if (style[k] !== undefined) r[k] = style[k]; }; // every part keeps the same look
+      fixStyle(raw);
+      let storyboard = sanitizeStoryboard(raw, opts);
+      // too few scenes feel like a slideshow: ask once more, with the exact number needed
+      const minScenes = Math.max(3, Math.round(seconds / 4.5));
+      if (storyboard.scenes.length < minScenes) {
+        const again = extractJson(await ask(
+          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design, context, part, style }) +
+          `\n\nIMPORTANT: your previous answer had only ${storyboard.scenes.length} scenes for ${Math.round(seconds)} seconds. Write the same story again with at least ${minScenes} scenes (about ${Math.round(seconds / 3.4)}): one story beat per scene, 2.5 to 5 seconds each, changing picture every time.`
+        ));
+        if (again) {
+          fixStyle(again);
+          const better = sanitizeStoryboard(again, opts);
+          if (better.scenes.length > storyboard.scenes.length) storyboard = better;
+        }
+      }
       return NextResponse.json({ storyboard });
     }
 
