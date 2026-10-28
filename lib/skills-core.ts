@@ -1,4 +1,4 @@
-import { bm25 } from "@/lib/bm25";
+import { hybrid } from "@/lib/bm25";
 
 export type SkillCategory =
   | "video" | "design" | "code" | "email" | "sales" | "research" | "data" | "writing" | "ops" | "general";
@@ -26,20 +26,67 @@ export function categoriesOf(text: string, o: { max?: number; min?: number } = {
 }
 
 export type SkillLike = { name: string; description: string; instructions: string; tags?: string[]; disabled?: boolean };
+export type SkillMeta = SkillLike & { trial?: boolean; wins?: number; fails?: number; files?: Record<string, string> };
 
-/** Best skills for a piece of text: keyword relevance (BM25) + a boost when the skill's type matches the job type. */
-export function rankSkillList<T extends SkillLike>(skills: T[], text: string, n = 3): T[] {
+/** A skill needs at least this score (0..~1.3) before its FULL text is put into the prompt. Weaker matches only appear in the index. */
+export const SKILL_FULL_MIN = 0.35;
+
+/** Skills scored for a piece of text: hybrid relevance (keywords + fuzzy) + a boost when the skill's type matches the job type. */
+export function scoreSkills<T extends SkillLike>(skills: T[], text: string): Array<{ s: T; score: number }> {
   const live = skills.filter((s) => !s.disabled);
   if (!live.length) return [];
   const want = categoriesOf(text);
   const base = new Map<T, number>();
-  for (const r of bm25(live, (s) => `${s.name} ${s.name} ${s.description} ${s.instructions.slice(0, 600)}`, text)) base.set(r.doc, r.score);
+  for (const r of hybrid(live, (s) => `${s.name} ${s.name} ${s.description} ${s.description} ${s.instructions.slice(0, 600)}`, text)) base.set(r.doc, r.score);
   return live
-    .map((s) => ({ s, score: (base.get(s) ?? 0) + (s.tags ?? []).filter((t) => want.includes(t as SkillCategory)).length * 2 }))
+    .map((s) => ({ s, score: (base.get(s) ?? 0) + (s.tags ?? []).filter((t) => want.includes(t as SkillCategory)).length * 0.25 }))
     .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, n)
-    .map((x) => x.s);
+    .sort((a, b) => b.score - a.score);
+}
+
+/** Best skills for a piece of text. */
+export function rankSkillList<T extends SkillLike>(skills: T[], text: string, n = 3): T[] {
+  return scoreSkills(skills, text).slice(0, n).map((x) => x.s);
+}
+
+/** One short line per skill: this is what stays in the prompt ALL the time (progressive disclosure, like Hermes). */
+export function skillIndexLine(s: SkillMeta): string {
+  const tag = (s.tags ?? []).slice(0, 3).join("/");
+  const stat = s.trial ? " (on trial)" : (s.wins ?? 0) > 0 ? ` (worked ${s.wins}x)` : "";
+  const files = s.files && Object.keys(s.files).length ? ` +${Object.keys(s.files).length} files` : "";
+  return `- ${s.name}${tag ? ` [${tag}]` : ""}: ${String(s.description ?? "").replace(/\s+/g, " ").slice(0, 150)}${stat}${files}`;
+}
+
+/**
+ * Prompt block for skills. Index of every live skill (cheap) + the FULL text of only the best 1-2 matches (strong score only).
+ * Everything else is loaded on demand with skill.read. `index:false` is for agents that have no skill.read tool.
+ */
+export function skillsPromptBlock<T extends SkillMeta>(
+  skills: T[], text: string, o: { full?: number; fullChars?: number; indexMax?: number; index?: boolean } = {}
+): string[] {
+  const live = skills.filter((s) => !s.disabled);
+  if (!live.length) return [];
+  const scored = scoreSkills(live, text);
+  const full = scored.filter((x) => x.score >= SKILL_FULL_MIN).slice(0, o.full ?? 2).map((x) => x.s);
+  const parts: string[] = [];
+  if (full.length) {
+    parts.push(
+      "SKILLS THAT FIT THIS JOB (follow them closely):\n" +
+        full.map((s) => {
+          const f = s.files ? Object.keys(s.files) : [];
+          return `## ${s.name}\n${s.instructions.slice(0, o.fullChars ?? 3000)}${f.length ? `\n(Supporting files, load with skill.file: ${f.join(", ")})` : ""}`;
+        }).join("\n\n")
+    );
+  }
+  if (o.index !== false) {
+    const left = live.filter((s) => !full.includes(s));
+    if (left.length) {
+      const max = o.indexMax ?? 60;
+      const shown = left.slice().sort((a, b) => ((b.wins ?? 0) - (a.wins ?? 0))).slice(0, max);
+      parts.push(`YOUR OTHER SKILLS (name: what it is for). Load the full text with skill.read before a job that fits one${left.length > max ? ` (${left.length - max} more: use skill.list)` : ""}:\n` + shown.map(skillIndexLine).join("\n"));
+    }
+  }
+  return parts;
 }
 
 export function parseSkillMarkdown(text: string): { name: string; description: string; instructions: string } | null {
