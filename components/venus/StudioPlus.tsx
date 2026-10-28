@@ -54,7 +54,7 @@ export default function StudioPlus() {
   const [keepAll, setKeepAll] = useState(false);
   const [aspect, setAspect] = useState<Aspect>("16:9");
   const [matchSource, setMatchSource] = useState(true);
-  const [design, setDesign] = useState<"ai" | "library">("ai");
+  const [design, setDesign] = useState<"ai" | "mixed" | "library">("ai");
   const [quality, setQuality] = useState<"720p" | "1080p">("720p");
   const [voice, setVoice] = useState(false);
   const [captions, setCaptions] = useState(true);
@@ -201,7 +201,7 @@ export default function StudioPlus() {
               {!(mode === "edit" && matchSource) && (
                 <select value={aspect} disabled={running} onChange={(e) => setAspect(e.target.value as Aspect)} className={input}>{(Object.keys(ASPECTS) as Aspect[]).map((a) => <option key={a} value={a}>{ASPECTS[a].label}</option>)}</select>
               )}
-              <select value={design} disabled={running} onChange={(e) => setDesign(e.target.value as "ai" | "library")} className={input}><option value="ai">AI-designed scenes (unique)</option><option value="library">Library scenes (faster)</option></select>
+              <select value={design} disabled={running} onChange={(e) => setDesign(e.target.value as "ai" | "mixed" | "library")} className={input}><option value="ai">AI designs everything (new scenes, backgrounds, characters)</option><option value="mixed">Mixed (ready scenery + AI hero scenes)</option><option value="library">Library only (fastest)</option></select>
               <select value={quality} disabled={running} onChange={(e) => setQuality(e.target.value as "720p" | "1080p")} className={input}><option value="720p">720p</option><option value="1080p">1080p</option></select>
             </div>
 
