@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { connect, createSandbox, exec } from "@/lib/e2b-server";
 import { readBody, requestStatus } from "@/lib/request";
-import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
+import { createSignedDownload, createSignedUpload, removeObjects } from "@/lib/supabase-server";
+import { ASSETS, q } from "@/lib/code-server";
 import { DIR, jobStatus, safeId, setupStudio, startJob, studioState, writeBinary, writeFiles } from "@/lib/venus-server";
 import { prepareProjectBatched } from "@/lib/venus-prepare";
 import { AUDIO_MOODS, sanitizeStoryboard, sceneLayout, totalFramesOf, type Storyboard } from "@/lib/venus-schema";
@@ -9,6 +10,7 @@ import { UI_SOURCE } from "@/lib/venus-kit";
 import { MAIN_SOURCE } from "@/lib/venus-main";
 import { BACKDROP_SOURCE } from "@/lib/venus-backdrop";
 import { GUARD_SOURCE } from "@/lib/venus-guard";
+import { SCENERY_SOURCE } from "@/lib/venus-scenery";
 import { CLIP_SOURCE, SHELL_SOURCE } from "@/lib/venus-clip";
 import { SYNTH_V3_SOURCE } from "@/lib/venus-music";
 import { concatScript, ingestScript, longMusicScript, parseAnalysis, renderScript, uploadScript, verifyScript } from "@/lib/venus-jobs";
@@ -190,6 +192,7 @@ export async function POST(req: Request) {
           [`${DIR}/src/Main.tsx`]: MAIN_SOURCE,
           [`${DIR}/src/backdrop.tsx`]: BACKDROP_SOURCE,
           [`${DIR}/src/guard.tsx`]: GUARD_SOURCE,
+          [`${DIR}/src/scenery.tsx`]: SCENERY_SOURCE,
           [`${DIR}/src/shell2.tsx`]: SHELL_SOURCE,
           [`${DIR}/src/clip.tsx`]: CLIP_SOURCE,
           [`${DIR}/synth.cjs`]: SYNTH_V3_SOURCE,
@@ -300,19 +303,65 @@ export async function POST(req: Request) {
         return NextResponse.json({});
       }
 
-      // Voice-over: the same voice system as phone calls (the TTS provider, model and voice saved in Settings -> Voice).
+      // Voice-over: the voice system of the app (cloud voice -> local voice model -> OpenAI); if none is available, a free voice on this computer.
       case "tts": {
         const uid = String(body.uid);
         const pid = safeId(body.projectId);
         const index = Math.max(0, Math.min(900, Number(body.index) || 0));
         const text = String(body.text || "").slice(0, 900);
         if (!text.trim()) return fail("Voiceover needs narration text.", 400);
-        const audio = await synthVoiceOver(uid, text, typeof body.voice === "string" && body.voice !== "system" ? body.voice : undefined);
-        const rel = `p/${pid}/vo/scene-${index}.${audio.ext}`;
-        await writeBinary(sb, `${DIR}/public/${rel}`, audio.bytes);
+        const voice = typeof body.voice === "string" && body.voice !== "system" ? body.voice : "";
+        const audio = await synthVoiceOver(uid, text, voice).catch(() => null);
+        let rel = "";
+        let provider = "";
+        if (audio) {
+          rel = `p/${pid}/vo/scene-${index}.${audio.ext}`;
+          await writeBinary(sb, `${DIR}/public/${rel}`, audio.bytes);
+          provider = audio.provider;
+        } else {
+          // free voice on the studio computer: Microsoft neural voices through edge-tts (Hindi + English), espeak-ng as the last resort
+          const hindi = /[\u0900-\u097F]/.test(text);
+          const voiceName = /^[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural$/.test(voice) ? voice : hindi ? "hi-IN-SwaraNeural" : "en-US-AriaNeural";
+          rel = `p/${pid}/vo/scene-${index}.mp3`;
+          const base = `${DIR}/work/${pid}`;
+          await exec(sb, `mkdir -p ${base} ${DIR}/public/p/${pid}/vo`, 10_000);
+          await writeFiles(sb, { [`${base}/tts_${index}.txt`]: text });
+          const r = await exec(
+            sb,
+            `export PATH=$PATH:$HOME/.local/bin; command -v edge-tts >/dev/null 2>&1 || pip install --quiet --user --break-system-packages edge-tts >/dev/null 2>&1; edge-tts --voice ${voiceName} --file ${base}/tts_${index}.txt --write-media ${DIR}/public/${rel} >/dev/null 2>&1; test -s ${DIR}/public/${rel} || { command -v espeak-ng >/dev/null 2>&1 && espeak-ng -v ${hindi ? "hi" : "en"} -f ${base}/tts_${index}.txt -w ${base}/tts_${index}.wav && ffmpeg -y -loglevel error -i ${base}/tts_${index}.wav -codec:a libmp3lame -b:a 128k ${DIR}/public/${rel}; }; test -s ${DIR}/public/${rel} && echo VOICE_OK`,
+            58_000
+          );
+          if (!r.stdout.includes("VOICE_OK")) return fail("No voice could be made: connect a voice provider in Settings → Voice (or an OpenAI key).");
+          provider = "studio-free";
+        }
         const d = await exec(sb, `ffprobe -v error -show_entries format=duration -of csv=p=0 '${DIR}/public/${rel}'`, 15_000);
         const seconds = Number(d.stdout.trim());
-        return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0, provider: audio.provider });
+        return NextResponse.json({ file: rel, seconds: Number.isFinite(seconds) ? seconds : 0, provider });
+      }
+
+      // Copies an asset that the AGENT downloaded on ITS computer to this (studio) computer. The two computers are different machines:
+      // the file travels through storage (a temporary object that is deleted right away).
+      case "pullasset": {
+        const uid = String(body.uid);
+        const pid = safeId(body.projectId);
+        const name = String(body.name || "");
+        if (!/^[A-Za-z0-9._ -]{1,120}$/.test(name) || name.includes("..")) return fail("Bad asset name.", 400);
+        const kind = body.kind === "vid" ? "vid" : "img";
+        const idx = Math.max(0, Math.min(900, Number(body.index) || 0));
+        const ext = (name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5) || "bin";
+        const rel = `p/${pid}/${kind}/asset-${idx}.${ext}`;
+        const fromId = String(body.fromSandboxId || "");
+        if (!fromId) return fail("The agent's computer was not found.", 400);
+        const from = await connect(e2bKey, fromId);
+        const tmp = `${uid}/tmp/${pid}-${idx}-${Date.now().toString(36)}`;
+        await writeFiles(from, { "/tmp/venus_up.txt": await createSignedUpload(tmp) });
+        const put = await exec(from, `F=${q(ASSETS + "/" + name)}; test -f "$F" || { echo MISSING; exit 4; }; curl -sS -o /dev/null -w '%{http_code}' --max-time 50 -X PUT "$(cat /tmp/venus_up.txt)" -H 'Content-Type: application/octet-stream' -H 'x-upsert: true' --data-binary @"$F"; rm -f /tmp/venus_up.txt`, 56_000);
+        if (put.stdout.trim() !== "200") { await removeObjects([tmp]).catch(() => {}); return fail("The file " + name + " could not be read from the agent's computer."); }
+        await exec(sb, `mkdir -p ${DIR}/work/${pid} ${DIR}/public/p/${pid}/${kind}`, 10_000);
+        await writeFiles(sb, { [`${DIR}/work/${pid}/dl.txt`]: await createSignedDownload(tmp, 600) });
+        const got = await exec(sb, `curl -fsSL --max-time 50 -o ${DIR}/public/${rel} "$(cat ${DIR}/work/${pid}/dl.txt)"; rm -f ${DIR}/work/${pid}/dl.txt; test -s ${DIR}/public/${rel} && echo COPY_OK`, 56_000);
+        await removeObjects([tmp]).catch(() => {});
+        return got.stdout.includes("COPY_OK") ? NextResponse.json({ path: rel }) : fail("The file " + name + " could not be copied to the studio computer.");
       }
 
       // The agent writes the music and the sound design as code (needs the AI model, so it is its own request).
