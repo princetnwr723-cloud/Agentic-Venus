@@ -5,6 +5,7 @@
 
 export const BACKDROP_SOURCE = String.raw`import React from "react";
 import {AbsoluteFill, interpolate, random, useCurrentFrame, useVideoConfig} from "remotion";
+import {Scenery} from "./scenery";
 
 export const BG_KINDS = ["mesh", "aurora", "grid", "halftone", "stripes", "rings", "waves", "noise", "spot", "blocks", "flow", "stars", "paper", "conic", "topo", "checker", "rays", "bokeh", "circuit", "glass"];
 
@@ -26,7 +27,7 @@ const rgba = (hex: string, a: number) => {
 const R = (seed: number, tag: string, i: number = 0): number => random("bd-" + seed + "-" + tag + "-" + i);
 const pick = (cols: string[], k: number) => cols[((k % cols.length) + cols.length) % cols.length];
 
-type Ctx = {w: number; h: number; t: number; f: number; seed: number; cols: string[]; dark: boolean; intensity: number; scale: number; angle: number; u: number; big: number};
+type Ctx = {spec?: any; terrainSeed?: number; w: number; h: number; t: number; f: number; seed: number; cols: string[]; dark: boolean; intensity: number; scale: number; angle: number; u: number; big: number};
 
 const Mesh = (c: Ctx) => {
   const n = 3 + Math.floor(R(c.seed, "n") * 3);
@@ -310,7 +311,9 @@ const Glass = (c: Ctx) => (
   </AbsoluteFill>
 );
 
-const DRAW: any = {mesh: Mesh, aurora: Aurora, grid: Grid, halftone: Halftone, stripes: Stripes, rings: Rings, waves: Waves, noise: Noise, spot: Spot, blocks: Blocks, flow: Flow, stars: Stars, paper: Paper, conic: Conic, topo: Topo, checker: Checker, rays: Rays, bokeh: Bokeh, circuit: Circuit, glass: Glass};
+const SceneryBg = (c: any) => <Scenery c={c} spec={c.spec || {}} terrainSeed={c.terrainSeed || 1} />;
+
+const DRAW: any = {scenery: SceneryBg, mesh: Mesh, aurora: Aurora, grid: Grid, halftone: Halftone, stripes: Stripes, rings: Rings, waves: Waves, noise: Noise, spot: Spot, blocks: Blocks, flow: Flow, stars: Stars, paper: Paper, conic: Conic, topo: Topo, checker: Checker, rays: Rays, bokeh: Bokeh, circuit: Circuit, glass: Glass};
 
 export const videoSeed = (sb: any): number => Number(sb && sb.seed) || hashStr(String((sb && sb.title) || "") + "|" + String(sb && sb.scenes ? sb.scenes.length : 0));
 
@@ -326,7 +329,7 @@ export const Backdrop = ({sb, i, T}: any) => {
   const family = order.slice(0, 4 + Math.floor(random("famsize-" + vs) * 3));
   if (g.kind && BG_KINDS.indexOf(g.kind) >= 0 && family.indexOf(g.kind) < 0) family[0] = g.kind;
   const off = Math.floor(random("off-" + vs) * family.length);
-  const kind = own.kind && DRAW[own.kind] ? own.kind : family[(i + off) % family.length];
+  const kind = own.kind && DRAW[own.kind] ? own.kind : g.kind === "scenery" ? "scenery" : family[(i + off) % family.length];
   const seed = Number(own.seed) || vs * 31 + (i + 1) * 7919;
   const raw = (own.colors || g.colors || []).filter(hexOk);
   const mixHex = (a: string, b: string, t: number) => {
@@ -347,7 +350,7 @@ export const Backdrop = ({sb, i, T}: any) => {
   const angle = Number.isFinite(Number(own.angle)) && own.angle !== undefined ? Number(own.angle) : Math.round(R(seed, "ang") * 360);
   const speed = (own.speed !== undefined ? Number(own.speed) : g.speed !== undefined ? Number(g.speed) : 0.5 + R(seed, "spd") * 1.0);
   const c: Ctx = {
-    w, h, f: frame, t: (frame / 30) * speed, seed, cols, dark: T.dark !== false,
+    spec: {...g, ...own}, terrainSeed: vs * 7 + hashStr(String((own.biome || g.biome || "mountains"))), w, h, f: frame, t: (frame / 30) * speed, seed, cols, dark: T.dark !== false,
     intensity: own.intensity !== undefined ? Number(own.intensity) : g.intensity !== undefined ? Number(g.intensity) : 0.75 + R(seed, "int") * 0.5,
     scale: own.scale !== undefined ? Number(own.scale) : 0.75 + R(seed, "scl") * 0.6, angle, u: Math.min(w, h) / 720, big: Math.max(w, h),
   };
@@ -358,7 +361,7 @@ export const Backdrop = ({sb, i, T}: any) => {
   const Draw = DRAW[kind];
   return (
     <AbsoluteFill style={{opacity: fadeIn}}>
-      <AbsoluteFill style={{background: bgFill}} />
+      {kind === "scenery" ? null : <AbsoluteFill style={{background: bgFill}} />}
       <Draw {...c} />
       {grain && kind !== "noise" && kind !== "paper" ? <Grain {...c} op={0.12} fq={0.8} /> : null}
       {vig > 0 ? <AbsoluteFill style={{background: "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0," + (c.dark ? vig : vig * 0.3) + ") 100%)"}} /> : null}
