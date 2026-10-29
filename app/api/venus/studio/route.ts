@@ -311,7 +311,9 @@ export async function POST(req: Request) {
         const text = String(body.text || "").slice(0, 900);
         if (!text.trim()) return fail("Voiceover needs narration text.", 400);
         const voice = typeof body.voice === "string" && body.voice !== "system" ? body.voice : "";
-        const audio = await synthVoiceOver(uid, text, voice, typeof body.chatId === "string" && body.chatId ? body.chatId : undefined).catch(() => null);
+        const spoken = await synthVoiceOver(uid, text, voice, typeof body.chatId === "string" && body.chatId ? body.chatId : undefined, body.localWait === true).catch(() => null);
+        if (spoken === "retry") return NextResponse.json({ retry: true }); // the local voice model is still waking up: the pipeline asks again
+        const audio = spoken;
         let rel = "";
         let provider = "";
         if (audio) {
@@ -329,7 +331,7 @@ export async function POST(req: Request) {
           const r = await exec(
             sb,
             `export PATH=$PATH:$HOME/.local/bin; command -v edge-tts >/dev/null 2>&1 || pip install --quiet --user --break-system-packages edge-tts >/dev/null 2>&1; edge-tts --voice ${voiceName} --file ${base}/tts_${index}.txt --write-media ${DIR}/public/${rel} >/dev/null 2>&1; test -s ${DIR}/public/${rel} || { command -v espeak-ng >/dev/null 2>&1 && espeak-ng -v ${hindi ? "hi" : "en"} -f ${base}/tts_${index}.txt -w ${base}/tts_${index}.wav && ffmpeg -y -loglevel error -i ${base}/tts_${index}.wav -codec:a libmp3lame -b:a 128k ${DIR}/public/${rel}; }; test -s ${DIR}/public/${rel} && echo VOICE_OK`,
-            58_000
+            45_000
           );
           if (!r.stdout.includes("VOICE_OK")) return fail("No voice could be made: connect a voice provider in Settings → Voice (or an OpenAI key).");
           provider = "studio-free";
