@@ -37,6 +37,7 @@ export default function CheckoutPage() {
   const [err, setErr] = useState("");
   const [timedOut, setTimedOut] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [note, setNote] = useState("");
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { if (!loading && !user) router.replace("/"); }, [loading, user, router]);
@@ -50,11 +51,12 @@ export default function CheckoutPage() {
   if (!user || !planId) return <div className="flex h-screen items-center justify-center bg-bg text-sm text-muted">Loading…</div>;
   const plan = planById(planId);
 
-  /** Asks the server once whether the plan is active. Returns true when it is. */
-  async function check(): Promise<boolean> {
+  /** Asks the server once whether the plan is active. sync = also ask Gumroad directly. Returns true when active. */
+  async function check(sync = false): Promise<boolean> {
     try {
-      const r = await fetch("/api/billing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const r = await fetch("/api/billing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sync ? { sync: true } : {}) });
       const d = await r.json();
+      if (d.syncNote) setNote(String(d.syncNote));
       if (d.plan === planId) {
         if (timer.current) clearInterval(timer.current);
         setPhase("done");
@@ -68,8 +70,11 @@ export default function CheckoutPage() {
     if (timer.current) clearInterval(timer.current);
     setTimedOut(false);
     const until = Date.now() + 10 * 60_000;
+    let tick = 0;
     timer.current = setInterval(async () => {
-      if (await check()) return;
+      tick += 1;
+      // every 4th check (about 20 s) also asks Gumroad directly, in case the payment ping never arrived
+      if (await check(tick % 4 === 0)) return;
       if (Date.now() > until) {
         if (timer.current) clearInterval(timer.current);
         setTimedOut(true);
@@ -79,7 +84,7 @@ export default function CheckoutPage() {
 
   async function checkNow() {
     setChecking(true);
-    const done = await check();
+    const done = await check(true);
     setChecking(false);
     if (!done) setTimedOut(true);
   }
@@ -158,6 +163,7 @@ export default function CheckoutPage() {
                       ? "Still not confirmed. If you already paid, it can take a few minutes. Your plan is never lost: check again, or open Settings → Plans."
                       : "Already paid? You can check right now."}
                   </p>
+                  {note && <p className="mt-2 text-[11px] leading-relaxed text-gold">{note}</p>}
                   <button onClick={checkNow} disabled={checking} className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-line py-2 text-xs text-ink hover:bg-panel2 disabled:opacity-60">
                     {checking && <Loader2 size={12} className="animate-spin" />} I already paid, check again
                   </button>
