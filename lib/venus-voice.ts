@@ -6,7 +6,7 @@
 //   4. null -> the studio route speaks with a free voice on the studio computer (Hindi and English)
 // Server-only.
 import { getExistingOpenAIKey } from "@/lib/voice-utils";
-import { localTts } from "@/lib/voice-local";
+import { ensureLocalVoice, voiceKey } from "@/lib/voice-local";
 import { getResolvedVoiceSecrets, getVoiceSettings, type VoiceSettings } from "@/lib/voice-server";
 
 export type VoiceAudio = { bytes: Buffer; ext: "mp3" | "wav"; provider: string };
@@ -108,12 +108,54 @@ async function viaCloud(c: Ctx, provider: string, input: string, over: string): 
   return { bytes: Buffer.from(await r.arrayBuffer()), ext: "mp3", provider: "openai" };
 }
 
+const PIPER_NAME = /^[a-z]{2,3}_[A-Z]{2}-[A-Za-z0-9_]+-[a-z_]+$/;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The local voice model on the cloud PC. Unlike a phone call, a video can wait: there is no short wake-up limit and no cool-down.
+ * The PC is woken as often as needed, a sentence may take up to 45 s (the first one loads the voice) and a failed sentence is tried again.
+ * One HTTP request can only last about a minute, so this works until `deadline` and then answers "retry": the pipeline asks again.
+ */
+async function viaLocal(c: Ctx, uid: string, chatId: string | undefined, input: string, lang: string, deadline: number): Promise<VoiceAudio | "retry" | null> {
+  const voice = PIPER_NAME.test(c.s.ttsVoice ?? "") ? (c.s.ttsVoice as string) : "";
+  let url = c.s.localVoiceUrl ?? "";
+  let sandboxId = c.s.localVoiceSandbox ?? "";
+  while (deadline - Date.now() > 6000) {
+    try {
+      if (!url || !sandboxId) {
+        const st = await ensureLocalVoice(uid, chatId, Math.max(4000, Math.min(30_000, deadline - Date.now() - 2000)));
+        if (st.state === "ready") { url = st.url; sandboxId = st.sandboxId; }
+        else if (st.state === "no_computer") return null; // there is no PC to wake: the next voice takes over
+        else { await sleep(2500); continue; } // still waking or installing
+      }
+      const left = deadline - Date.now();
+      if (left < 6000) break;
+      const r = await fetch(`${url}/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Voice-Key": voiceKey(sandboxId) },
+        body: JSON.stringify({ text: input.slice(0, 700), lang, voice }),
+        signal: AbortSignal.timeout(Math.min(45_000, left - 1000)),
+      });
+      if (r.status === 404) return null; // the local model has no voice for this language: the next voice takes over
+      if (r.ok) {
+        const bytes = Buffer.from(await r.arrayBuffer());
+        if (bytes.length > 44) return { bytes, ext: "wav", provider: "local" };
+      }
+    } catch { /* the PC may be asleep: wake it and try again */ }
+    url = ""; sandboxId = "";
+    await sleep(2000);
+  }
+  return "retry";
+}
+
 /**
  * Speaks `text` with the best voice that works. Returns null when none of the server-side voices works:
  * the caller then uses the free voice of the studio computer. `voiceOverride` replaces only the voice name.
  */
-export async function synthVoiceOver(uid: string, text: string, voiceOverride?: string, chatId?: string): Promise<VoiceAudio | null> {
+export async function synthVoiceOver(uid: string, text: string, voiceOverride?: string, chatId?: string, localWait = false): Promise<VoiceAudio | null | "retry"> {
   const c = await context(uid);
+  const deadline = Date.now() + 38_000; // one request lasts about a minute: the rest is for saving the file
   const input = text.slice(0, 900);
   const over = (voiceOverride || "").trim();
 
@@ -122,11 +164,10 @@ export async function synthVoiceOver(uid: string, text: string, voiceOverride?: 
     try { return await viaCloud(c, cloud, input, over); } catch { /* the next voice takes over */ }
   }
   if (c.localOk) {
-    try {
-      const lang = hasDevanagari(input) ? "hi-IN" : c.s.language && c.s.language !== "auto" ? c.s.language : "en-US";
-      const a = await localTts(c.s, input, lang, { uid, chatId, wake: true });
-      if (a?.bytes?.length) return { bytes: a.bytes, ext: /wav/i.test(a.mime) ? "wav" : "mp3", provider: "local" };
-    } catch { /* the next voice takes over */ }
+    const lang = hasDevanagari(input) ? "hi-IN" : c.s.language && c.s.language !== "auto" ? c.s.language : "en-US";
+    const a = await viaLocal(c, uid, chatId, input, lang, deadline);
+    if (a && a !== "retry") return a;
+    if (a === "retry" && localWait) return "retry"; // the caller waits for the local model and asks again
   }
   if (c.openai) {
     try { return await viaCloud(c, "openai", input, over); } catch { /* the free voice takes over */ }
