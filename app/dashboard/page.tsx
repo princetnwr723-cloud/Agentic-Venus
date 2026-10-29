@@ -979,7 +979,8 @@ export default function DashboardPage() {
     venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
-    const opt = guessVenusOptions(brief);
+    const ownerText = String([...(chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "");
+    const opt = guessVenusOptions(brief, ownerText);
     if (showWork) workStart(chat.id, "Venus Pro shuru ho raha hai…", "venus");
     setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
     try {
@@ -1151,7 +1152,7 @@ export default function DashboardPage() {
     const hint =
       who.tool === "pc" ? "To do work on the computer (browse, scrape, download, terminal), end your reply with [[PC:task|<clear instruction>]]."
       : who.tool === "code" ? "Only if the user wants a software project built or changed, end your reply with [[CODE:<detailed instruction>]]."
-      : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]."
+      : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]. The brief MUST start with the exact length the owner asked for (for example \"45 seconds\" or \"2 minutes\"; any length up to one hour is possible) and the shape (vertical or horizontal): never shorten it or replace it with a default."
       : who.tool === "email" ? "You draft emails (sending needs a Gmail MCP connector): write the full draft in your reply."
       : "Answer directly and concretely.";
     const reply = await callLLM(chat, `${personaOf(who)}\n${hint}${brainPrompt(brainOf(chat.id), text)}`, text, history.slice(-12).map((m) => ({ role: m.role, content: m.content })));
