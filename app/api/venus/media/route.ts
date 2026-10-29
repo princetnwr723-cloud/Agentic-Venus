@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 import { readBody, requestStatus } from "@/lib/request";
 import { createSignedDownload, createSignedUpload, removeObjects, supabaseConfigured } from "@/lib/supabase-server";
 import { voiceStatus } from "@/lib/venus-voice";
+import { ensureLocalVoice } from "@/lib/voice-local";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 // Tells the page which optional services are configured (never any secrets).
 export async function GET() {
@@ -41,6 +42,13 @@ export async function POST(req: Request) {
     // Which voice will speak the voice-over (the same voice system as phone calls).
     if (body.action === "voice-status") {
       return NextResponse.json(await voiceStatus(uid));
+    }
+
+    // Wakes the local voice model on the cloud PC (installs it if needed). One request waits up to ~50 s; the pipeline asks again until it is ready.
+    if (body.action === "voice-warm") {
+      const chatId = typeof body.chatId === "string" && body.chatId ? body.chatId : undefined;
+      const st = await ensureLocalVoice(uid, chatId, 48_000);
+      return NextResponse.json({ state: st.state, detail: st.state === "ready" ? "" : st.detail });
     }
 
     if (body.action === "delete") {
