@@ -10,6 +10,7 @@ import { splitAttachmentBlock, type AttachKind } from "@/lib/attachments";
 import { previewFor } from "@/lib/attach-client";
 import AttachCard from "@/components/dashboard/AttachCard";
 import FountFeedback from "@/components/fount/FountFeedback";
+import StepsPanel from "@/components/dashboard/StepsPanel";
 
 function Tool({ label, onClick, active, children }: { label: string; onClick: (e: React.MouseEvent) => void; active?: boolean; children: React.ReactNode }) {
   return (
@@ -180,6 +181,9 @@ export default function ChatThread({
           </div>
         </div>
       )}
+
+      {/* Progress: every step of the work, the one running now, and exactly where something broke (agent checklist + team plan) */}
+      {chatId && <StepsPanel chatId={chatId} busy={Boolean(busy)} onRun={(t) => (onSuggest ?? onRetry)?.(t)} />}
     </div>
   );
 }
