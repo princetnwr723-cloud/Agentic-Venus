@@ -85,6 +85,25 @@ export async function studioCall(env: PipelineEnv, action: string, extra: Record
   return data;
 }
 
+/** Waits for the local voice model to be ready: no short limit. Stops only when there is no PC at all, or after 25 minutes. */
+async function warmLocalVoice(run: Run): Promise<void> {
+  const st = await mediaCall(run.env, "voice-status").catch(() => null);
+  if (st?.provider !== "local") return;
+  run.hooks.log("🎙️ Waking your local voice model (it can take a few minutes the first time)…");
+  const t0 = Date.now();
+  let errors = 0;
+  for (;;) {
+    check(run);
+    run.hooks.progress({ label: "Waking the local voice model…", value: null });
+    const w = await mediaCall(run.env, "voice-warm", { chatId: run.p.chatId }).catch(() => ({ state: "error", detail: "request failed" }));
+    if (w.state === "ready") { run.hooks.log("✅ The local voice model is ready."); return; }
+    if (w.state === "no_computer") { run.hooks.log("ℹ️ " + String(w.detail || "There is no cloud PC for the local voice model.").slice(0, 140) + " Another voice will speak."); return; }
+    if (w.state === "error" && ++errors >= 4) { run.hooks.log("ℹ️ The local voice model could not start (" + String(w.detail || "error").slice(0, 100) + "). Another voice will speak."); return; }
+    if (Date.now() - t0 > 25 * 60_000) { run.hooks.log("ℹ️ The local voice model is still not ready after 25 minutes. Another voice will speak."); return; }
+    if (w.detail) run.hooks.log("⏳ " + String(w.detail).slice(0, 110));
+  }
+}
+
 /** The AGENT's computer of the chat this video was started from (its downloads live there; the studio is a different machine). */
 async function agentComputer(run: Run): Promise<string | null> {
   const chatId = run.p.chatId;
@@ -389,7 +408,14 @@ async function ttsPatch(run: Run, sb: Storyboard, index: number): Promise<Partia
   if (!narration) return null;
   // the default voice name of old projects ("nova") is not a choice: the owner's voice system decides
   const legacy = ["nova", "alloy", "echo", "fable", "onyx", "shimmer", "system", ""];
-  const t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: legacy.includes(String(run.p.voiceName ?? "")) ? "system" : run.p.voiceName, chatId: run.p.chatId });
+  const voiceArg = legacy.includes(String(run.p.voiceName ?? "")) ? "system" : run.p.voiceName;
+  // when the local voice model is the chosen voice, wait for it as long as it takes (the server answers "retry" while it wakes up); after 30 tries another voice may speak
+  let t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: voiceArg, chatId: run.p.chatId, localWait: true });
+  for (let k = 1; t.retry; k++) {
+    check(run);
+    run.hooks.progress({ label: `Waiting for the local voice (scene ${index + 1})…`, value: null });
+    t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: voiceArg, chatId: run.p.chatId, localWait: k < 30 });
+  }
   const s = sb.scenes[index];
   return { voice: t.file, seconds: t.seconds ? Math.min(30, Math.max(Number(s.seconds), Math.round((t.seconds + 0.6) * 10) / 10)) : s.seconds };
 }
@@ -623,6 +649,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       if (run.p.voice) {
         const idxs = sb.scenes.map((x, i) => (String(x.narration ?? "").trim() && !x.voice ? i : -1)).filter((i) => i >= 0);
         if (idxs.length) {
+          await warmLocalVoice(run); // the local model first: wait for it as long as it takes
           say(`🎙️ Recording the voice-over (${idxs.length} scenes) with your voice system…`);
           const queue = [...idxs];
           const patches = new Map<number, Partial<Scene>>();
