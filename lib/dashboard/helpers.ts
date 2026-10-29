@@ -98,19 +98,44 @@ export function analyzePcMessage(text: string): { pureCommand: "start" | "stop" 
 const DOMAINS: RegExp[] = [/\b(build|code|website|web ?site|landing|app|script|api)\b/i, /\b(leads?|prospects?|scrape|research|find (me )?(companies|contacts))\b/i, /\b(e-?mail|mail|outreach|newsletter)\b/i, /\b(video|reel|animation|motion)\b/i];
 export const domainCount = (t: string) => DOMAINS.filter((r) => r.test(t)).length;
 
-export function guessVenusOptions(brief: string): { seconds: number; aspect: "16:9" | "9:16" | "1:1" } {
-  const b = brief.toLowerCase();
+const NUM_WORDS: Record<string, number> = { a: 1, an: 1, one: 1, ek: 1, two: 2, do: 2, three: 3, teen: 3, four: 4, char: 4, five: 5, panch: 5, paanch: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, das: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, fifty: 50, half: 0.5 };
+
+/**
+ * The length the owner asked for, in seconds, or null when the text names none. Understands "45 second", "45s", "2 minute", "1.5 min",
+ * "1 minute 30 seconds", "an hour", "do minute", "10 minat", "3 ghante". When several lengths are named, the longest wins
+ * ("5 facts of 8 seconds each, in a 45 second video" -> 45).
+ */
+export function findSeconds(text: string): number | null {
+  const t = text.toLowerCase();
+  const NUM = "(\\d+(?:\\.\\d+)?|a|an|one|ek|two|do|three|teen|four|char|five|panch|paanch|six|seven|eight|nine|ten|das|fifteen|twenty|thirty|forty|fifty|half)";
+  const re = new RegExp(NUM + "\\s*(?:(hours?|hrs?|ghante|ghanta|घंटे|घंटा)|(minutes?|mins?|minat|मिनट)|(seconds?|secs?|सेकंड)|)(?![a-z])", "g");
+  const toks: Array<{ at: number; end: number; unit: "h" | "m" | "s"; n: number }> = [];
+  for (const m of t.matchAll(re)) {
+    const unit = m[2] ? "h" : m[3] ? "m" : m[4] ? "s" : null;
+    if (!unit) continue;
+    const n = /^[\d.]+$/.test(m[1]) ? Number(m[1]) : NUM_WORDS[m[1]];
+    if (Number.isFinite(n)) toks.push({ at: m.index ?? 0, end: (m.index ?? 0) + m[0].length, unit, n });
+  }
+  for (const m of t.matchAll(/(\d+(?:\.\d+)?)s\b/g)) toks.push({ at: m.index ?? 0, end: (m.index ?? 0) + m[0].length, unit: "s", n: Number(m[1]) });
+  toks.sort((x, y) => x.at - y.at);
+  const found: number[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const k = toks[i];
+    if (k.unit === "h") found.push(k.n * 3600);
+    else if (k.unit === "m") {
+      const nx = toks[i + 1];
+      if (nx && nx.unit === "s" && /^[\s,]*(?:and|aur)?[\s,]*$/.test(t.slice(k.end, nx.at))) { found.push(k.n * 60 + nx.n); i++; }
+      else found.push(k.n * 60);
+    } else found.push(k.n);
+  }
+  const ok = found.filter((x) => x >= 5 && x <= 86400);
+  return ok.length ? Math.round(Math.max(...ok)) : null;
+}
+
+export function guessVenusOptions(brief: string, ownerText = ""): { seconds: number; aspect: "16:9" | "9:16" | "1:1" } {
+  const b = (brief + " " + ownerText).toLowerCase();
   const aspect = /9:16|reel|shorts?|tiktok|vertical|story/.test(b) ? "9:16" : /1:1|square/.test(b) ? "1:1" : "16:9";
-  const WORDS: Record<string, number> = { a: 1, an: 1, one: 1, ek: 1, two: 2, do: 2, three: 3, teen: 3, four: 4, char: 4, five: 5, panch: 5, paanch: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, das: 10, fifteen: 15, twenty: 20, thirty: 30, half: 0.5 };
-  const num = (v: string) => (/^[\d.]+$/.test(v) ? Number(v) : WORDS[v] ?? NaN);
-  const NUM = "(\\d+(?:\\.\\d+)?|a|an|one|ek|two|do|three|teen|four|char|five|panch|paanch|six|seven|eight|nine|ten|das|fifteen|twenty|thirty|half)";
-  let seconds = 30;
-  const hr = new RegExp(NUM + "\\s*(?:hours?|hrs?|ghante|ghanta|घंटे|घंटा)").exec(b);
-  const mn = new RegExp(NUM + "\\s*(?:minutes?|mins?|minat|minute|मिनट)").exec(b);
-  const sc = new RegExp(NUM + "\\s*(?:seconds?|secs?|s\\b|सेकंड|second)").exec(b);
-  if (hr && Number.isFinite(num(hr[1]))) seconds = num(hr[1]) * 3600;
-  else if (mn && Number.isFinite(num(mn[1]))) seconds = num(mn[1]) * 60 + (sc && Number.isFinite(num(sc[1])) ? num(sc[1]) : 0);
-  else if (sc && Number.isFinite(num(sc[1]))) seconds = num(sc[1]);
-  // videos can be up to one hour long
-  return { seconds: Math.min(3600, Math.max(15, Math.round(seconds))), aspect };
+  // the brief the agent wrote may have lost the length: the owner's own words count too
+  const seconds = findSeconds(brief) ?? findSeconds(ownerText) ?? 30;
+  return { seconds: Math.min(3600, Math.max(15, seconds)), aspect };
 }
