@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { Code2, Film, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { beginActivity } from "@/lib/avatar-activity";
+import { dock, useTeamShown } from "@/lib/dock";
 
 const CSS = `
 @keyframes rb-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
@@ -34,10 +35,10 @@ function Card({
   const hasBar = value !== undefined;
   const pct = typeof value === "number" ? Math.max(0, Math.min(100, Math.round(value * 100))) : null;
   return (
-    <div className="rb-card relative overflow-hidden rounded-2xl border border-line bg-panel px-4 py-3">
+    <div className="rb-card relative overflow-hidden rounded-2xl border border-line bg-panel px-3.5 py-2.5">
       <div className="flex items-center gap-3">
-        <span className="rb-icon flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-gold/30 bg-goldSoft text-gold">
-          <Icon size={16} aria-hidden="true" />
+        <span className="rb-icon flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-gold/30 bg-goldSoft text-gold">
+          <Icon size={14} aria-hidden="true" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-3">
@@ -51,7 +52,7 @@ function Card({
         </div>
       </div>
       {hasBar && (
-        <div className="mt-3 h-1 overflow-hidden rounded-full bg-panel2">
+        <div className="mt-2 h-1 overflow-hidden rounded-full bg-panel2">
           {pct === null ? (
             <div className="rb-slide h-full w-1/4 rounded-full bg-gradient-to-r from-transparent via-gold to-transparent" />
           ) : (
@@ -63,6 +64,11 @@ function Card({
   );
 }
 
+/**
+ * The activity dock, right above the message box. Everything that shows work in progress lives in this ONE area:
+ * the Progress panel (steps, rendered into the slot below) and the video / code / team run cards. The dock never
+ * grows past about 40% of the screen height: past that it scrolls inside itself, so the chat is always visible behind it.
+ */
 export default function RunBars({
   venusRun, codeRun, teamRun,
 }: {
@@ -71,6 +77,10 @@ export default function RunBars({
   teamRun: string | null;
 }) {
   const active = Boolean(venusRun || codeRun || teamRun);
+  // the Progress panel already shows the running team with its steps: do not show the same thing twice
+  const teamShown = useTeamShown();
+  const showTeam = Boolean(teamRun) && !teamShown;
+  const cards = Boolean(venusRun || codeRun || showTeam);
 
   // while a video / code / team run is showing, the agent avatars show the "under pressure" look
   useEffect(() => {
@@ -78,18 +88,21 @@ export default function RunBars({
     return beginActivity();
   }, [active]);
 
-  if (!active) return null;
   return (
-    <div className="mx-auto w-full max-w-2xl space-y-2 px-6 pb-2">
-      <style>{CSS}</style>
-      {venusRun && <Card icon={Film} kind="Venus Pro" title={venusRun.title} label={venusRun.label} value={venusRun.value} />}
-      {codeRun && (
-        <Card icon={Code2} kind="Venus Code" title={codeRun.title} label={codeRun.label} value={null} />
-      )}
-      {teamRun && (
-        <Card icon={Users} kind="Team working" title={teamRun}>
-          <p className="mt-0.5 truncate text-xs text-muted">Team panel kholo, wahan live dikh raha hai.</p>
-        </Card>
+    <div className="max-h-[40vh] overflow-y-auto overscroll-contain">
+      {/* slot: the Progress panel renders here */}
+      <div ref={dock.setEl} />
+      {cards && (
+        <div className="mx-auto w-full max-w-2xl space-y-2 px-6 pb-2">
+          <style>{CSS}</style>
+          {venusRun && <Card icon={Film} kind="Venus Pro" title={venusRun.title} label={venusRun.label} value={venusRun.value} />}
+          {codeRun && <Card icon={Code2} kind="Venus Code" title={codeRun.title} label={codeRun.label} value={null} />}
+          {showTeam && (
+            <Card icon={Users} kind="Team working" title={teamRun ?? undefined}>
+              <p className="mt-0.5 truncate text-xs text-muted">Chief steps bana raha hai…</p>
+            </Card>
+          )}
+        </div>
       )}
     </div>
   );
