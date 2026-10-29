@@ -4,10 +4,11 @@ import { acquire, releaseNow } from "@/lib/computers";
 import { ensureNode, followPcJob, proofUrl, startPcJob, type PcPending } from "@/lib/pc-agent";
 import { providerMeta, PROVIDERS, type ProviderId } from "@/lib/providers";
 import { CATALOG, byId, personaOf, type Member } from "@/lib/team-catalog";
+import type { TeamRunDoc, TeamStepDoc } from "@/lib/steps";
 
 export type TMsg = { role: "user" | "assistant"; content: string; at: number };
 export type Feed = { from: string; to: string; text: string; at: number; kind: "task" | "result" | "note" };
-export type TeamDoc = { members: string[]; threads: Record<string, TMsg[]>; feed: Feed[]; working: Record<string, string> };
+export type TeamDoc = { members: string[]; threads: Record<string, TMsg[]>; feed: Feed[]; working: Record<string, string>; /** the live step list of the latest goal (shown in the chat's Progress panel) */ run?: TeamRunDoc };
 export type LlmFn = (system: string, prompt: string) => Promise<string>;
 export type TeamHost = {
   llm: LlmFn;
@@ -307,7 +308,42 @@ async function execMember(who: Member, task: string, host: TeamHost, onLine: (l:
 
 const FAILED = /^Failed:|^⚠️|^❌|^Skipped:/i;
 
+type PatchRun = (fn: (r: TeamRunDoc) => void) => Promise<void>;
+
+const clipOne = (v: string, n: number) => v.replace(/\s+/g, " ").trim().slice(0, n);
+const statusOf = (r: string): TeamStepDoc["status"] => (/^Skipped:/i.test(r.trim()) ? "skipped" : FAILED.test(r.trim()) ? "failed" : "done");
+const noteOf = (r: string): string => clipOne(r.replace(/^(Failed:|Skipped:|⚠️|❌)\s*/i, "").replace(/[#*_`>]/g, ""), 220);
+
+/** Starts the live step list for this goal, runs the team, and always leaves a truthful final state (also when it throws). */
 export async function runTeamGoal(a: { uid: string; chatId: string; goal: string; ctx: string; host: TeamHost }): Promise<string> {
+  const { uid, chatId } = a;
+  const runId = Date.now().toString(36);
+  const t0 = Date.now();
+  await updateTeam(uid, chatId, (t) => { t.run = { id: runId, goal: a.goal.slice(0, 400), status: "planning", steps: [], startedAt: t0, updatedAt: t0 }; });
+  const patchRun: PatchRun = (fn) => updateTeam(uid, chatId, (t) => {
+    if (!t.run || t.run.id !== runId) return; // a newer goal replaced this run
+    fn(t.run);
+    t.run.updatedAt = Date.now();
+  });
+  try {
+    return await runTeamGoalInner(a, patchRun);
+  } catch (e) {
+    const why = e instanceof Error ? e.message : "unknown error";
+    await patchRun((r) => {
+      const now = Date.now();
+      r.status = "failed";
+      r.endedAt = now;
+      for (const x of r.steps) {
+        if (x.status === "running") { x.status = "failed"; x.note = x.note || `Run ruk gaya: ${clipOne(why, 160)}`; x.endedAt = now; }
+        else if (x.status === "queued") { x.status = "skipped"; x.note = "Pehle ka step/team run ruk gaya, ye chala nahi."; x.endedAt = now; }
+      }
+      if (!r.steps.length) r.steps = [{ i: 0, member: "chief", name: "Chief", task: "Goal ko steps me todna", after: [], status: "failed", note: clipOne(why, 200), startedAt: r.startedAt, endedAt: now }];
+    });
+    throw e;
+  }
+}
+
+async function runTeamGoalInner(a: { uid: string; chatId: string; goal: string; ctx: string; host: TeamHost }, patchRun: PatchRun): Promise<string> {
   const { uid, chatId, host } = a;
   const feed = (from: string, to: string, text: string, kind: Feed["kind"]) =>
     updateTeam(uid, chatId, (t) => { t.feed.push({ from, to, text: text.slice(0, 900), at: Date.now(), kind }); });
@@ -326,6 +362,11 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
     for (const id of ids) if (!t.members.includes(id)) t.members.push(id);
   });
   if (joined.length) await feed("Chief", "Team", `Joined automatically for this task: ${joined.map((id) => byId(id)?.name ?? id).join(", ")}.`, "note");
+  // the owner sees every step right away (queued), then each one turns active / done / failed as it runs
+  await patchRun((r) => {
+    r.status = "running";
+    r.steps = steps.map((s, i) => ({ i, member: s.member, name: byId(s.member)?.name ?? s.member, task: clipOne(s.task.split("\n\n(Overall goal:")[0], 260), after: s.after, status: "queued" as const }));
+  });
 
   // own computers per member when the account has an E2B key and a model key; otherwise the chat's shared computer (one at a time)
   const needsPc = steps.some((s) => byId(s.member)?.tool === "pc");
@@ -370,6 +411,7 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
     const who = byId(s.member)!;
     try {
       const deps = s.after.map((k) => `Result of step ${k + 1} (${byId(steps[k].member)?.name}):\n${results[k].slice(0, 2500)}`).join("\n\n");
+      await patchRun((r) => { const x = r.steps[i]; if (x) { x.status = "running"; x.startedAt = Date.now(); } });
       await feed("Chief", who.name, `Step ${i + 1}: ${s.task}`, "task");
       await say(who.id, "user", `📋 From Chief (step ${i + 1}):\n${s.task}`);
       await say(who.id, "assistant", "▶ Got it — starting now.");
@@ -391,11 +433,24 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
       } catch (e) {
         results[i] = `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
       }
+      await patchRun((r) => {
+        const x = r.steps[i];
+        if (!x) return;
+        x.status = statusOf(results[i]);
+        x.note = noteOf(results[i]) || undefined;
+        if (!x.note) delete x.note;
+        x.endedAt = Date.now();
+      });
       await feed(who.name, "Chief", results[i], "result");
       await say(who.id, "assistant", results[i]);
     } catch (e) {
       results[i] = results[i] || `Failed: ${e instanceof Error ? e.message : "unknown error"}`;
     } finally {
+      // safety net: a step can never stay "running" after its code is over
+      await patchRun((r) => {
+        const x = r.steps[i];
+        if (x && x.status === "running") { x.status = statusOf(results[i] || "Failed: no result"); x.endedAt = Date.now(); if (x.status === "failed") x.note = x.note || "Koi result nahi mila."; }
+      });
       await updateTeam(uid, chatId, (t) => { delete t.working[who.id]; });
     }
   };
@@ -410,6 +465,11 @@ export async function runTeamGoal(a: { uid: string; chatId: string; goal: string
   await Promise.all(finished);
 
   const failures = results.filter((r) => FAILED.test(r.trim())).length;
+  await patchRun((r) => {
+    const ok = r.steps.filter((x) => x.status === "done").length;
+    r.status = ok === r.steps.length ? "done" : ok === 0 ? "failed" : "partial";
+    r.endedAt = Date.now();
+  });
   const report = await host.llm(
     personaOf(byId("chief")!),
     `Write the final report to the user in clear English (markdown). Start with one outcome line (use ❌ failed if the core goal failed, ⚠️ partly if any required step failed or was skipped, otherwise ✅ done), then what each member did, concrete results (links, names, files) and what still needs the user. Keep every "UNVERIFIED", "UNCHECKED", "FACT CHECK" and "VERIFIED:" line from the members exactly as written. Never invent anything and NEVER claim a skipped/failed step was completed.\n\nGOAL: ${a.goal}\nSTEPS WITH FAILURE/SKIP SIGNALS: ${failures}\n\n${steps.map((s, i) => `STEP ${i + 1} — ${byId(s.member)?.name} (${s.task.slice(0, 160)}):\n${results[i].slice(0, 1800)}`).join("\n\n")}`
