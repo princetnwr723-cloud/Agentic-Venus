@@ -6,6 +6,7 @@ import { db } from "@/lib/firebase";
 import { hydrateProject, saveProject, type Stage, type VenusProject } from "@/lib/venus";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
 import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
+import { findSeconds } from "@/lib/dashboard/helpers";
 import type { ProviderId } from "@/lib/providers";
 
 export type PipelineEnv = {
@@ -62,6 +63,15 @@ const TWISTS = [
   "Use a strong horizontal rhythm: elements enter from alternating sides.",
 ];
 const rndSeed = () => Math.floor(Math.random() * 999_000) + 1;
+
+/** The model sometimes plans a shorter video than asked (30 s instead of 45 s). Stretch the scenes so the length is the one that was asked for. */
+function stretchTo(sb: Storyboard, target: number): Storyboard {
+  if (!(target > 0) || sb.scenes.length === 0 || sb.scenes.some((s) => s.type === "clip")) return sb;
+  const total = totalFramesOf(sb) / 30;
+  if (total >= target * 0.93) return sb;
+  const f = Math.min(1.8, target / Math.max(1, total));
+  return { ...sb, scenes: sb.scenes.map((s) => ({ ...s, seconds: Math.min(30, Math.round(Number(s.seconds) * f * 10) / 10) })) };
+}
 
 async function readJson(res: Response) {
   const text = await res.text();
@@ -476,6 +486,14 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       check(run);
       await upd(run, { stage: "script" });
       const aiOwn = true; // every video is designed by the agent
+      if (run.p.mode !== "edit") {
+        const asked = findSeconds(run.p.brief);
+        if (asked && Math.abs(asked - run.p.seconds) >= 5) {
+          const len = Math.min(3600, Math.max(15, asked));
+          say(`📏 You asked for ${len >= 90 ? Math.round((len / 60) * 10) / 10 + " minutes" : len + " seconds"}: the video will be that long (the form said ${run.p.seconds}s).`);
+          await upd(run, { seconds: len });
+        }
+      }
       // "add a voice-over" in the brief is enough (the chat only switched it on when an OpenAI key existed)
       const wantsVoice = run.p.voice || /(voice[\s-]?over|voiceover|narrat|dubb|awaaz|avaaz|आवाज|वॉइस|वॉयस)/i.test(run.p.brief);
       const voiceOn = wantsVoice ? Boolean((await mediaCall(env, "voice-status").catch(() => ({ ready: true }))).ready) : false;
@@ -554,6 +572,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const total = chapters.reduce((a, c) => a + c.seconds, 0);
         const sbNew = sanitizeStoryboard({ ...styleLock, title: o.title, scenes: all }, { aspect: run.p.aspect, theme: run.p.theme, captions: run.p.captions, maxSeconds: Math.max(run.p.seconds, total) * 1.05, maxScenes: 450 });
         sbNew.seed = rndSeed();
+        { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""}` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
@@ -577,6 +596,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
         const sbNew = r.storyboard as Storyboard;
         sbNew.seed = rndSeed();
+        { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
