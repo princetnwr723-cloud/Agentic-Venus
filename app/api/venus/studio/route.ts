@@ -311,7 +311,7 @@ export async function POST(req: Request) {
         const text = String(body.text || "").slice(0, 900);
         if (!text.trim()) return fail("Voiceover needs narration text.", 400);
         const voice = typeof body.voice === "string" && body.voice !== "system" ? body.voice : "";
-        const audio = await synthVoiceOver(uid, text, voice).catch(() => null);
+        const audio = await synthVoiceOver(uid, text, voice, typeof body.chatId === "string" && body.chatId ? body.chatId : undefined).catch(() => null);
         let rel = "";
         let provider = "";
         if (audio) {
