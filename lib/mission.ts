@@ -18,6 +18,8 @@ export type Mission = {
   messages: Array<{ role: "user" | "assistant"; content: string }>; notes: string; log: Array<{ t: number; text: string }>;
   waitCall: string | null; pending: { name: string; args: Record<string, unknown>; summary: string } | null;
   result?: string; lease?: number; createdAt: number; updatedAt: number;
+  /** Set when this mission is one run of a scheduled routine: the routine engine delivers the result instead of the mission. */
+  routine?: { id: string; runId: string };
 };
 
 const db = () => getAdminDb();
@@ -38,7 +40,7 @@ export function kickMission(uid: string, id: string) {
   try { waitUntil(p); } catch { /* not on Vercel */ }
 }
 
-export async function startMission(uid: string, p: { chatId: string; goal: string; maxCalls?: number; allowWrites?: boolean; notify?: string[]; maxSteps?: number }) {
+export async function startMission(uid: string, p: { chatId: string; goal: string; maxCalls?: number; allowWrites?: boolean; notify?: string[]; maxSteps?: number; routine?: { id: string; runId: string } }) {
   const goal = String(p.goal || "").trim().slice(0, 4000);
   if (goal.length < 10) throw new Error("Give the mission a clear goal (what to do, for whom, what the result should be).");
   const maxCalls = Math.max(0, Math.min(50, Math.floor(Number(p.maxCalls) || 0)));
@@ -49,6 +51,7 @@ export async function startMission(uid: string, p: { chatId: string; goal: strin
     calls: 0, maxCalls, allowWrites: Boolean(p.allowWrites), tainted: false, notify: (p.notify ?? []).map(String).slice(0, 6),
     messages: [{ role: "user", content: `MISSION GOAL:\n${goal}` }], notes: "", log: [{ t: now, text: "Mission started" }],
     waitCall: null, pending: null, lease: 0, createdAt: now, updatedAt: now,
+    ...(p.routine ? { routine: p.routine } : {}),
   };
   await ref.set(clean(m));
   await audit(uid, { kind: "mission_start", chatId: p.chatId, text: `${ref.id}: ${clip(goal, 150)} (calls ${maxCalls}, writes ${m.allowWrites})` });
@@ -67,6 +70,7 @@ async function postToChat(uid: string, chatId: string, content: string) {
 function systemPrompt(m: Mission, agent: Agent, specs: ToolSpec[], bt: { role: string; mem: string }) {
   return [
     `You are ${agent.name}, an autonomous AI teammate running a MISSION for your owner. Nobody answers questions during a mission: decide and act.`,
+    m.routine ? "This mission is ONE RUN of a scheduled routine. Keep it focused on the task, and never try to create, change or run routines or missions." : "",
     bt.role ? `YOUR ROLE: ${bt.role}` : "",
     bt.mem ? `WHAT YOU REMEMBER:\n${bt.mem}` : "",
     `HOW TO WORK
@@ -86,10 +90,16 @@ async function finish(uid: string, m: Mission, status: "done" | "error" | "stopp
   m.status = status;
   const ref = col(uid).doc((m as Mission & { id: string }).id);
   await ref.update(clean({ status, result: clip(text, 6000), lease: 0, updatedAt: Date.now(), log: m.log.slice(-80), messages: m.messages.slice(-60), notes: m.notes, steps: m.steps, calls: m.calls, waitCall: null }));
-  const head = status === "done" ? "✅ Mission finished" : status === "stopped" ? "⏹️ Mission stopped" : "⚠️ Mission stopped with a problem";
-  const msg = `${head}: ${clip(m.goal, 140)}\n\n${clip(text, 3500)}`;
-  await postToChat(uid, m.chatId, msg).catch(() => {});
-  await notifyOwner(uid, m.chatId, msg, m.notify).catch(() => {});
+  if (m.routine) {
+    // one run of a routine: the routine engine decides what to deliver (silence, change detection, channels, retries, chaining)
+    const { settleRoutineMission } = await import("@/lib/routines-server");
+    await settleRoutineMission(uid, m.routine, status, text).catch(() => {});
+  } else {
+    const head = status === "done" ? "✅ Mission finished" : status === "stopped" ? "⏹️ Mission stopped" : "⚠️ Mission stopped with a problem";
+    const msg = `${head}: ${clip(m.goal, 140)}\n\n${clip(text, 3500)}`;
+    await postToChat(uid, m.chatId, msg).catch(() => {});
+    await notifyOwner(uid, m.chatId, msg, m.notify).catch(() => {});
+  }
   if (!m.tainted && m.steps >= 4 && status !== "stopped") {
     void learnFromRun(uid, m.chatId, { task: m.goal, outcome: text, steps: m.log.map((l) => l.text).join("\n"), verdict: status === "done" ? "pass" : "fail" });
   }
@@ -116,7 +126,8 @@ export async function advance(uid: string, id: string, budgetMs = 40_000) {
   try {
     const agent = await loadAgent(uid, m.chatId);
     const ctx = makeCtx(uid, m.chatId);
-    const specs = (await buildCatalog(agent.connectors, ctx)).specs.filter((s) => !s.name.startsWith("mission.") && !s.name.startsWith("identity."));
+    // missions and routines cannot start missions or routines themselves (no runaway loops)
+    const specs = (await buildCatalog(agent.connectors, ctx)).specs.filter((s) => !s.name.startsWith("mission.") && !s.name.startsWith("identity.") && !s.name.startsWith("routine."));
     const bt = await brainText(uid, m.chatId, m.goal);
 
     while (Date.now() - t0 < budgetMs && m.status === "running" && m.steps < m.maxSteps) {
@@ -235,7 +246,13 @@ export async function approveMission(uid: string, id: string, approve: boolean) 
 }
 
 export async function stopMission(uid: string, id: string) {
-  await col(uid).doc(id).update({ status: "stopped", waitCall: null, pending: null, lease: 0, updatedAt: Date.now() });
+  const ref = col(uid).doc(id);
+  await ref.update({ status: "stopped", waitCall: null, pending: null, lease: 0, updatedAt: Date.now() });
+  const rt = ((await ref.get()).data() as Mission | undefined)?.routine;
+  if (rt) {
+    const { settleRoutineMission } = await import("@/lib/routines-server");
+    await settleRoutineMission(uid, rt, "stopped", "").catch(() => {});
+  }
 }
 
 export async function listMissions(uid: string, limit = 30) {
