@@ -6,6 +6,7 @@ import { Check } from "lucide-react";
 import { PLANS, fmtDuration, fmtTokens, fullName, planById, type PlanId } from "@/lib/plans";
 
 type Summary = {
+  syncNote?: string;
   plan: PlanId; status: string; cancelled: boolean; renewsAt: number | null; windowHours: number; windowEndsAt: number;
   tokens: { used: number; limit: number | null };
   pc: { usedSeconds: number; limitSeconds: number | null };
@@ -32,13 +33,26 @@ export default function PlansPanel({ onNavigate }: { onNavigate?: () => void }) 
   const router = useRouter();
   const [s, setS] = useState<Summary | null>(null);
   const [err, setErr] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [note, setNote] = useState("");
 
-  useEffect(() => {
-    fetch("/api/billing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+  function load(sync = false) {
+    return fetch("/api/billing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sync ? { sync: true } : {}) })
       .then((r) => r.json())
-      .then((d) => (d.error ? setErr(String(d.error)) : setS(d)))
+      .then((d) => {
+        if (d.error) setErr(String(d.error));
+        else { setErr(""); setS(d); setNote(d.syncNote ? String(d.syncNote) : ""); }
+      })
       .catch(() => setErr("Could not load your plan."));
-  }, []);
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function syncNow() {
+    setSyncing(true);
+    await load(true);
+    setSyncing(false);
+  }
 
   const current = planById(s?.plan ?? "free");
 
@@ -87,6 +101,11 @@ export default function PlansPanel({ onNavigate }: { onNavigate?: () => void }) 
             </div>
           );
         })}
+      </div>
+      <div className="mt-4 rounded-lg border border-line bg-bg p-3">
+        <p className="text-[11px] leading-relaxed text-muted">Paid on Gumroad but your plan does not show? We look up your purchase by your sign-in email.</p>
+        {note && <p className="mt-2 text-[11px] leading-relaxed text-gold">{note}</p>}
+        <button onClick={syncNow} disabled={syncing} className="mt-2 rounded-md border border-line px-3 py-1.5 text-xs text-ink hover:bg-panel2 disabled:opacity-60">{syncing ? "Checking…" : "Sync my purchase"}</button>
       </div>
       <p className="mt-4 text-[11px] leading-relaxed text-faint">To cancel or change your card, use the &ldquo;Manage membership&rdquo; link in your Gumroad receipt email. If you move to a bigger plan, cancel the older one there so you are not billed twice.</p>
     </div>
