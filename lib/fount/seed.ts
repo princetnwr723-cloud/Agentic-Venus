@@ -255,9 +255,9 @@ const SPECS: Spec[] = [
     t: ["Make a {n}-second video about {a} for {b}", "{a} par {n} second ka video banao for {b}", "create a motion-graphics explainer: {a}, {b}", "{n}s reel about {a}, style for {b}"],
     a: ["our new app", "how UPI works", "five study tips", "a product launch", "the benefits of solar", "a company intro"],
     b: ["Instagram", "YouTube", "LinkedIn", "a pitch deck", "our website"],
-    n: ["15", "20", "30", "45", "60"],
-    steps: ["This is a Venus Pro job (own studio computer); do not try to do it in chat.", "Give it the brief: topic, {n} seconds, audience {b}, aspect ratio, voice yes/no.", "Use only facts the owner gave; no invented numbers.", "When ready, share the Venus Pro link and the download link."],
-    pitfalls: ["more than 60 seconds", "invented statistics", "starting a second video while one runs"],
+    n: ["15", "30", "45", "60", "120", "300"],
+    steps: ["This is a Venus Pro job (own studio computer); do not try to do it in chat. Venus Pro makes videos of any length up to one hour: never refuse or shorten a long request.", "Give it the brief: topic, the length the owner asked for ({n} seconds), audience {b}, aspect ratio, voice-over yes/no (the voice-over uses the owner's own voice system, the local model if it is set up).", "Use only facts the owner gave; no invented numbers.", "When ready, share the Venus Pro link and the download link."],
+    pitfalls: ["a video longer than one hour", "invented statistics", "starting a second video while one runs", "refusing or shortening the length the owner asked for"],
     verify: ["The final video link is given"],
   },
   {
