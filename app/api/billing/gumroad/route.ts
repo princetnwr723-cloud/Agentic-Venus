@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import {
-  activatePlan, endPlan, fetchProduct, fetchSale, fetchSubscriber, logEvent, markCancelled, planOfSlugs,
-  safeEq, saveUnclaimed, uidByKey, verifyCheckout,
+  activatePlan, endPlan, fetchSale, fetchSubscriber, isCurrentPlanKey, logEvent, markCancelled, periodOf,
+  planOfSale, resolveBuyer, safeEq, saveUnclaimed, uidByKey,
 } from "@/lib/billing-server";
-import type { PlanId } from "@/lib/plans";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -25,6 +24,7 @@ export async function POST(req: Request) {
     const form = await req.formData();
     const get = (k: string) => String(form.get(k) ?? "");
     const resource = get("resource_name") || "sale";
+    await logEvent("ping", { resource, saleId: get("sale_id") || get("id"), fields: Array.from(form.keys()).slice(0, 60) });
 
     if (resource === "sale") {
       const saleId = get("sale_id") || get("id");
@@ -32,37 +32,34 @@ export async function POST(req: Request) {
       const sale = await fetchSale(saleId);
       if (sale.refunded || sale.chargebacked || sale.disputed) return ok();
 
-      // Gumroad names the product in several ways: try all of them, then ask Gumroad for the product itself.
-      const names = [sale.product_permalink, sale.permalink, sale.short_product_id, get("product_permalink"), get("permalink"), get("short_product_id")];
-      let plan: PlanId | null = planOfSlugs(names);
-      let product: Record<string, any> | null = null;
-      if (!plan && sale.product_id) {
-        product = await fetchProduct(String(sale.product_id)).catch(() => null);
-        if (product) plan = planOfSlugs([product.custom_permalink, product.short_url, product.url, product.id]);
-      }
+      const plan = await planOfSale(sale, [get("product_permalink"), get("permalink"), get("short_product_id")]);
       if (!plan) {
-        await logEvent("unknown_product", { saleId, names, productName: sale.product_name, custom: product?.custom_permalink, shortUrl: product?.short_url });
+        await logEvent("unknown_product", { saleId, productName: sale.product_name, permalink: sale.product_permalink, productId: sale.product_id });
         return ok();
       }
 
-      const uid = get("url_params[uid]");
-      const sig = get("url_params[sig]");
-      const asked = get("url_params[plan]");
-      if (!uid || asked !== plan || !verifyCheckout(uid, plan, sig)) {
-        // paid, but not through our signed checkout link: keep it for a manual check
-        await saveUnclaimed(saleId, { plan, email: sale.email, subscriptionId: sale.subscription_id, gotUid: Boolean(uid), askedPlan: asked });
-        await logEvent("unclaimed", { saleId, plan, gotUid: Boolean(uid), askedPlan: asked });
+      // our link parameters can arrive as url_params[uid] or as a JSON string; also look inside the sale itself
+      let blob: Record<string, any> = {};
+      try { blob = JSON.parse(get("url_params") || "{}") ?? {}; } catch { /* not JSON */ }
+      const fromSale = (sale.url_params && typeof sale.url_params === "object" ? sale.url_params : {}) as Record<string, any>;
+      const param = (k: string) => get(`url_params[${k}]`) || String(blob[k] ?? "") || String(fromSale[k] ?? "");
+
+      const who = await resolveBuyer(sale, plan, { uid: param("uid"), plan: param("plan"), sig: param("sig") });
+      if (!who) {
+        // paid, but we cannot tell who: keep it for a manual check (the buyer can also press "Sync my purchase")
+        await saveUnclaimed(saleId, { plan, email: sale.email, subscriptionId: sale.subscription_id, gotUid: Boolean(param("uid")), askedPlan: param("plan") });
+        await logEvent("unclaimed", { saleId, plan, gotUid: Boolean(param("uid")), askedPlan: param("plan") });
         return ok();
       }
 
-      const yearly = /year/i.test(String(sale.recurrence ?? get("recurrence")));
-      await activatePlan(uid, plan, {
+      await activatePlan(who.uid, plan, {
         subscriptionId: sale.subscription_id ? String(sale.subscription_id) : undefined,
         saleId,
         email: String(sale.email ?? ""),
-        periodMs: (yearly ? 366 : 31) * DAY,
+        periodMs: periodOf(sale),
         at: Date.parse(String(sale.created_at ?? "")) || Date.now(),
       });
+      await logEvent("matched_by", { saleId, how: who.how });
       return ok();
     }
 
@@ -70,8 +67,10 @@ export async function POST(req: Request) {
       const saleId = get("sale_id") || get("id");
       const sale = await fetchSale(saleId);
       if (!(sale.refunded || sale.chargebacked || sale.disputed)) return ok();
-      const hit = (await uidByKey(String(sale.subscription_id ?? ""))) ?? (await uidByKey(saleId));
-      if (hit) await endPlan(hit.uid, resource);
+      const subId = String(sale.subscription_id ?? "");
+      const key = (await uidByKey(subId)) ? subId : saleId;
+      const hit = (await uidByKey(subId)) ?? (await uidByKey(saleId));
+      if (hit && (await isCurrentPlanKey(hit.uid, key))) await endPlan(hit.uid, resource);
       return ok();
     }
 
@@ -80,6 +79,11 @@ export async function POST(req: Request) {
     const hit = await uidByKey(subId);
     if (!hit) {
       await logEvent("unknown_subscription", { subId, resource });
+      return ok();
+    }
+    // an OLD subscription (for example the Pro you left when you moved to Max) must never touch the plan you have now
+    if (!(await isCurrentPlanKey(hit.uid, subId))) {
+      await logEvent("ignored_old_subscription", { subId, resource, uid: hit.uid });
       return ok();
     }
 
