@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { doc, onSnapshot } from "firebase/firestore";
 import { AlertTriangle, Check, ChevronDown, ListChecks, Minus, Play, RotateCcw, Users, X } from "lucide-react";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
+import { dock, useDockEl } from "@/lib/dock";
 import {
   fmtDur, fromPlan, fromTeamRun, isRelevant, retryText, summarize,
   type PlanDoc, type RunSummary, type RunView, type StepView, type TeamRunDoc,
@@ -20,9 +22,15 @@ const CSS = `
 @media (prefers-reduced-motion: reduce) { .sp-card, .sp-spin, .sp-slide { animation: none !important; } }
 `;
 
+/** Needs attention (paused, partly done, broken) = open by default; running or finished = one tidy line. */
+const defaultOpen = (s: RunSummary) => s.state === "paused" || s.state === "partial" || s.state === "broken";
+
 function headline(v: RunView, s: RunSummary): string {
   switch (s.state) {
-    case "running": return `Step ${s.current ?? s.total} of ${s.total}`;
+    case "running": {
+      const cur = v.steps.find((x) => x.n === s.current);
+      return `Step ${s.current ?? s.total} of ${s.total}${cur ? ` · ${cur.title}` : ""}`;
+    }
     case "paused": return `Ruka hua · ${s.done}/${s.total} ho chuke`;
     case "done": return `Poora hua · ${s.total}/${s.total}`;
     case "partial": return `${s.done} hue · ${s.failed + s.skipped} nahi ho paye`;
@@ -89,8 +97,8 @@ function Card({ v, s, now, open, onToggle, onDismiss, onRun, busy }: {
   return (
     <div className={`sp-card relative overflow-hidden rounded-2xl border bg-panel ${bad ? "border-red-900/60" : "border-line"}`}>
       <div className="flex items-center">
-        <button onClick={onToggle} aria-expanded={open} className="group flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-panel2/60">
-          <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${bad ? "border-red-500/40 bg-red-950/50 text-red-300" : "border-gold/30 bg-goldSoft text-gold"}`}>
+        <button onClick={onToggle} aria-expanded={open} className="group flex min-w-0 flex-1 items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-panel2/60">
+          <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border ${bad ? "border-red-500/40 bg-red-950/50 text-red-300" : "border-gold/30 bg-goldSoft text-gold"}`}>
             {bad ? <AlertTriangle size={14} aria-hidden="true" /> : <ListChecks size={14} aria-hidden="true" />}
           </span>
           <span className="min-w-0 flex-1" role="status" aria-live="polite">
@@ -109,7 +117,7 @@ function Card({ v, s, now, open, onToggle, onDismiss, onRun, busy }: {
         )}
       </div>
 
-      <div className="mx-4 mb-3 h-1 overflow-hidden rounded-full bg-panel2">
+      <div className="mx-3.5 mb-2.5 h-1 overflow-hidden rounded-full bg-panel2">
         {live && s.pct === 0 ? (
           <div className="sp-slide h-full w-1/4 rounded-full bg-gradient-to-r from-transparent via-gold to-transparent" />
         ) : (
@@ -119,7 +127,7 @@ function Card({ v, s, now, open, onToggle, onDismiss, onRun, busy }: {
 
       {open && (
         <div className="border-t border-line">
-          <div className="max-h-60 overflow-y-auto px-4 py-3">
+          <div className="max-h-[28vh] overflow-y-auto px-3.5 py-2.5">
             <ol className="relative space-y-0.5">
               <span className="absolute bottom-3 left-[9px] top-3 w-px bg-line" aria-hidden="true" />
               {v.steps.map((st) => <Row key={st.n} st={st} live={live} now={now} />)}
@@ -127,7 +135,7 @@ function Card({ v, s, now, open, onToggle, onDismiss, onRun, busy }: {
           </div>
 
           {(s.brokeAt || s.state === "paused") && (
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-3.5 py-2">
               <p className={`min-w-0 flex-1 text-xs ${s.brokeAt ? "text-red-300" : "text-muted"}`}>
                 {s.brokeAt
                   ? `Step ${s.brokeAt.n} yahan toota. Baaki steps ${s.state === "broken" ? "chale nahi" : "apni jagah hain"}.`
@@ -161,6 +169,7 @@ export default function StepsPanel({ chatId, busy, onRun }: { chatId: string; bu
   const [now, setNow] = useState(() => Date.now());
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
   const [userOpen, setUserOpen] = useState<Record<string, boolean>>({});
+  const dockEl = useDockEl();
 
   useEffect(() => {
     setPlan(null); setRun(null); setHidden({}); setUserOpen({});
@@ -202,23 +211,31 @@ export default function StepsPanel({ chatId, busy, onRun }: { chatId: string; bu
     return () => clearInterval(t);
   }, [ticking]);
 
+  // tells the run cards that the team is already shown here, so it is not shown twice
+  const teamRunning = items.some((x) => x.v.source === "team" && x.s.state === "running");
+  useEffect(() => {
+    dock.setTeamShown(teamRunning);
+    return () => dock.setTeamShown(false);
+  }, [teamRunning]);
+
   if (!items.length) return null;
-  return (
-    // sticks to the bottom of the chat, so the steps stay in view while the thread scrolls
-    <div className="sticky bottom-0 z-10 -mx-1 bg-bg/95 px-1 pb-1 pt-2 backdrop-blur-sm">
+  const cards = (
+    <div className="space-y-2">
       <style>{CSS}</style>
-      <div className="space-y-2">
-        {items.map(({ v, s }) => (
-          <Card
-            key={v.source}
-            v={v} s={s} now={now} busy={busy}
-            open={userOpen[v.source] ?? s.state !== "done"}
-            onToggle={() => setUserOpen((o) => ({ ...o, [v.source]: !(o[v.source] ?? s.state !== "done") }))}
-            onDismiss={() => setHidden((h) => ({ ...h, [v.key]: true }))}
-            onRun={onRun}
-          />
-        ))}
-      </div>
+      {items.map(({ v, s }) => (
+        <Card
+          key={v.source}
+          v={v} s={s} now={now} busy={busy}
+          open={userOpen[v.source] ?? defaultOpen(s)}
+          onToggle={() => setUserOpen((o) => ({ ...o, [v.source]: !(o[v.source] ?? defaultOpen(s)) }))}
+          onDismiss={() => setHidden((h) => ({ ...h, [v.key]: true }))}
+          onRun={onRun}
+        />
+      ))}
     </div>
   );
+  // normally it sits in the activity dock above the message box (one capped area); without a dock it stays under the messages
+  return dockEl
+    ? createPortal(<div className="mx-auto w-full max-w-2xl px-6 pb-2">{cards}</div>, dockEl)
+    : <div className="pt-2">{cards}</div>;
 }
