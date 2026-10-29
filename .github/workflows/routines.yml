@@ -1,74 +1,42 @@
 name: AgenticVenus routine runner
 
+# GitHub schedules are best-effort (a run can start a few minutes late). That is safe: routines are anchored to
+# wall-clock times and protected by leases, so a late or doubled tick never duplicates a run.
+# For extra safety also run `npm run routines:run` on your own machine, or point cron-job.org at the same URLs.
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
+concurrency:
+  group: venus-ticks
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
-  ping-routines:
+  ticks:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
-      - name: Call /api/routines/run
+      - name: Call every tick endpoint (routines, background jobs, missions, proactive)
         env:
           APP_URL: ${{ secrets.APP_URL }}
           RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
         run: |
-          URL="${APP_URL%/}/api/routines/run"
-          STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST "$URL" \
-            -H "Authorization: Bearer $RUNNER_SECRET")
-          echo "HTTP status: $STATUS"
-          cat response.txt
-          echo
-          if [ "$STATUS" -ge 400 ]; then
-            echo "::error::Routine endpoint returned HTTP $STATUS"
-            exit 1
-          fi
-
-      - name: Keep background coding jobs alive and finish unattended ones
-        env:
-          APP_URL: ${{ secrets.APP_URL }}
-          RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
-        run: |
-          URL="${APP_URL%/}/api/runner/tick"
-          STATUS=$(curl -s -o tick.txt -w "%{http_code}" -X POST "$URL" \
-            -H "Authorization: Bearer $RUNNER_SECRET")
-          echo "HTTP status: $STATUS"
-          cat tick.txt
-          echo
-          if [ "$STATUS" -ge 400 ]; then
-            echo "::error::Runner tick returned HTTP $STATUS"
-            exit 1
-          fi
-
-      - name: Keep missions moving (safety net)
-        env:
-          APP_URL: ${{ secrets.APP_URL }}
-          RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
-        run: |
-          URL="${APP_URL%/}/api/missions/tick"
-          STATUS=$(curl -s -o m.txt -w "%{http_code}" -X POST "$URL" \
-            -H "Authorization: Bearer $RUNNER_SECRET" -H "Content-Type: application/json" -d '{}')
-          echo "HTTP status: $STATUS"
-          cat m.txt
-          echo
-          if [ "$STATUS" -ge 400 ]; then
-            echo "::error::Missions tick returned HTTP $STATUS"
-            exit 1
-          fi
-
-      - name: Proactive messages (at most one per chat per day)
-        env:
-          APP_URL: ${{ secrets.APP_URL }}
-          RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
-        run: |
-          URL="${APP_URL%/}/api/proactive/tick"
-          STATUS=$(curl -s -o p.txt -w "%{http_code}" -X POST "$URL" \
-            -H "Authorization: Bearer $RUNNER_SECRET" -H "Content-Type: application/json" -d '{}')
-          echo "HTTP status: $STATUS"
-          cat p.txt
-          echo
-          if [ "$STATUS" -ge 400 ]; then
-            echo "::error::Proactive tick returned HTTP $STATUS"
-            exit 1
-          fi
+          fail=0
+          for path in routines/run runner/tick missions/tick proactive/tick; do
+            url="${APP_URL%/}/api/${path}"
+            code=$(curl -sS -o out.txt -w "%{http_code}" -X POST "$url" \
+              -H "Authorization: Bearer $RUNNER_SECRET" -H "Content-Type: application/json" -d '{}' \
+              --max-time 58 --retry 2 --retry-delay 5 --retry-all-errors) || code=000
+            echo "== ${path}: HTTP ${code}"
+            head -c 1500 out.txt
+            echo
+            if [ "$code" = "000" ] || [ "$code" -ge 400 ]; then
+              echo "::error::${path} returned HTTP ${code}"
+              fail=1
+            fi
+          done
+          exit $fail
