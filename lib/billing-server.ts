@@ -7,7 +7,7 @@
 //   billingEvents/*            -> small audit log
 import { createHmac, timingSafeEqual } from "crypto";
 import { FieldValue } from "firebase-admin/firestore";
-import { getAdminDb } from "@/lib/firebase-admin";
+import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { RequestError } from "@/lib/request";
 import { fmtDuration, fmtTokens, nextPlan, planById, type PlanDef, type PlanId } from "@/lib/plans";
 
@@ -49,6 +49,7 @@ type Open = { sandboxId: string; since: number; seen: number };
 type UsageDoc = { windowStart?: number; tokens?: number; pcSeconds?: number; pcOpen?: Record<string, Open> };
 type Norm = { windowStart: number; tokens: number; pcSeconds: number; pcOpen: Record<string, Open> };
 type Ctx = { plan: PlanDef; n: Norm; now: number; patch: Record<string, unknown>; doc: PlanDoc | undefined; dirty: boolean };
+type Sale = Record<string, any>;
 
 export const estTokens = (chars: number) => Math.ceil(Math.max(0, chars) / 4);
 
@@ -287,7 +288,7 @@ async function gr(path: string): Promise<any> {
   return j;
 }
 /** A ping is not signed, so every sale is confirmed again with Gumroad's own API before anyone gets a plan. */
-export const fetchSale = async (id: string) => (await gr(`/sales/${encodeURIComponent(id)}`)).sale as Record<string, any>;
+export const fetchSale = async (id: string) => (await gr(`/sales/${encodeURIComponent(id)}`)).sale as Sale;
 export const fetchSubscriber = async (id: string) => (await gr(`/subscribers/${encodeURIComponent(id)}`)).subscriber as Record<string, any>;
 export const fetchProduct = async (id: string) => (await gr(`/products/${encodeURIComponent(id)}`)).product as Record<string, any>;
 
@@ -299,22 +300,95 @@ export async function logEvent(kind: string, data: Record<string, unknown>) {
   }
 }
 
+/** Monthly sale -> 31 days, yearly sale -> 366 days. */
+export const periodOf = (sale: Sale): number => (/year/i.test(String(sale.recurrence ?? "")) ? 366 : 31) * DAY;
+
+/** Which plan did this sale buy? Tries every name Gumroad uses, then asks Gumroad for the product itself. */
+export async function planOfSale(
+  sale: Sale,
+  extraNames: Array<string | undefined | null> = [],
+  productCache?: Map<string, Record<string, any> | null>
+): Promise<PlanId | null> {
+  const names = [sale.product_permalink, sale.permalink, sale.short_product_id, ...extraNames];
+  const direct = planOfSlugs(names);
+  if (direct || !sale.product_id) return direct;
+  const pid = String(sale.product_id);
+  let product = productCache?.get(pid);
+  if (product === undefined) {
+    product = await fetchProduct(pid).catch(() => null);
+    productCache?.set(pid, product);
+  }
+  if (!product) return null;
+  return planOfSlugs([product.custom_permalink, product.short_url, product.url, product.id]);
+}
+
+/** Email of a signed-up user, only when Firebase says the email is verified (so nobody can claim a stranger's purchase). */
+async function verifiedUidByEmail(email: unknown): Promise<string | null> {
+  const e = String(email ?? "").trim().toLowerCase();
+  if (!e) return null;
+  try {
+    const u = await getAdminAuth().getUserByEmail(e);
+    return u.emailVerified ? u.uid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Who paid? Three ways, strongest first:
+ *  1. our signed checkout link (uid + plan + signature came back in the ping)
+ *  2. the subscription / sale is already known (renewals, restarts)
+ *  3. the buyer's email matches a verified signed-in user (when Gumroad did not send our link parameters)
+ */
+export async function resolveBuyer(
+  sale: Sale,
+  plan: PlanId,
+  p: { uid?: string; plan?: string; sig?: string }
+): Promise<{ uid: string; how: "signed" | "subscription" | "email" } | null> {
+  if (p.uid && p.plan === plan && p.sig && verifyCheckout(p.uid, plan, p.sig)) return { uid: p.uid, how: "signed" };
+  const known = (await uidByKey(String(sale.subscription_id ?? ""))) ?? (await uidByKey(String(sale.id ?? "")));
+  if (known) return { uid: known.uid, how: "subscription" };
+  const byEmail = await verifiedUidByEmail(sale.email);
+  if (byEmail) return { uid: byEmail, how: "email" };
+  return null;
+}
+
+/** Returns false when a lower plan from an OLD subscription tried to replace a higher active plan. */
 export async function activatePlan(
   uid: string,
   plan: PlanId,
   o: { subscriptionId?: string; saleId?: string; email?: string; periodMs: number; at: number }
-) {
+): Promise<boolean> {
+  // always remember which subscription / sale belongs to this user, so later events find them
+  for (const k of [o.subscriptionId, o.saleId]) if (k) await db().collection("billingIndex").doc(k).set({ uid, plan, at: Date.now() });
+
+  const cur = (await planRef(uid).get()).data() as PlanDoc | undefined;
+  const curId = effectivePlan(cur);
+  const sameSub = Boolean(o.subscriptionId) && cur?.subscriptionId === o.subscriptionId;
+  if (!sameSub && !cur?.cancelled && curId !== "free" && planById(plan).price < planById(curId).price) {
+    await logEvent("ignored_lower_plan", { uid, plan, current: curId, saleId: o.saleId, subscriptionId: o.subscriptionId });
+    return false;
+  }
+
   const renewsAt = o.at + o.periodMs;
-  const doc: PlanDoc = {
+  const doc: Record<string, unknown> = {
     plan, status: "active", cancelled: false, renewsAt, accessUntil: renewsAt + GRACE_MS,
-    ...(o.subscriptionId ? { subscriptionId: o.subscriptionId } : {}),
+    subscriptionId: o.subscriptionId ?? FieldValue.delete(),
     ...(o.saleId ? { saleId: o.saleId } : {}),
     ...(o.email ? { email: o.email } : {}),
     updatedAt: Date.now(),
   };
   await planRef(uid).set(doc, { merge: true });
-  for (const k of [o.subscriptionId, o.saleId]) if (k) await db().collection("billingIndex").doc(k).set({ uid, plan, at: Date.now() });
   await logEvent("activated", { uid, plan, saleId: o.saleId, subscriptionId: o.subscriptionId });
+  return true;
+}
+
+/** True when this subscription / sale is the one that currently powers the user's plan. Old ones must not end it. */
+export async function isCurrentPlanKey(uid: string, key: string): Promise<boolean> {
+  const cur = (await planRef(uid).get()).data() as PlanDoc | undefined;
+  if (!cur) return true;
+  if (!cur.subscriptionId && !cur.saleId) return true;
+  return cur.subscriptionId === key || cur.saleId === key;
 }
 
 export async function markCancelled(uid: string) {
@@ -337,4 +411,68 @@ export async function uidByKey(key: string): Promise<{ uid: string; plan: PlanId
 
 export async function saveUnclaimed(saleId: string, data: Record<string, unknown>) {
   await db().collection("billingUnclaimed").doc(saleId || String(Date.now())).set({ at: Date.now(), ...JSON.parse(JSON.stringify(data)) }, { merge: true });
+}
+
+// ---------------- "I paid but my plan does not show": ask Gumroad directly ----------------
+const lastSync = new Map<string, number>();
+
+/**
+ * Looks up the signed-in user's purchases on Gumroad (by their verified email) and activates the best live one.
+ * This rescues payments whose ping never arrived, was rejected, or could not be tied to a user.
+ */
+export async function syncFromGumroad(uid: string): Promise<{ plan: PlanId | null; note: string }> {
+  const now = Date.now();
+  if (now - (lastSync.get(uid) ?? 0) < 10_000) return { plan: null, note: "Checked a moment ago. Try again in a few seconds." };
+  if (lastSync.size > 500) lastSync.clear();
+  lastSync.set(uid, now);
+
+  const user = await getAdminAuth().getUser(uid);
+  const email = String(user.email ?? "").trim();
+  if (!email) return { plan: null, note: "Your account has no email, so a purchase cannot be matched." };
+  if (!user.emailVerified) return { plan: null, note: "Verify your sign-in email first, then check again." };
+
+  const j = await gr(`/sales?email=${encodeURIComponent(email)}`);
+  const sales: Sale[] = Array.isArray(j.sales) ? j.sales.slice(0, 20) : [];
+  const cache = new Map<string, Record<string, any> | null>();
+
+  let best: { plan: PlanId; sale: Sale; at: number; periodMs: number; cancelled: boolean; subId: string } | null = null;
+  for (const sale of sales) {
+    if (sale.refunded || sale.chargebacked || sale.disputed) continue;
+    const plan = await planOfSale(sale, [], cache);
+    if (!plan) continue;
+    const at = Date.parse(String(sale.created_at ?? "")) || 0;
+    const periodMs = periodOf(sale);
+    if (!at || at + periodMs + GRACE_MS <= now) continue; // too old to still give access
+
+    const subId = sale.subscription_id ? String(sale.subscription_id) : "";
+    let cancelled = false;
+    if (subId) {
+      const s = await fetchSubscriber(subId).catch(() => null);
+      if (s && (s.ended_at || ["ended", "failed_payment", "fully_refunded"].includes(String(s.status)))) continue;
+      cancelled = Boolean(s?.cancelled_at);
+    }
+
+    const better =
+      !best ||
+      planById(plan).price > planById(best.plan).price ||
+      (plan === best.plan && at > best.at);
+    if (better) best = { plan, sale, at, periodMs, cancelled, subId };
+  }
+
+  if (!best) return { plan: null, note: `No active purchase found for ${email}. If you paid with a different email, tell support the email you used.` };
+
+  const cur = (await planRef(uid).get()).data() as PlanDoc | undefined;
+  const alreadyOk = effectivePlan(cur) === best.plan && Number(cur?.renewsAt || 0) >= best.at + best.periodMs;
+  if (!alreadyOk) {
+    await activatePlan(uid, best.plan, {
+      subscriptionId: best.subId || undefined,
+      saleId: String(best.sale.id ?? ""),
+      email,
+      periodMs: best.periodMs,
+      at: best.at,
+    });
+    if (best.cancelled) await markCancelled(uid);
+    await logEvent("synced", { uid, plan: best.plan, saleId: best.sale.id });
+  }
+  return { plan: best.plan, note: "Purchase found." };
 }
