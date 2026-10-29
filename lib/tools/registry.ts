@@ -6,6 +6,7 @@ import { VERIFY_TOOLS } from "./verify";
 import { VOICE_TOOLS } from "./voice";
 import { CHANNEL_TOOLS, NOTIFY_TOOLS } from "./channels";
 import { MISSION_TOOLS } from "./mission";
+import { ROUTINE_TOOLS } from "./routine";
 import { LEARNING_TOOLS } from "./learning";
 import { REPO_TOOLS } from "./repo";
 import { VISUAL_TOOLS } from "./visual";
@@ -31,7 +32,7 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
