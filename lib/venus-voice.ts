@@ -1,14 +1,22 @@
-// Venus Pro voice-over: uses the SAME voice system as phone calls (Settings -> Voice): the TTS provider, model and voice that
-// the user saved there. Server-only. "twilio" (the free built-in phone voice) has no audio file, so it falls back to OpenAI.
+// Venus Pro voice-over: uses the SAME voice system as phone calls (Settings -> Voice).
+// Order, so a voice-over is always possible:
+//   1. the cloud voice model saved in Settings -> Voice (OpenAI, ElevenLabs, Deepgram, Gemini)
+//   2. the LOCAL voice model on your cloud PC (when it is selected or already running)
+//   3. your OpenAI key
+//   4. null -> the studio route speaks with a free voice on the studio computer (Hindi and English)
+// Server-only.
 import { getExistingOpenAIKey } from "@/lib/voice-utils";
 import { localTts } from "@/lib/voice-local";
 import { getResolvedVoiceSecrets, getVoiceSettings, type VoiceSettings } from "@/lib/voice-server";
 
 export type VoiceAudio = { bytes: Buffer; ext: "mp3" | "wav"; provider: string };
+export type VoiceState = { ready: boolean; provider: string; voice: string; note?: string };
 
 const ELEVEN_IDS: Record<string, string> = { rachel: "21m00Tcm4TlvDq8ikWAM", adam: "pNInz6obpgDQGcFmaJgB", bella: "EXAVITQu4vr4xnSDxMaL", antoni: "ErXwobaYiN019PkySvjV" };
 const OPENAI_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer", "ash", "coral", "sage"];
 const LEGACY = ["nova", "alloy", "echo", "fable", "onyx", "shimmer"];
+const TIMEOUT = () => AbortSignal.timeout(40_000);
+const hasDevanagari = (t: string) => /[\u0900-\u097F]/.test(t);
 
 function wav(pcm: Buffer, rate: number): Buffer {
   const h = Buffer.alloc(44);
@@ -18,39 +26,39 @@ function wav(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([h, pcm]);
 }
 
-const TIMEOUT = () => AbortSignal.timeout(40_000);
+type Ctx = { s: VoiceSettings; keys: Awaited<ReturnType<typeof getResolvedVoiceSecrets>>; openai: string | null; localOk: boolean };
 
-/** Which provider will speak (for the UI / the pipeline), without synthesizing anything. */
-export async function voiceStatus(uid: string): Promise<{ ready: boolean; provider: string; voice: string; note?: string }> {
+async function context(uid: string): Promise<Ctx> {
   const s = await getVoiceSettings(uid);
   const keys = await getResolvedVoiceSecrets(uid);
-  const p = s.ttsProvider ?? "twilio";
-  const openai = keys.openaiKey || (await getExistingOpenAIKey(uid));
-  if (p === "openai" && openai) return { ready: true, provider: "openai", voice: s.ttsVoice || "alloy" };
-  if (p === "elevenlabs" && keys.elevenLabsKey) return { ready: true, provider: "elevenlabs", voice: s.ttsVoice || "Rachel" };
-  if (p === "deepgram" && keys.deepgramKey) return { ready: true, provider: "deepgram", voice: s.ttsVoice || "aura-2-thalia-en" };
-  if (p === "gemini" && keys.geminiKey) return { ready: true, provider: "gemini", voice: s.ttsVoice || "Kore" };
-  if (p === "local" && s.localVoiceUrl && s.localVoiceSandbox) return { ready: true, provider: "local", voice: s.ttsVoice || "local" };
-  if (openai) return { ready: true, provider: "openai", voice: "nova", note: p === "twilio" ? "The free phone voice has no audio file, so OpenAI speaks." : "Your saved voice provider is not connected, so OpenAI speaks." };
-  return { ready: false, provider: p, voice: "", note: "Connect a voice provider (Settings -> Voice) or an OpenAI key to get a voice-over." };
+  const openai = keys.openaiKey || (await getExistingOpenAIKey(uid).catch(() => null)) || null;
+  // the local model is only used when it was chosen or is already running (this never wakes a PC that the user did not ask for)
+  const localOk = s.ttsProvider === "local" || Boolean(s.localVoiceUrl && s.localVoiceSandbox) || Boolean(s.localVoiceAt);
+  return { s, keys, openai, localOk };
 }
 
-/** Speaks `text` with the user's voice system. `voiceOverride` (optional) replaces only the voice name. */
-export async function synthVoiceOver(uid: string, text: string, voiceOverride?: string): Promise<VoiceAudio> {
-  const s: VoiceSettings = await getVoiceSettings(uid);
-  const keys = await getResolvedVoiceSecrets(uid);
-  const st = await voiceStatus(uid);
-  if (!st.ready) throw new Error(st.note || "No voice provider is connected.");
-  const input = text.slice(0, 900);
-  const over = (voiceOverride || "").trim();
+function cloudProvider(c: Ctx): "openai" | "elevenlabs" | "deepgram" | "gemini" | null {
+  const p = c.s.ttsProvider ?? "twilio";
+  if (p === "openai" && c.openai) return "openai";
+  if (p === "elevenlabs" && c.keys.elevenLabsKey) return "elevenlabs";
+  if (p === "deepgram" && c.keys.deepgramKey) return "deepgram";
+  if (p === "gemini" && c.keys.geminiKey) return "gemini";
+  return null;
+}
 
-  if (st.provider === "local") {
-    const a = await localTts(s, input, s.language && s.language !== "auto" ? s.language : "en-US", { uid, wake: true });
-    if (a?.bytes?.length) return { bytes: a.bytes, ext: /wav/i.test(a.mime) ? "wav" : "mp3", provider: "local" };
-    throw new Error("The local voice model on your cloud PC did not answer. Open Settings -> Voice and wake it, or pick another provider.");
-  }
+/** Which voice will speak (for the form and the pipeline). A voice-over is always possible: the last fallback is free. */
+export async function voiceStatus(uid: string): Promise<VoiceState> {
+  const c = await context(uid);
+  const cloud = cloudProvider(c);
+  if (cloud) return { ready: true, provider: cloud, voice: c.s.ttsVoice || (cloud === "openai" ? "alloy" : "default") };
+  if (c.localOk) return { ready: true, provider: "local", voice: c.s.ttsVoice || "local voice model", note: "Your local voice model speaks. If your PC is asleep, a free voice on the studio computer takes over." };
+  if (c.openai) return { ready: true, provider: "openai", voice: "nova", note: "No voice provider is chosen in Settings -> Voice, so OpenAI speaks." };
+  return { ready: true, provider: "studio-free", voice: "free neural voice", note: "No voice provider is connected, so a free voice on the studio computer speaks (Hindi and English)." };
+}
 
-  if (st.provider === "elevenlabs" && keys.elevenLabsKey) {
+async function viaCloud(c: Ctx, provider: string, input: string, over: string): Promise<VoiceAudio> {
+  const { s, keys } = c;
+  if (provider === "elevenlabs" && keys.elevenLabsKey) {
     const v = over && !LEGACY.includes(over.toLowerCase()) ? over : s.ttsVoice || "Rachel";
     const id = ELEVEN_IDS[v.toLowerCase()] ?? v;
     const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(id)}?output_format=mp3_44100_128`, {
@@ -60,8 +68,7 @@ export async function synthVoiceOver(uid: string, text: string, voiceOverride?: 
     if (!r.ok) throw new Error("ElevenLabs voice-over failed (HTTP " + r.status + ").");
     return { bytes: Buffer.from(await r.arrayBuffer()), ext: "mp3", provider: "elevenlabs" };
   }
-
-  if (st.provider === "deepgram" && keys.deepgramKey) {
+  if (provider === "deepgram" && keys.deepgramKey) {
     const v = over && !LEGACY.includes(over.toLowerCase()) ? over : s.ttsVoice || "aura-2-thalia-en";
     const r = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(v)}&encoding=mp3`, {
       method: "POST", headers: { Authorization: `Token ${keys.deepgramKey}`, "Content-Type": "application/json" }, signal: TIMEOUT(), body: JSON.stringify({ text: input }),
@@ -69,8 +76,7 @@ export async function synthVoiceOver(uid: string, text: string, voiceOverride?: 
     if (!r.ok) throw new Error("Deepgram voice-over failed (HTTP " + r.status + ").");
     return { bytes: Buffer.from(await r.arrayBuffer()), ext: "mp3", provider: "deepgram" };
   }
-
-  if (st.provider === "gemini" && keys.geminiKey) {
+  if (provider === "gemini" && keys.geminiKey) {
     const v = over && !LEGACY.includes(over.toLowerCase()) ? over : s.ttsVoice || "Kore";
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(s.ttsModel || "gemini-2.5-flash-preview-tts")}:generateContent`, {
       method: "POST", headers: { "x-goog-api-key": keys.geminiKey, "Content-Type": "application/json" }, signal: TIMEOUT(),
@@ -86,9 +92,8 @@ export async function synthVoiceOver(uid: string, text: string, voiceOverride?: 
     const rate = Number(/rate=(\d+)/.exec(part.mimeType ?? "")?.[1]) || 24000;
     return { bytes: wav(Buffer.from(part.data, "base64"), rate), ext: "wav", provider: "gemini" };
   }
-
-  // OpenAI (the chosen provider, or the fallback)
-  const key = keys.openaiKey || (await getExistingOpenAIKey(uid));
+  // OpenAI
+  const key = c.openai;
   if (!key) throw new Error("No OpenAI key for the voice-over.");
   const useSaved = s.ttsProvider === "openai";
   const v = over && (OPENAI_VOICES.includes(over.toLowerCase()) || useSaved) ? over.toLowerCase() : useSaved ? s.ttsVoice || "alloy" : "nova";
@@ -101,4 +106,30 @@ export async function synthVoiceOver(uid: string, text: string, voiceOverride?: 
     throw new Error("OpenAI voice-over failed: " + (e.error?.message ?? "HTTP " + r.status));
   }
   return { bytes: Buffer.from(await r.arrayBuffer()), ext: "mp3", provider: "openai" };
+}
+
+/**
+ * Speaks `text` with the best voice that works. Returns null when none of the server-side voices works:
+ * the caller then uses the free voice of the studio computer. `voiceOverride` replaces only the voice name.
+ */
+export async function synthVoiceOver(uid: string, text: string, voiceOverride?: string, chatId?: string): Promise<VoiceAudio | null> {
+  const c = await context(uid);
+  const input = text.slice(0, 900);
+  const over = (voiceOverride || "").trim();
+
+  const cloud = cloudProvider(c);
+  if (cloud) {
+    try { return await viaCloud(c, cloud, input, over); } catch { /* the next voice takes over */ }
+  }
+  if (c.localOk) {
+    try {
+      const lang = hasDevanagari(input) ? "hi-IN" : c.s.language && c.s.language !== "auto" ? c.s.language : "en-US";
+      const a = await localTts(c.s, input, lang, { uid, chatId, wake: true });
+      if (a?.bytes?.length) return { bytes: a.bytes, ext: /wav/i.test(a.mime) ? "wav" : "mp3", provider: "local" };
+    } catch { /* the next voice takes over */ }
+  }
+  if (c.openai) {
+    try { return await viaCloud(c, "openai", input, over); } catch { /* the free voice takes over */ }
+  }
+  return null;
 }
