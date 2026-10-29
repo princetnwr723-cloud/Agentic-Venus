@@ -10,6 +10,7 @@ import { PROVIDERS, providerMeta, type ProviderId } from "@/lib/providers";
 import { ASPECTS, type Aspect } from "@/lib/venus-schema";
 import { saveProject, type SourceRef, type VenusProject } from "@/lib/venus";
 import { runPipeline, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
+import { findSeconds } from "@/lib/dashboard/helpers";
 
 const input = "w-full rounded-lg border border-line bg-bg px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-gold focus:outline-none";
 const MAKE_LENGTHS = [15, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1200, 1800, 2400, 3000, 3600];
@@ -54,7 +55,7 @@ export default function StudioPlus() {
   const [keepAll, setKeepAll] = useState(false);
   const [aspect, setAspect] = useState<Aspect>("16:9");
   const [matchSource, setMatchSource] = useState(true);
-  const [design, setDesign] = useState<"ai" | "mixed" | "library">("ai");
+  const design = "ai" as const;
   const [quality, setQuality] = useState<"720p" | "1080p">("720p");
   const [voice, setVoice] = useState(false);
   const [captions, setCaptions] = useState(true);
@@ -127,7 +128,9 @@ export default function StudioPlus() {
           source = { kind: "upload", path: d.path as string, name: file.name };
         } else source = { kind: "url", url: link.trim(), name: link.trim().split("/").pop()?.slice(0, 60) };
       }
-      const seconds = mode === "make" ? MAKE_LENGTHS[lenIdx] : EDIT_LENGTHS[editIdx];
+      // a length written in the brief ("make 45 second") always wins over the slider
+      const asked = findSeconds(brief);
+      const seconds = asked ? Math.min(mode === "make" ? 3600 : 1200, Math.max(15, asked)) : mode === "make" ? MAKE_LENGTHS[lenIdx] : EDIT_LENGTHS[editIdx];
       const p: VenusProject = {
         id: pid, title: brief.trim().slice(0, 48), brief: brief.trim(), seconds, aspect: mode === "edit" && matchSource ? "16:9" : aspect, theme: "midnight",
         voice: voice && Boolean(voiceInfo?.ready), voiceName: "system", captions, quality, review: true, design, music: mode === "edit" ? music : music, origin: "venus",
@@ -184,7 +187,7 @@ export default function StudioPlus() {
 
             <div className="mt-3 grid grid-cols-2 gap-2">
               {mode === "make" ? (
-                <label className="col-span-2 text-[11px] text-muted">Length: {label(MAKE_LENGTHS[lenIdx])}
+                <label className="col-span-2 text-[11px] text-muted">Length: {findSeconds(brief) ? label(Math.min(3600, Math.max(15, findSeconds(brief) as number))) + " (from your brief)" : label(MAKE_LENGTHS[lenIdx])}
                   <input type="range" min={0} max={MAKE_LENGTHS.length - 1} step={1} value={lenIdx} disabled={running} onChange={(e) => setLenIdx(Number(e.target.value))} className="mt-1 w-full accent-[#E7B24D]" />
                   {MAKE_LENGTHS[lenIdx] > 120 && <span className="block text-[11px] text-faint">Long videos are planned in chapters and rendered in parts. Allow about 1 hour of work for every 3–5 minutes of video.</span>}
                 </label>
@@ -201,7 +204,7 @@ export default function StudioPlus() {
               {!(mode === "edit" && matchSource) && (
                 <select value={aspect} disabled={running} onChange={(e) => setAspect(e.target.value as Aspect)} className={input}>{(Object.keys(ASPECTS) as Aspect[]).map((a) => <option key={a} value={a}>{ASPECTS[a].label}</option>)}</select>
               )}
-              <select value={design} disabled={running} onChange={(e) => setDesign(e.target.value as "ai" | "mixed" | "library")} className={input}><option value="ai">AI designs everything (new scenes, backgrounds, characters)</option><option value="mixed">Mixed (ready scenery + AI hero scenes)</option><option value="library">Library only (fastest)</option></select>
+              <div className="col-span-2 rounded-lg border border-line px-3 py-2 text-[11px] text-muted">Every video is designed by the agent: new scenes, backgrounds and characters for your topic.</div>
               <select value={quality} disabled={running} onChange={(e) => setQuality(e.target.value as "720p" | "1080p")} className={input}><option value="720p">720p</option><option value="1080p">1080p</option></select>
             </div>
 
