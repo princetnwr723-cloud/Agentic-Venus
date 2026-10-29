@@ -101,9 +101,16 @@ export const domainCount = (t: string) => DOMAINS.filter((r) => r.test(t)).lengt
 export function guessVenusOptions(brief: string): { seconds: number; aspect: "16:9" | "9:16" | "1:1" } {
   const b = brief.toLowerCase();
   const aspect = /9:16|reel|shorts?|tiktok|vertical|story/.test(b) ? "9:16" : /1:1|square/.test(b) ? "1:1" : "16:9";
+  const WORDS: Record<string, number> = { a: 1, an: 1, one: 1, ek: 1, two: 2, do: 2, three: 3, teen: 3, four: 4, char: 4, five: 5, panch: 5, paanch: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, das: 10, fifteen: 15, twenty: 20, thirty: 30, half: 0.5 };
+  const num = (v: string) => (/^[\d.]+$/.test(v) ? Number(v) : WORDS[v] ?? NaN);
+  const NUM = "(\\d+(?:\\.\\d+)?|a|an|one|ek|two|do|three|teen|four|char|five|panch|paanch|six|seven|eight|nine|ten|das|fifteen|twenty|thirty|half)";
   let seconds = 30;
-  const m = /(\d{2})\s*(?:s\b|sec|second)/.exec(b);
-  if (m) seconds = Number(m[1]);
-  else if (/(1|one|a)\s*minute|60\s*s/.test(b)) seconds = 60;
-  return { seconds: Math.min(60, Math.max(15, seconds)), aspect };
+  const hr = new RegExp(NUM + "\\s*(?:hours?|hrs?|ghante|ghanta|घंटे|घंटा)").exec(b);
+  const mn = new RegExp(NUM + "\\s*(?:minutes?|mins?|minat|minute|मिनट)").exec(b);
+  const sc = new RegExp(NUM + "\\s*(?:seconds?|secs?|s\\b|सेकंड|second)").exec(b);
+  if (hr && Number.isFinite(num(hr[1]))) seconds = num(hr[1]) * 3600;
+  else if (mn && Number.isFinite(num(mn[1]))) seconds = num(mn[1]) * 60 + (sc && Number.isFinite(num(sc[1])) ? num(sc[1]) : 0);
+  else if (sc && Number.isFinite(num(sc[1]))) seconds = num(sc[1]);
+  // videos can be up to one hour long
+  return { seconds: Math.min(3600, Math.max(15, Math.round(seconds))), aspect };
 }
