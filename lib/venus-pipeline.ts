@@ -387,7 +387,9 @@ export async function renderKind(run: Run, kind: "preview" | "final" | "scene", 
 async function ttsPatch(run: Run, sb: Storyboard, index: number): Promise<Partial<Scene> | null> {
   const narration = String(sb.scenes[index].narration ?? "").trim();
   if (!narration) return null;
-  const t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: run.p.voiceName });
+  // the default voice name of old projects ("nova") is not a choice: the owner's voice system decides
+  const legacy = ["nova", "alloy", "echo", "fable", "onyx", "shimmer", "system", ""];
+  const t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: legacy.includes(String(run.p.voiceName ?? "")) ? "system" : run.p.voiceName, chatId: run.p.chatId });
   const s = sb.scenes[index];
   return { voice: t.file, seconds: t.seconds ? Math.min(30, Math.max(Number(s.seconds), Math.round((t.seconds + 0.6) * 10) / 10)) : s.seconds };
 }
@@ -447,8 +449,11 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     if (todo("script")) {
       check(run);
       await upd(run, { stage: "script" });
-      const voiceOn = run.p.voice ? Boolean((await mediaCall(env, "voice-status").catch(() => ({ ready: false }))).ready) : false;
-      if (run.p.voice && !voiceOn) say("ℹ️ No voice provider is connected (Settings → Voice), so there will be no voice-over.");
+      const aiOwn = true; // every video is designed by the agent
+      // "add a voice-over" in the brief is enough (the chat only switched it on when an OpenAI key existed)
+      const wantsVoice = run.p.voice || /(voice[\s-]?over|voiceover|narrat|dubb|awaaz|avaaz|आवाज|वॉइस|वॉयस)/i.test(run.p.brief);
+      const voiceOn = wantsVoice ? Boolean((await mediaCall(env, "voice-status").catch(() => ({ ready: true }))).ready) : false;
+      if (wantsVoice && !voiceOn) say("ℹ️ No voice provider is connected (Settings → Voice), so there will be no voice-over.");
       if (voiceOn !== run.p.voice) await upd(run, { voice: voiceOn });
       const style = STYLES[Math.floor(Math.random() * STYLES.length)];
       const twist = TWISTS[Math.floor(Math.random() * TWISTS.length)];
@@ -490,7 +495,6 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         // ---------- a long video (up to one hour): chapter plan first, then every chapter is written on its own ----------
         say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
         hooks.progress({ label: "Chapter plan", value: null });
-        const aiOwn = (run.p.design ?? "ai") === "ai";
         const ctx = memory + (aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
         const ob = { kind: "outline", brief: run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, context: ctx };
         let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
@@ -508,7 +512,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
             const ch = chapters[k];
             const pb = {
               kind: "storyboard", brief: run.p.brief, seconds: ch.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, captions: run.p.captions,
-              design: run.p.design ?? "ai", context: memory + assetsNote, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
+              design: "ai", context: memory + assetsNote, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
             };
             let r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
             if (!r.storyboard) r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
@@ -534,20 +538,19 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         hooks.progress({ label: "Storyboard", value: null });
         const context =
           memory +
-          ((run.p.design ?? "ai") === "ai"
+          (aiOwn
             ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject, and it must not look like a template video): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.`
             : `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.`) +
           assetsNote;
         const body = {
           kind: "storyboard", brief: run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
-          voice: voiceOn, captions: run.p.captions, design: run.p.design ?? "ai", context,
+          voice: voiceOn, captions: run.p.captions, design: "ai", context,
         };
         let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
         if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
         if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
         const sbNew = r.storyboard as Storyboard;
         sbNew.seed = rndSeed();
-        const aiOwn = (run.p.design ?? "ai") === "ai";
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
@@ -720,7 +723,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
 
     reflect({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }, { apiKeys: env.apiKeys, provider: run.p.provider, model: run.p.model }, brain, {
       task: `Make a video: ${run.p.brief}`,
-      outcome: `Finished a ${run.p.seconds}s ${run.p.aspect} video "${run.p.title}" (${run.p.design ?? "ai"} design).`,
+      outcome: `Finished a ${run.p.seconds}s ${run.p.aspect} video "${run.p.title}" (AI design).`,
     }).then((l) => { if (l.length) say("🧠 Learned: " + l.join("; ")); }).catch(() => {});
   } catch (e) {
     const msg = e instanceof Error ? e.message : "The pipeline failed.";
