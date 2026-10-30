@@ -1,5 +1,9 @@
 // Single source of truth for plans. Safe to import from client AND server code.
 //
+// Prices are chosen so every step up costs LESS per 1x of usage than the plan below it:
+//   Pro $1.90 per 1x, Plus $1.63, Max $0.33, Max 2x $0.30, Ultra $0.04.
+// If you change a price here, change the Gumroad product price too, they must match.
+//
 // Limits are written as multipliers ("x") of the Free plan, not as fixed numbers:
 //   Free 1x -> Pro 10x Free -> Plus 3x Pro -> Max 10x Plus -> Max 2x is 2x Max -> Ultra is 20x Max 2x.
 // To change every limit at once, edit BASE below. To change a step of the ladder, edit its "x" in STEPS.
@@ -29,8 +33,8 @@ export const WINDOW_HOURS = 5;
 
 /** What the Free plan (1x) gets. Every other plan is a multiple of this. */
 const BASE = {
-  tokens: 100_000, // AI tokens per window (metering only)
-  pcSeconds: 12 * 60, // computer-agent time per window
+  tokens: 300_000, // AI tokens per window (metering only): enough to really try one website build or one video
+  pcSeconds: 20 * 60, // computer-agent time per window: one real session
   videos: 1, // Venus Pro videos per day
   sites: 1, // Venus Code websites per day
 };
@@ -49,9 +53,9 @@ type Step = {
 const STEPS: Step[] = [
   { id: "free", name: "Free", price: 0, tagline: "Try the team. No card needed.", x: 1, early: 0 },
   { id: "pro", name: "Pro", price: 19, tagline: "Your first real teammate.", x: 10, early: 1, earlyText: "Early access: small new features first" },
-  { id: "plus", name: "Plus", price: 59, tagline: "Run a small team.", badge: "Most popular", x: 3, early: 2, earlyText: "Early access: beta features" },
+  { id: "plus", name: "Plus", price: 49, tagline: "Run a small team.", badge: "Most popular", x: 3, early: 2, earlyText: "Early access: beta features" },
   { id: "max", name: "Max", price: 100, tagline: "Work like a company.", x: 10, early: 3, earlyText: "Early access: new features and tools" },
-  { id: "max2x", name: "Max 2x", price: 200, tagline: "Double the horsepower.", x: 2, early: 4, earlyText: "Early access: new models as they ship" },
+  { id: "max2x", name: "Max 2x", price: 180, tagline: "Double the horsepower.", x: 2, early: 4, earlyText: "Early access: new models as they ship" },
   {
     id: "ultra", name: "Ultra", price: 500, tagline: "The biggest limits. First in line.", x: 20, early: 5,
     earlyText: "Early access: AgenticVenus FOUNT, our upcoming agentic model (when it launches)",
