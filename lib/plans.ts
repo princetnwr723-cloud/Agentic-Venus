@@ -1,4 +1,8 @@
 // Single source of truth for plans. Safe to import from client AND server code.
+//
+// Limits are written as multipliers ("x") of the Free plan, not as fixed numbers:
+//   Free 1x -> Pro 10x Free -> Plus 3x Pro -> Max 10x Plus -> Max 2x is 2x Max -> Ultra is 20x Max 2x.
+// To change every limit at once, edit BASE below. To change a step of the ladder, edit its "x" in STEPS.
 
 export type PlanId = "free" | "pro" | "plus" | "max" | "max2x" | "ultra";
 
@@ -8,114 +12,96 @@ export type PlanDef = {
   price: number; // USD per month
   tagline: string;
   badge?: string;
-  tokens: number | null; // AI tokens per window (null = unlimited)
+  mult: number; // how many times the Free plan's allowance this plan gets (Pro = 10, Plus = 30, ...)
+  rel: string; // the hint shown to people: "1x", "10x Free", "3x Pro", ...
+  tokens: number | null; // AI tokens per window, used for metering only (UI shows percentages). null = unlimited
   pcSeconds: number | null; // computer-agent seconds per window (null = unlimited)
-  windowHours: number; // how often the allowance refreshes
+  alwaysOn: boolean; // the computer-agent allowance covers the whole window
+  windowHours: number; // every plan refreshes on the same window, like Claude Free (5 hours)
+  videosPerDay: number; // Venus Pro: finished videos per rolling 24 hours
+  sitesPerDay: number; // Venus Code: websites / projects built per rolling 24 hours
   earlyLevel: number; // 0 = none. Gate future features with hasEarly(plan, level)
   perks: string[];
 };
 
-const H = 3600;
+/** Claude Free has no fixed message count: it is a session limit that resets every 5 hours. Same here. */
+export const WINDOW_HOURS = 5;
 
-export const PLANS: PlanDef[] = [
+/** What the Free plan (1x) gets. Every other plan is a multiple of this. */
+const BASE = {
+  tokens: 100_000, // AI tokens per window (metering only)
+  pcSeconds: 12 * 60, // computer-agent time per window
+  videos: 1, // Venus Pro videos per day
+  sites: 1, // Venus Code websites per day
+};
+
+type Step = {
+  id: PlanId;
+  name: string;
+  price: number;
+  tagline: string;
+  badge?: string;
+  x: number; // times the plan BEFORE it (ignored for Free)
+  early: number;
+  earlyText?: string;
+};
+
+const STEPS: Step[] = [
+  { id: "free", name: "Free", price: 0, tagline: "Try the team. No card needed.", x: 1, early: 0 },
+  { id: "pro", name: "Pro", price: 19, tagline: "Your first real teammate.", x: 10, early: 1, earlyText: "Early access: small new features first" },
+  { id: "plus", name: "Plus", price: 59, tagline: "Run a small team.", badge: "Most popular", x: 3, early: 2, earlyText: "Early access: beta features" },
+  { id: "max", name: "Max", price: 100, tagline: "Work like a company.", x: 10, early: 3, earlyText: "Early access: new features and tools" },
+  { id: "max2x", name: "Max 2x", price: 200, tagline: "Double the horsepower.", x: 2, early: 4, earlyText: "Early access: new models as they ship" },
   {
-    id: "free",
-    name: "Free",
-    price: 0,
-    tagline: "Try the team. No card needed.",
-    tokens: 100_000,
-    pcSeconds: 1 * H,
-    windowHours: 24,
-    earlyLevel: 0,
-    perks: [
-      "100k AI tokens per day",
-      "1 hour of computer agent per day",
-      "Chat, memory and skills",
-      "Bring your own AI keys",
-    ],
-  },
-  {
-    id: "pro",
-    name: "Pro",
-    price: 19,
-    tagline: "Your first real teammate.",
-    tokens: 250_000,
-    pcSeconds: 2 * H,
-    windowHours: 6,
-    earlyLevel: 1,
-    perks: [
-      "250k AI tokens every 6 hours",
-      "2 hours of computer agent every 6 hours",
-      "Everything in Free",
-      "Early access: small new features first",
-    ],
-  },
-  {
-    id: "plus",
-    name: "Plus",
-    price: 59,
-    tagline: "Run a small team.",
-    badge: "Most popular",
-    tokens: 500_000,
-    pcSeconds: 3 * H,
-    windowHours: 6,
-    earlyLevel: 2,
-    perks: [
-      "500k AI tokens every 6 hours",
-      "3 hours of computer agent every 6 hours",
-      "Everything in Pro",
-      "Early access: beta features",
-    ],
-  },
-  {
-    id: "max",
-    name: "Max",
-    price: 100,
-    tagline: "Work like a company.",
-    tokens: 1_000_000,
-    pcSeconds: 4 * H,
-    windowHours: 6,
-    earlyLevel: 3,
-    perks: [
-      "1M AI tokens every 6 hours",
-      "4 hours of computer agent every 6 hours",
-      "Everything in Plus",
-      "Early access: new features and tools",
-    ],
-  },
-  {
-    id: "max2x",
-    name: "Max 2x",
-    price: 200,
-    tagline: "Double the horsepower.",
-    tokens: 2_000_000,
-    pcSeconds: 6 * H, // a 6-hour window cannot hold more: this is "always on"
-    windowHours: 6,
-    earlyLevel: 4,
-    perks: [
-      "2M AI tokens every 6 hours",
-      "Computer agent always on (6 of every 6 hours)",
-      "Everything in Max",
-      "Early access: new models as they ship",
-    ],
-  },
-  {
-    id: "ultra",
-    name: "Ultra",
-    price: 500,
-    tagline: "No limits. First in line.",
-    tokens: null,
-    pcSeconds: null,
-    windowHours: 6,
-    earlyLevel: 5,
-    perks: [
-      "Unlimited AI tokens",
-      "Unlimited computer agent time",
-      "Everything in Max 2x",
-      "Early access: AgenticVenus FOUNT, our upcoming agentic model (when it launches)",
-    ],
+    id: "ultra", name: "Ultra", price: 500, tagline: "The biggest limits. First in line.", x: 20, early: 5,
+    earlyText: "Early access: AgenticVenus FOUNT, our upcoming agentic model (when it launches)",
   },
 ];
+
+const num = (n: number) => n.toLocaleString("en-US");
+/** 30 -> "30x" */
+export const fmtMult = (n: number) => `${num(n)}x`;
+const plural = (n: number, one: string) => `${num(n)} ${one}${n === 1 ? "" : "s"}`;
+
+export const PLANS: PlanDef[] = STEPS.reduce<PlanDef[]>((list, s, i) => {
+  const prev = i > 0 ? STEPS[i - 1] : null;
+  const mult = prev ? list[i - 1].mult * s.x : 1;
+  const rel = prev ? `${fmtMult(s.x)} ${prev.name}` : "1x";
+  const windowSeconds = WINDOW_HOURS * 3600;
+  const wantedPc = BASE.pcSeconds * mult;
+  const alwaysOn = wantedPc >= windowSeconds;
+  const videosPerDay = BASE.videos * mult;
+  const sitesPerDay = BASE.sites * mult;
+
+  const perks = [
+    prev ? (prev.id === "free" ? `${rel} usage limits` : `${rel} usage limits (${fmtMult(mult)} Free)`) : `1x usage, refreshes every ${WINDOW_HOURS} hours`,
+    alwaysOn ? "Computer agent: always on" : `Computer agent time: ${fmtMult(mult)} Free`,
+    `${plural(videosPerDay, "video")} per day with Venus Pro`,
+    `${plural(sitesPerDay, "website")} per day with Venus Code`,
+    prev ? `Everything in ${prev.name}` : "Chat, memory and skills",
+    ...(prev ? [] : ["Bring your own AI keys"]),
+    ...(s.earlyText ? [s.earlyText] : []),
+  ];
+
+  list.push({
+    id: s.id,
+    name: s.name,
+    price: s.price,
+    tagline: s.tagline,
+    ...(s.badge ? { badge: s.badge } : {}),
+    mult,
+    rel,
+    tokens: BASE.tokens * mult,
+    pcSeconds: Math.min(wantedPc, windowSeconds),
+    alwaysOn,
+    windowHours: WINDOW_HOURS,
+    videosPerDay,
+    sitesPerDay,
+    earlyLevel: s.early,
+    perks,
+  });
+  return list;
+}, []);
 
 export const planById = (id: string): PlanDef => PLANS.find((p) => p.id === id) ?? PLANS[0];
 export const isPaid = (id: string) => PLANS.some((p) => p.id === id && p.price > 0);
