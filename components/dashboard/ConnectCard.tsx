@@ -91,6 +91,7 @@ export default function ConnectCard({ card }: { card: ConnectCardData }) {
           </a>
           <p className="mt-2 text-[11px] leading-relaxed text-muted">
             {clicked ? "Finish signing in on the new tab. This turns green by itself when it is done." : "A new tab opens on the official page. You sign in there; the agent never sees your password."}
+            <span className="mt-1 block text-faint">Not the right service? Tell the agent its MCP address.</span>
           </p>
         </>
       )}
