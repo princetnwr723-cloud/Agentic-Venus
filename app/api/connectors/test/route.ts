@@ -3,6 +3,8 @@ import { readBody, requestStatus } from "@/lib/request";
 import { assertPublicHost, assertPublicUrl, http } from "@/lib/tools/net";
 import { mcpList, McpAuthError } from "@/lib/tools/mcp-client";
 import { unpack } from "@/lib/tools/catalog";
+import { testApi } from "@/lib/tools/connect";
+import { findPreset, type ApiPayload } from "@/lib/tools/api-presets";
 import { WA_SANDBOX, sendTelegram, signChannelToken, telegramSecret } from "@/lib/channels";
 import { appBaseUrl, getResolvedVoiceSecrets } from "@/lib/voice-server";
 
@@ -116,11 +118,12 @@ export async function POST(req: Request) {
       }
     }
     if (k.startsWith("api:")) {
-      let cfg: { baseUrl?: string; header?: string; value?: string } = {};
-      try { cfg = JSON.parse(t); } catch { return bad("Bad API settings."); }
-      const u = assertPublicUrl(cfg.baseUrl ?? "");
-      const r = await http(u.toString(), { headers: cfg.header && cfg.value ? { [cfg.header]: cfg.value } : {} });
-      return r.status < 500 ? ok(`reachable (HTTP ${r.status})`) : bad(`The server answered HTTP ${r.status}.`);
+      let cfg: ApiPayload | null = null;
+      try { cfg = JSON.parse(t) as ApiPayload; } catch { return bad("Bad API settings."); }
+      if (!cfg?.baseUrl) return bad("Base URL is missing.");
+      // A 401 / 403 now means "wrong key" (it used to count as reachable), so a bad key is reported at once.
+      const r = await testApi(cfg, findPreset(k.slice(4))?.testPath);
+      return r.ok ? ok(r.note) : bad(r.note);
     }
     return bad("Unknown connector.");
   } catch (err) {
