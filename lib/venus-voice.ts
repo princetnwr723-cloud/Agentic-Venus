@@ -37,12 +37,13 @@ async function context(uid: string): Promise<Ctx> {
   return { s, keys, openai, localOk };
 }
 
+/** A voice key is used when one exists: the provider chosen in Settings -> Voice, otherwise any provider that has a key. Without a key the local model speaks. */
 function cloudProvider(c: Ctx): "openai" | "elevenlabs" | "deepgram" | "gemini" | null {
   const p = c.s.ttsProvider ?? "twilio";
-  if (p === "openai" && c.openai) return "openai";
-  if (p === "elevenlabs" && c.keys.elevenLabsKey) return "elevenlabs";
-  if (p === "deepgram" && c.keys.deepgramKey) return "deepgram";
-  if (p === "gemini" && c.keys.geminiKey) return "gemini";
+  const has: Record<string, boolean> = { openai: Boolean(c.openai), elevenlabs: Boolean(c.keys.elevenLabsKey), deepgram: Boolean(c.keys.deepgramKey), gemini: Boolean(c.keys.geminiKey) };
+  if (has[p]) return p as "openai" | "elevenlabs" | "deepgram" | "gemini";
+  if (p === "local") return null; // the owner chose the local model: no key overrides that
+  for (const k of ["openai", "elevenlabs", "gemini", "deepgram"] as const) if (has[k]) return k;
   return null;
 }
 
@@ -50,9 +51,8 @@ function cloudProvider(c: Ctx): "openai" | "elevenlabs" | "deepgram" | "gemini" 
 export async function voiceStatus(uid: string): Promise<VoiceState> {
   const c = await context(uid);
   const cloud = cloudProvider(c);
-  if (cloud) return { ready: true, provider: cloud, voice: c.s.ttsVoice || (cloud === "openai" ? "alloy" : "default") };
-  if (c.localOk) return { ready: true, provider: "local", voice: c.s.ttsVoice || "local voice model", note: "Your local voice model speaks. If your PC is asleep, a free voice on the studio computer takes over." };
-  if (c.openai) return { ready: true, provider: "openai", voice: "nova", note: "No voice provider is chosen in Settings -> Voice, so OpenAI speaks." };
+  if (cloud) return { ready: true, provider: cloud, voice: c.s.ttsVoice || (cloud === "openai" ? "alloy" : "default"), note: c.s.ttsProvider === cloud ? undefined : "A voice key is available, so it is used." };
+  if (c.localOk) return { ready: true, provider: "local", voice: c.s.ttsVoice || "local voice model", note: "No voice key is available, so your local voice model speaks (the PC is woken and waited for)." };
   return { ready: true, provider: "studio-free", voice: "free neural voice", note: "No voice provider is connected, so a free voice on the studio computer speaks (Hindi and English)." };
 }
 
