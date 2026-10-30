@@ -1,10 +1,10 @@
-import { NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { resolveValue, vaultPut } from "@/lib/vault";
 import { appBaseUrl } from "@/lib/voice-server";
 import { exchangeCode } from "@/lib/tools/mcp-oauth";
 import { syncConnectorAnnouncements } from "@/lib/connector-announce";
+import { oauthResultPage } from "@/lib/oauth-result";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -15,11 +15,7 @@ function secret() {
   return v;
 }
 function back(req: Request, ok: boolean, message: string, extra: Record<string, string> = {}) {
-  const u = new URL("/dashboard", appBaseUrl(req));
-  u.searchParams.set("connector_oauth", ok ? "success" : "error");
-  u.searchParams.set("message", message.slice(0, 180));
-  for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v);
-  return NextResponse.redirect(u, 303);
+  return oauthResultPage(req, ok, message, { provider: extra.provider, chatId: extra.chatId });
 }
 
 export async function GET(req: Request) {
