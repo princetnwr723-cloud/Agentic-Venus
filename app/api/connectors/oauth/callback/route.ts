@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { vaultPut } from "@/lib/vault";
@@ -6,15 +5,13 @@ import { getOAuthProvider } from "@/lib/tools/oauth-catalog";
 import { identifyAccount } from "@/lib/tools/oauth-identify";
 import { extendToken, pkceVerifier, tokenRequest } from "@/lib/tools/oauth-token";
 import { syncConnectorAnnouncements } from "@/lib/connector-announce";
+import { oauthResultPage } from "@/lib/oauth-result";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 function secret() { const v = process.env.ROUTINE_RUNNER_SECRET; if (!v || v.length < 32) throw new Error("OAuth callback is not configured securely."); return v; }
 function fail(req: Request, message: string) {
-  const u = new URL("/dashboard", req.url);
-  u.searchParams.set("connector_oauth", "error");
-  u.searchParams.set("message", message.slice(0, 180));
-  return NextResponse.redirect(u, 303);
+  return oauthResultPage(req, false, message);
 }
 
 export async function GET(req: Request) {
@@ -89,10 +86,6 @@ export async function GET(req: Request) {
     });
     await syncConnectorAnnouncements(d.uid, d.chatId, { added: [`oauth:${provider.id}`] }).catch(() => {}); // posts "Agent updated" in the chat
 
-    const done = new URL("/dashboard", req.url);
-    done.searchParams.set("connector_oauth", "success");
-    done.searchParams.set("provider", provider.id);
-    done.searchParams.set("chatId", d.chatId);
-    return NextResponse.redirect(done);
+    return oauthResultPage(req, true, `${provider.label} connected.`, { provider: provider.id, chatId: d.chatId });
   } catch (e) { return fail(req, e instanceof Error ? e.message : "OAuth callback failed."); }
 }
