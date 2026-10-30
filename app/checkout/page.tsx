@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Check, Loader2, Lock } from "lucide-react";
 import Logo from "@/components/Logo";
 import { useAuth } from "@/lib/auth-context";
-import { fmtDuration, fmtTokens, fullName, isPaid, planById, type PlanId } from "@/lib/plans";
+import { fullName, isPaid, planById, type PlanId } from "@/lib/plans";
 
 type Phase = "idle" | "opening" | "waiting" | "done" | "error";
 
@@ -132,8 +132,8 @@ export default function CheckoutPage() {
                 ))}
               </ul>
               <div className="mt-6 grid grid-cols-2 gap-3 text-xs">
-                <div className="rounded-lg border border-line bg-bg p-3"><p className="text-faint">AI tokens</p><p className="mt-0.5 text-sm font-medium text-ink">{fmtTokens(plan.tokens)} / {plan.windowHours}h</p></div>
-                <div className="rounded-lg border border-line bg-bg p-3"><p className="text-faint">Computer agent</p><p className="mt-0.5 text-sm font-medium text-ink">{fmtDuration(plan.pcSeconds)}{plan.pcSeconds !== null ? ` / ${plan.windowHours}h` : ""}</p></div>
+                <div className="rounded-lg border border-line bg-bg p-3"><p className="text-faint">Usage limits</p><p className="mt-0.5 text-sm font-medium text-ink">{plan.rel}</p></div>
+                <div className="rounded-lg border border-line bg-bg p-3"><p className="text-faint">Videos &amp; websites</p><p className="mt-0.5 text-sm font-medium text-ink">{plan.videosPerDay.toLocaleString("en-US")} / day each</p></div>
               </div>
             </section>
 
