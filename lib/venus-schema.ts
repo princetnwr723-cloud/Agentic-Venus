@@ -46,7 +46,7 @@ export type SourceInfo = { path: string; name?: string; duration: number; width:
 export type TranscriptSeg = { s: number; e: number; t: string };
 export type Storyboard = {
   title: string; concept?: string; fps: number; width: number; height: number; theme: string;
-  seed?: number; safe?: boolean; bg?: Record<string, unknown>; grade?: string; source?: SourceInfo; transcript?: TranscriptSeg[];
+  seed?: number; safe?: boolean; sound?: { voiceover: boolean; music: boolean; why?: string }; bg?: Record<string, unknown>; grade?: string; source?: SourceInfo; transcript?: TranscriptSeg[];
   palette?: Record<string, string>; fonts?: { display?: string; body?: string };
   audio?: { mood: string; bpm?: number };
   music?: string; sfx?: string; captions: boolean; scenes: Scene[];
@@ -322,6 +322,9 @@ export function sanitizeStoryboard(
   return {
     ...(Number.isFinite(seedIn) && seedIn > 0 ? { seed: Math.floor(seedIn) % 1000000 } : {}),
     ...(r.safe === true ? { safe: true } : {}),
+    ...(r.sound && typeof r.sound === "object"
+      ? { sound: { voiceover: (r.sound as Record<string, unknown>).voiceover !== false, music: (r.sound as Record<string, unknown>).music !== false, why: String((r.sound as Record<string, unknown>).why ?? "").slice(0, 160) } }
+      : {}),
     ...(bg && bg !== "none" ? { bg } : {}),
     ...(grade ? { grade } : {}),
     ...(source ? { source } : {}),
