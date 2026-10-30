@@ -9,7 +9,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { RequestError } from "@/lib/request";
-import { fmtDuration, fmtTokens, nextPlan, planById, type PlanDef, type PlanId } from "@/lib/plans";
+import { PLANS, fmtDuration, nextPlan, planById, type PlanDef, type PlanId } from "@/lib/plans";
 
 const db = () => getAdminDb();
 const base = (uid: string) => db().collection("users").doc(uid).collection("billing");
@@ -46,9 +46,10 @@ export type PlanDoc = {
   updatedAt?: number;
 };
 type Open = { sandboxId: string; since: number; seen: number };
-type UsageDoc = { windowStart?: number; tokens?: number; pcSeconds?: number; pcOpen?: Record<string, Open> };
+type FeatDoc = { since?: number; count?: number; recent?: string[] };
+type UsageDoc = { windowStart?: number; tokens?: number; pcSeconds?: number; pcOpen?: Record<string, Open>; feat?: Record<string, FeatDoc> };
 type Norm = { windowStart: number; tokens: number; pcSeconds: number; pcOpen: Record<string, Open> };
-type Ctx = { plan: PlanDef; n: Norm; now: number; patch: Record<string, unknown>; doc: PlanDoc | undefined; dirty: boolean };
+type Ctx = { plan: PlanDef; n: Norm; now: number; patch: Record<string, unknown>; doc: PlanDoc | undefined; dirty: boolean; feat: Record<string, FeatDoc> | undefined };
 type Sale = Record<string, any>;
 
 export const estTokens = (chars: number) => Math.ceil(Math.max(0, chars) / 4);
@@ -85,7 +86,7 @@ async function tx<T>(uid: string, fn: (c: Ctx) => T): Promise<T> {
     const plan = planById(effectivePlan(doc, now));
     const stored = us.data() as UsageDoc | undefined;
     const n = norm(stored, plan, now);
-    const c: Ctx = { plan, n, now, patch: {}, doc, dirty: false };
+    const c: Ctx = { plan, n, now, patch: {}, doc, dirty: false, feat: stored?.feat };
     const out = fn(c);
     const rolled = !stored || n.windowStart !== Number(stored.windowStart);
     if (rolled || c.dirty || Object.keys(c.patch).length > 0) {
@@ -206,28 +207,78 @@ export const listOpenPcJobs = async (uid: string): Promise<Record<string, Open>>
   }
 };
 
+// ---------------- daily features: Venus Pro videos and Venus Code websites ----------------
+export type Feature = "video" | "site";
+const FEATURE_LABEL: Record<Feature, string> = { video: "Video", site: "Website" };
+const featureLimitOf = (plan: PlanDef, kind: Feature) => (kind === "video" ? plan.videosPerDay : plan.sitesPerDay);
+
+/**
+ * Counts one video / website for today (a rolling 24 hours that starts with the first one).
+ * The same key (a video project id, a code workspace id) is counted only once, so working on the same thing again is free.
+ * Throws a 402 limit error when today's allowance is used up.
+ */
+export async function consumeFeature(uid: string, kind: Feature, key: string): Promise<void> {
+  if (!uid || isUnlimitedTestUser(uid)) return;
+  const id = String(key || "default").slice(0, 120);
+  await failOpen(
+    db().runTransaction(async (t) => {
+      const [ps, us] = await Promise.all([t.get(planRef(uid)), t.get(usageRef(uid))]);
+      const now = Date.now();
+      const plan = planById(effectivePlan(ps.data() as PlanDoc | undefined, now));
+      const stored = ((us.data() as UsageDoc | undefined)?.feat ?? {})[kind];
+      const live = Boolean(stored?.since) && now - Number(stored?.since) < DAY;
+      const since = live ? Number(stored?.since) : now;
+      const count = live ? Number(stored?.count) || 0 : 0;
+      const recent = live ? stored?.recent ?? [] : [];
+      if (recent.includes(id)) return;
+      const limit = featureLimitOf(plan, kind);
+      if (count >= limit) {
+        const nx = nextPlan(plan.id);
+        throw new RequestError(
+          `${FEATURE_LABEL[kind]} limit reached on the ${plan.name} plan (${limit.toLocaleString("en-US")} per day). It refreshes in ${fmtDuration(Math.max(60, (since + DAY - now) / 1000))}.${nx ? ` Upgrade to ${nx.name} in Settings → Plans.` : ""}`,
+          402
+        );
+      }
+      t.set(usageRef(uid), { feat: { [kind]: { since, count: count + 1, recent: [...recent, id].slice(-50) } } }, { merge: true });
+    }),
+    undefined
+  );
+}
+
+const featureState = (c: Ctx, kind: Feature, unlimited: boolean) => {
+  const f = c.feat?.[kind];
+  const live = Boolean(f?.since) && c.now - Number(f?.since) < DAY;
+  return {
+    used: live ? Number(f?.count) || 0 : 0,
+    limit: unlimited ? null : featureLimitOf(c.plan, kind),
+    resetsAt: live ? Number(f?.since) + DAY : null,
+  };
+};
+
+const pct = (used: number, limit: number | null) => (limit ? Math.min(100, Math.round((used / limit) * 100)) : 0);
+
 // ---------------- what the UI shows ----------------
 export async function billingSummary(uid: string) {
-  if (isUnlimitedTestUser(uid)) {
-    return tx(uid, (c) => ({
-      plan: c.plan.id, status: c.doc?.status ?? "none", cancelled: Boolean(c.doc?.cancelled),
-      renewsAt: c.doc?.renewsAt ?? null, windowHours: c.plan.windowHours,
+  const unlimited = isUnlimitedTestUser(uid);
+  return tx(uid, (c) => {
+    const tokenLimit = unlimited ? null : c.plan.tokens;
+    const pcLimit = unlimited ? null : c.plan.pcSeconds;
+    return {
+      plan: c.plan.id,
+      status: c.doc?.status ?? "none",
+      cancelled: Boolean(c.doc?.cancelled),
+      renewsAt: c.doc?.renewsAt ?? null,
+      mult: c.plan.mult,
+      rel: c.plan.rel,
+      windowHours: c.plan.windowHours,
       windowEndsAt: c.n.windowStart + c.plan.windowHours * 3600_000,
-      tokens: { used: Math.round(c.n.tokens), limit: null },
-      pc: { usedSeconds: Math.round(pcUsed(c)), limitSeconds: null }, label: "Unlimited testing",
-    }));
-  }
-  return tx(uid, (c) => ({
-    plan: c.plan.id,
-    status: c.doc?.status ?? "none",
-    cancelled: Boolean(c.doc?.cancelled),
-    renewsAt: c.doc?.renewsAt ?? null,
-    windowHours: c.plan.windowHours,
-    windowEndsAt: c.n.windowStart + c.plan.windowHours * 3600_000,
-    tokens: { used: Math.round(c.n.tokens), limit: c.plan.tokens },
-    pc: { usedSeconds: Math.round(pcUsed(c)), limitSeconds: c.plan.pcSeconds },
-    label: `${fmtTokens(c.plan.tokens)} tokens`,
-  }));
+      tokens: { used: Math.round(c.n.tokens), limit: tokenLimit, pct: pct(c.n.tokens, tokenLimit) },
+      pc: { usedSeconds: Math.round(pcUsed(c)), limitSeconds: pcLimit, pct: pct(pcUsed(c), pcLimit), alwaysOn: c.plan.alwaysOn },
+      video: featureState(c, "video", unlimited),
+      site: featureState(c, "site", unlimited),
+      label: unlimited ? "Unlimited testing" : c.plan.rel,
+    };
+  });
 }
 
 // ---------------- checkout signature (ties a payment to a user) ----------------
@@ -268,15 +319,48 @@ const slugOf = (u: string): string => {
   }
 };
 
+/**
+ * Optional, the most reliable way to connect products to plans.
+ * GUMROAD_PRODUCT_MAP = {"bozaxq":"pro","abc123":"plus"}
+ * Key = any name Gumroad uses for the product (the code after /l/ in its link, its custom permalink, or its short id).
+ */
+function productMap(): Record<string, PlanId> {
+  try {
+    const raw = JSON.parse(process.env.GUMROAD_PRODUCT_MAP || "{}") as Record<string, string>;
+    const out: Record<string, PlanId> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      const slug = slugOf(k);
+      if (slug && PLANS.some((p) => p.id === v && p.price > 0)) out[slug] = v as PlanId;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** Gumroad names a product in several ways (URL, short slug, custom slug). Any of them may match. */
 export const planOfSlugs = (candidates: Array<string | undefined | null>): PlanId | null => {
   const wanted = new Set(candidates.map((c) => slugOf(String(c ?? ""))).filter(Boolean));
   if (!wanted.size) return null;
+  const map = productMap();
+  for (const w of wanted) if (map[w]) return map[w];
   for (const [plan, url] of Object.entries(links())) {
     if (wanted.has(slugOf(url))) return plan as PlanId;
   }
   return null;
 };
+
+/** Last resort: the product title says which plan it is, for example "AgenticVenus Pro" or "Venus Max 2x". */
+export function planOfName(name: unknown): PlanId | null {
+  const n = String(name ?? "").toLowerCase();
+  if (!n) return null;
+  if (/\bultra\b/.test(n)) return "ultra";
+  if (/\bmax\s*-?\s*2x\b|\bmax2x\b/.test(n)) return "max2x";
+  if (/\bmax\b/.test(n)) return "max";
+  if (/\bplus\b/.test(n)) return "plus";
+  if (/\bpro\b/.test(n)) return "pro";
+  return null;
+}
 
 async function gr(path: string): Promise<any> {
   const tok = process.env.GUMROAD_ACCESS_TOKEN;
@@ -303,7 +387,7 @@ export async function logEvent(kind: string, data: Record<string, unknown>) {
 /** Monthly sale -> 31 days, yearly sale -> 366 days. */
 export const periodOf = (sale: Sale): number => (/year/i.test(String(sale.recurrence ?? "")) ? 366 : 31) * DAY;
 
-/** Which plan did this sale buy? Tries every name Gumroad uses, then asks Gumroad for the product itself. */
+/** Which plan did this sale buy? Tries every name Gumroad uses, then the product itself, then the product title. */
 export async function planOfSale(
   sale: Sale,
   extraNames: Array<string | undefined | null> = [],
@@ -311,15 +395,20 @@ export async function planOfSale(
 ): Promise<PlanId | null> {
   const names = [sale.product_permalink, sale.permalink, sale.short_product_id, ...extraNames];
   const direct = planOfSlugs(names);
-  if (direct || !sale.product_id) return direct;
-  const pid = String(sale.product_id);
-  let product = productCache?.get(pid);
-  if (product === undefined) {
-    product = await fetchProduct(pid).catch(() => null);
-    productCache?.set(pid, product);
+  if (direct) return direct;
+
+  let product: Record<string, any> | null = null;
+  if (sale.product_id) {
+    const pid = String(sale.product_id);
+    const cached = productCache?.get(pid);
+    if (cached !== undefined) product = cached;
+    else {
+      product = await fetchProduct(pid).catch(() => null);
+      productCache?.set(pid, product);
+    }
   }
-  if (!product) return null;
-  return planOfSlugs([product.custom_permalink, product.short_url, product.url, product.id]);
+  const viaProduct = product ? planOfSlugs([product.custom_permalink, product.short_url, product.url, product.id]) : null;
+  return viaProduct ?? planOfName(sale.product_name) ?? planOfName(product?.name);
 }
 
 /** Email of a signed-up user, only when Firebase says the email is verified (so nobody can claim a stranger's purchase). */
