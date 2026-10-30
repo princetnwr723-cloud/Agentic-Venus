@@ -4,9 +4,26 @@ import { useEffect, useState } from "react";
 import { ExternalLink, Search, X } from "lucide-react";
 import { FREE_PACK, PLUGINS, safeId } from "@/lib/tools/catalog";
 import { OAUTH_PROVIDERS } from "@/lib/tools/oauth-catalog";
+import { apiPayload, findPreset } from "@/lib/tools/api-presets";
+import { brandDomain } from "@/lib/tools/brand";
+import { ServiceLogo } from "@/components/dashboard/ConnectCard";
 
 type TestResult = { ok: boolean; label?: string; error?: string; needsOAuth?: boolean; resourceMetadata?: string };
 type Hit = { name: string; title: string; description: string; url: string; auth: "oauth" | "token" | "none"; source: string };
+type CustomInfo = { type: "mcp" | "api"; host: string; url?: string; oauth: boolean };
+type Status = { broken: string[]; accounts: Record<string, string>; custom: Record<string, CustomInfo> };
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+const hostOf = (u: string) => { try { return new URL(u).hostname; } catch { return ""; } };
+
+function AutoToggle({ on, label, onChange }: { on: boolean; label: string; onChange: () => void }) {
+  return (
+    <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-muted">
+      <input type="checkbox" checked={on} onChange={onChange} />
+      {label}
+    </label>
+  );
+}
 
 export default function ConnectorsModal({
   open, onClose, chatName, chatId, connectors, onTest, onSave, getToken,
@@ -25,12 +42,18 @@ export default function ConnectorsModal({
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
   const [ctype, setCtype] = useState<"mcp" | "api">("mcp");
-  const [f, setF] = useState({ name: "", url: "", auth: "", desc: "", header: "Authorization", value: "" });
-  const [q, setQ] = useState("");
+  // Custom form: a name plus ONE thing (an MCP address or an API key). Everything else is optional.
+  const [name, setName] = useState("");
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpToken, setMcpToken] = useState("");
+  const [showTok, setShowTok] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [header, setHeader] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
   const [searching, setSearching] = useState(false);
   const [toks, setToks] = useState<Record<string, string>>({});
-  const [status, setStatus] = useState<{ broken: string[]; accounts: Record<string, string> }>({ broken: [], accounts: {} });
+  const [status, setStatus] = useState<Status>({ broken: [], accounts: {}, custom: {} });
   const [hint, setHint] = useState("");
 
   async function callStatus(sync: boolean) {
@@ -38,26 +61,23 @@ export default function ConnectorsModal({
       const token = await getToken();
       const res = await fetch("/api/connectors/status", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ chatId, sync }) });
       const d = await res.json();
-      if (res.ok) setStatus({ broken: d.broken ?? [], accounts: d.accounts ?? {} });
+      if (res.ok) setStatus({ broken: d.broken ?? [], accounts: d.accounts ?? {}, custom: d.custom ?? {} });
     } catch { /* the window still works without it */ }
   }
   useEffect(() => { if (open) void callStatus(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [open, chatId, connectors]);
   const close = () => { void callStatus(true); onClose(); }; // posts "Agent updated" in the chat if something changed
 
-  // MCP search: type a tool's name, a Connect button appears.
+  // Type a tool's name: matching MCP servers appear (small typos are fine).
   useEffect(() => {
-    if (!open || tab !== "custom" || ctype !== "mcp" || q.trim().length < 2) { setHits([]); return; }
+    if (!open || tab !== "custom" || ctype !== "mcp" || name.trim().length < 2) { setHits([]); return; }
     const h = setTimeout(async () => {
       setSearching(true);
-      try {
-        const r = await fetch("/api/connectors/mcp-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q }) });
-        const d = await r.json();
-        setHits(Array.isArray(d.results) ? d.results : []);
-      } catch { setHits([]); }
+      try { setHits(await searchMcp(name)); } catch { setHits([]); }
       setSearching(false);
     }, 400);
     return () => clearTimeout(h);
-  }, [q, tab, ctype, open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, tab, ctype, open]);
 
   if (!open) return null;
 
@@ -68,6 +88,11 @@ export default function ConnectorsModal({
     const token = await getToken();
     const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
     return { res, data: await res.json().catch(() => ({})) };
+  }
+
+  async function searchMcp(q: string): Promise<Hit[]> {
+    const { data } = await authedPost("/api/connectors/mcp-search", { q });
+    return Array.isArray(data.results) ? data.results : [];
   }
 
   async function startOAuth(provider: string) {
@@ -108,27 +133,52 @@ export default function ConnectorsModal({
     return r;
   }
 
-  const Toggle = ({ id, label }: { id: string; label: string }) => {
-    const on = connectors["auto:" + id] === "1";
-    return (
-      <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-muted">
-        <input type="checkbox" checked={on} onChange={() => onSave("auto:" + id, on ? "" : "1")} />
-        {label}
-      </label>
-    );
-  };
-
   const custom = Object.keys(connectors).filter((k) => k.startsWith("mcp:") || k.startsWith("api:"));
+  const preset = ctype === "api" ? findPreset(name) : undefined;
+  const needsBase = ctype === "api" && name.trim().length > 0 && !preset;
 
-  async function addCustom() {
-    const name = f.name.trim();
-    if (!name || !f.url.trim()) return say("custom", "Give it a name and a URL.");
-    const kind = `${ctype}:${safeId(name)}`;
-    const payload = ctype === "mcp"
-      ? JSON.stringify({ url: f.url.trim(), auth: f.auth.trim() || undefined })
-      : JSON.stringify({ baseUrl: f.url.trim(), header: f.value.trim() ? f.header.trim() : undefined, value: f.value.trim() || undefined, description: f.desc.trim() || name });
-    const r = await connect(kind, payload, "custom");
-    if (r.ok) setF({ name: "", url: "", auth: "", desc: "", header: "Authorization", value: "" });
+  // MCP: a name is enough for known tools. The server's own sign-in page does the rest.
+  async function addMcp() {
+    const nm = name.trim();
+    let url = mcpUrl.trim();
+    const tk = mcpToken.trim();
+    if (!nm && !url) return say("custom", "Type the tool's name, for example canva.");
+    setBusy("custom"); say("custom", "Looking it up…");
+    let idName = nm;
+    let auth: Hit["auth"] | undefined;
+    if (!url) {
+      let found: Hit[] = [];
+      try { found = await searchMcp(nm); } catch { /* handled below */ }
+      const q = norm(nm);
+      const hit = found.find((h) => norm(h.name) === q || norm(h.title) === q) ?? found.find((h) => h.source === "popular") ?? (found.length === 1 ? found[0] : undefined);
+      if (!hit) { say("custom", `I could not find “${nm}”. Paste its MCP address in the second box.`); setBusy(null); return; }
+      url = hit.url; idName = hit.name; auth = hit.auth;
+    } else if (!idName) idName = brandDomain(hostOf(url)).split(".")[0] || "mcp";
+    const kind = `mcp:${safeId(idName)}`;
+    if (!tk && auth === "oauth") { await startMcpOAuth(kind, url, "custom"); return; }
+    const r = await connect(kind, JSON.stringify({ url, auth: tk || undefined }), "custom");
+    if (r.ok) { setName(""); setMcpUrl(""); setMcpToken(""); setShowTok(false); }
+  }
+
+  // API key: connects directly. The check afterwards only reports; it never blocks.
+  async function addApi() {
+    const nm = name.trim();
+    const key = apiKey.trim();
+    if (!nm || !key) return say("custom", "Type the service name and paste the API key.");
+    let payload;
+    try { payload = apiPayload({ name: nm, key, preset, baseUrl, header }); }
+    catch (e) { return say("custom", e instanceof Error ? e.message : "Check the fields."); }
+    const kind = `api:${safeId(preset?.id ?? nm)}`;
+    const body = JSON.stringify(payload);
+    setBusy("custom"); say("custom", "Connecting…");
+    try { await onSave(kind, body); } catch { say("custom", "Could not save it."); setBusy(null); return; }
+    setApiKey(""); setName(""); setBaseUrl(""); setHeader("");
+    say("custom", "Connected. Checking the key…");
+    let r: TestResult;
+    try { r = await onTest(kind, body); } catch { r = { ok: false, error: "Could not check the key." }; }
+    await callStatus(true);
+    say("custom", r.ok ? `Connected · key accepted${r.label ? " (" + r.label + ")" : ""}.` : `Connected, but check the key: ${r.error || "the service did not accept it."}`);
+    setBusy(null);
   }
 
   return (
@@ -143,7 +193,7 @@ export default function ConnectorsModal({
             <button key={k} onClick={() => setTab(k)} className={`flex-1 rounded-full px-3 py-1.5 ${tab === k ? "bg-white font-medium text-bg" : "text-muted"}`}>{l}</button>
           ))}
         </div>
-        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Tokens are stored encrypted. Once connected, the agent automatically knows its tools and when to use them. Anything that sends or changes something outside asks for your approval first.</p>
+        <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Tokens are stored encrypted. Once connected, the agent automatically knows its tools and when to use them. Anything that sends or changes something outside asks for your approval first. You can also just write in the chat: “connect Canva”.</p>
 
         {tab === "plugins" ? (
           <div className="space-y-3">
@@ -201,7 +251,7 @@ export default function ConnectorsModal({
                       <div className="mt-2 flex items-center gap-3">
                         <button onClick={() => onSave(p.id, "")} className="rounded-md border border-line px-3 py-1.5 text-xs text-ink hover:bg-panel2">Disconnect</button>
                       </div>
-                      {hasWrite && <Toggle id={p.id} label="Don't ask before write actions (✎) — only if you trust this chat" />}
+                      {hasWrite && <AutoToggle on={connectors["auto:" + p.id] === "1"} label="Don't ask before write actions (✎) — only if you trust this chat" onChange={() => onSave("auto:" + p.id, connectors["auto:" + p.id] === "1" ? "" : "1")} />}
                     </>
                   ) : (
                     <div className="mt-2 space-y-2">
@@ -221,48 +271,94 @@ export default function ConnectorsModal({
             })}
 
             <div className="rounded-lg border border-dashed border-line p-3 text-[11px] leading-relaxed text-muted">
-              Need <b className="text-ink">Notion, Linear, Stripe, Sentry</b> or any other service? Open the <b className="text-ink">Custom</b> tab and type its name — a Connect button appears.
+              Need <b className="text-ink">Notion, Linear, Stripe, Sentry</b> or any other service? Open the <b className="text-ink">Custom</b> tab and type its name, or just tell the agent in the chat: <b className="text-ink">“connect Notion”</b>.
             </div>
           </div>
         ) : (
           <div className="space-y-3">
-            {custom.map((k) => (
-              <div key={k} className="rounded-lg border border-line p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-ink">{k.startsWith("mcp:") ? "MCP" : "API"} · {k.slice(4)}</span>
-                  <button onClick={() => onSave(k, "")} className="text-xs text-faint hover:text-red-400">Disconnect</button>
+            {custom.map((k) => {
+              const info = status.custom[k];
+              const label = k.slice(4);
+              const broken = status.broken.includes(k);
+              return (
+                <div key={k} className="rounded-lg border border-line p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <ServiceLogo domain={info?.host ? brandDomain(info.host) : label} name={label} size={28} />
+                      <div className="min-w-0">
+                        <p className="truncate text-sm text-ink">{k.startsWith("mcp:") ? "MCP" : "API"} · {label}</p>
+                        {info?.host && <p className="truncate text-[10px] text-faint">{info.host}</p>}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      {broken && <span className="text-[10px] text-red-300">Needs reconnect</span>}
+                      {k.startsWith("mcp:") && info?.oauth && info.url && (
+                        <button disabled={busy === k} onClick={() => void startMcpOAuth(k, info.url as string, k)} className="text-[11px] text-gold underline disabled:opacity-50">Reconnect</button>
+                      )}
+                      <button onClick={() => onSave(k, "")} className="text-xs text-faint hover:text-red-400">Disconnect</button>
+                    </div>
+                  </div>
+                  <AutoToggle on={connectors["auto:" + k] === "1"} label="Don't ask before write actions" onChange={() => onSave("auto:" + k, connectors["auto:" + k] === "1" ? "" : "1")} />
+                  {msg[k] && <p className="mt-1.5 text-[11px] text-muted">{msg[k]}</p>}
                 </div>
-                <p className="mt-1 text-[11px] text-muted">Stored encrypted. Logins renew automatically. If it stops working, Disconnect and connect again.</p>
-                <Toggle id={k} label="Don't ask before write actions" />
-              </div>
-            ))}
+              );
+            })}
 
             <div className="rounded-lg border border-line p-3">
-              <div className="mb-2 flex gap-1.5">
+              <div className="mb-3 flex gap-1.5">
                 {(["mcp", "api"] as const).map((t) => (
-                  <button key={t} onClick={() => setCtype(t)} className={`rounded-full border px-3 py-1 text-xs ${ctype === t ? "border-white bg-white text-bg" : "border-line text-muted"}`}>{t === "mcp" ? "MCP server" : "REST API + key"}</button>
+                  <button key={t} onClick={() => { setCtype(t); say("custom", ""); }} className={`rounded-full border px-3 py-1 text-xs ${ctype === t ? "border-white bg-white text-bg" : "border-line text-muted"}`}>{t === "mcp" ? "MCP · sign in" : "API key · direct"}</button>
                 ))}
               </div>
 
-              {ctype === "mcp" && (
-                <div className="mb-3">
-                  <div className="flex items-center gap-2 rounded-md border border-line bg-bg px-3 py-2">
-                    <Search size={14} className="text-faint" />
-                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search any tool: notion, linear, stripe, sentry, supabase…" className="w-full bg-transparent text-xs text-ink placeholder:text-faint focus:outline-none" />
-                  </div>
-                  {searching && <p className="mt-2 text-[11px] text-muted">Searching…</p>}
-                  {!searching && q.trim().length >= 2 && hits.length === 0 && <p className="mt-2 text-[11px] text-muted">Nothing found for “{q}”. If you know the server URL, add it below.</p>}
-                  <div className="mt-2 space-y-2">
-                    {hits.map((h) => {
+              <div className="space-y-2">
+                <input className={box} placeholder={ctype === "mcp" ? "Name, e.g. canva, notion, linear" : "Name, e.g. stripe, openai, github"} value={name} onChange={(e) => setName(e.target.value)} />
+
+                {ctype === "mcp" ? (
+                  <>
+                    <input className={box} placeholder="MCP address (leave empty for known tools)" value={mcpUrl} onChange={(e) => setMcpUrl(e.target.value)} />
+                    {showTok
+                      ? <input className={box} type="password" placeholder="Token or header like “X-Api-Key: abc” (only if the server has no sign-in)" value={mcpToken} onChange={(e) => setMcpToken(e.target.value)} />
+                      : <button type="button" onClick={() => setShowTok(true)} className="text-[11px] text-faint underline hover:text-muted">The server uses a token, not a sign-in</button>}
+                    <button onClick={addMcp} disabled={busy === "custom"} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === "custom" ? "Working…" : "Connect"}</button>
+                    <p className="text-[11px] leading-relaxed text-muted">If the service has a sign-in, its official login page opens. You approve there; no password is typed here.</p>
+                  </>
+                ) : (
+                  <>
+                    <input className={box} type="password" placeholder="API key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+                    {needsBase && (
+                      <>
+                        <input className={box} placeholder="Base URL, e.g. https://api.example.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+                        <input className={box} placeholder="Header name (optional, default Authorization)" value={header} onChange={(e) => setHeader(e.target.value)} />
+                      </>
+                    )}
+                    {preset && <p className="text-[11px] text-avatar-teal">Known service: {preset.label}. Only the key is needed.</p>}
+                    {needsBase && <p className="text-[11px] text-muted">I do not know this service yet, so I need its address once.</p>}
+                    <button onClick={addApi} disabled={busy === "custom"} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === "custom" ? "Connecting…" : "Connect"}</button>
+                    <p className="text-[11px] leading-relaxed text-muted">The key connects right away and is stored encrypted. The agent gets one request tool limited to that service: GET is free, POST/PUT/PATCH/DELETE ask for approval.</p>
+                  </>
+                )}
+                {msg.custom && <p className="text-[11px] text-muted">{msg.custom}</p>}
+              </div>
+
+              {ctype === "mcp" && name.trim().length >= 2 && (
+                <div className="mt-3">
+                  {searching && <p className="text-[11px] text-muted">Searching…</p>}
+                  {!searching && hits.length === 0 && <p className="text-[11px] text-muted">Nothing found for “{name}”. If you know the server address, paste it above.</p>}
+                  <div className="mt-1 space-y-2">
+                    {hits.slice(0, 6).map((h) => {
                       const kind = `mcp:${safeId(h.name)}`;
                       const on = Boolean(connectors[kind]);
                       return (
                         <div key={h.url} className="rounded-md border border-line p-2.5">
                           <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <p className="truncate text-xs font-medium text-ink">{h.title}{h.source === "popular" && <span className="ml-1.5 text-[10px] text-gold">popular</span>}</p>
-                              <p className="mt-0.5 text-[11px] leading-relaxed text-muted">{h.description}</p>
-                              <p className="mt-0.5 text-[10px] text-faint">{h.auth === "oauth" ? "Sign in with your account" : h.auth === "token" ? "Needs a token / API key" : "No key needed"}</p>
+                            <div className="flex min-w-0 items-start gap-2.5">
+                              <ServiceLogo domain={brandDomain(hostOf(h.url))} name={h.title} size={30} />
+                              <div className="min-w-0">
+                                <p className="truncate text-xs font-medium text-ink">{h.title}{h.source === "popular" && <span className="ml-1.5 text-[10px] text-gold">popular</span>}</p>
+                                <p className="mt-0.5 text-[11px] leading-relaxed text-muted">{h.description}</p>
+                                <p className="mt-0.5 text-[10px] text-faint">{h.auth === "oauth" ? "Sign in with your account" : h.auth === "token" ? "Needs a token / API key" : "No key needed"}</p>
+                              </div>
                             </div>
                             {on ? <span className="shrink-0 text-[11px] text-avatar-teal">Connected</span> : (
                               <button
@@ -280,29 +376,6 @@ export default function ConnectorsModal({
                   </div>
                 </div>
               )}
-
-              <p className="mb-2 text-[11px] leading-relaxed text-muted">
-                {ctype === "mcp"
-                  ? "Or paste a remote MCP server URL (Streamable HTTP). If the server wants a login, you are sent to its sign-in page automatically. Auth (optional): a token, or a header like “X-Api-Key: abc”."
-                  : "Give a base URL and an API key. The agent gets one request tool limited to that host: GET is free, POST/PUT/PATCH/DELETE ask for approval."}
-              </p>
-              <div className="space-y-2">
-                <input className={box} placeholder="Name (e.g. notion, crm, stripe)" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
-                <input className={box} placeholder={ctype === "mcp" ? "https://your-mcp-server.com/mcp" : "https://api.example.com/v1"} value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} />
-                {ctype === "mcp" ? (
-                  <input className={box} type="password" placeholder="Auth (optional)" value={f.auth} onChange={(e) => setF({ ...f, auth: e.target.value })} />
-                ) : (
-                  <>
-                    <input className={box} placeholder="What is this API for? (the agent reads this)" value={f.desc} onChange={(e) => setF({ ...f, desc: e.target.value })} />
-                    <div className="flex gap-2">
-                      <input className={`${box} w-2/5`} placeholder="Header" value={f.header} onChange={(e) => setF({ ...f, header: e.target.value })} />
-                      <input className={box} type="password" placeholder="Key / “Bearer …”" value={f.value} onChange={(e) => setF({ ...f, value: e.target.value })} />
-                    </div>
-                  </>
-                )}
-                <button onClick={addCustom} disabled={busy === "custom"} className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50">{busy === "custom" ? "Checking…" : "Test & connect"}</button>
-                {msg.custom && <p className="text-[11px] text-muted">{msg.custom}</p>}
-              </div>
             </div>
           </div>
         )}
