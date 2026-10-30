@@ -6,6 +6,7 @@ import { identityLog } from "@/lib/identity-log";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
 import { makeCtx, resolveConnectorsSafe } from "@/lib/tools/connectors";
 import { safeId } from "@/lib/tools/catalog";
+import { appBaseUrl } from "@/lib/voice-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -50,7 +51,10 @@ export async function POST(req: Request) {
     const chatRef = getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
     const stored = clean(((await chatRef.get()).data() as { connectors?: unknown } | undefined)?.connectors);
     const { connectors, broken } = await resolveConnectorsSafe(uid, stored);
-    const ctx = makeCtx(uid, chatId);
+    // The address the agent needs when it hands the owner a sign-in button from the chat.
+    let baseUrl: string | undefined;
+    try { baseUrl = appBaseUrl(req); } catch { baseUrl = undefined; }
+    const ctx = makeCtx(uid, chatId, { baseUrl, origin: new URL(req.url).origin });
 
     if (body.action === "list") {
       const cat = await buildCatalog(connectors, ctx);
@@ -65,7 +69,9 @@ export async function POST(req: Request) {
       }
       const r = await callTool(connectors, name, body.args, body.approved === true, { force: body.force === true, ctx });
       if (r.ok && r.risk === "write") {
-        await audit(uid, { kind: "tool_write", chatId, text: `${name} ${JSON.stringify(body.args ?? {}).slice(0, 220)} approved=${body.approved === true} tainted=${body.force === true}` });
+        // connect.* arguments can hold an API key or token: only the service name is logged.
+        const shown = name.startsWith("connect.") ? JSON.stringify({ name: (body.args as { name?: unknown } | undefined)?.name ?? "" }) : JSON.stringify(body.args ?? {}).slice(0, 220);
+        await audit(uid, { kind: "tool_write", chatId, text: `${name} ${shown} approved=${body.approved === true} tainted=${body.force === true}` });
       }
       if (r.ok && name.startsWith("identity.")) await logIdentityTool(uid, chatId, name, r.text);
       return NextResponse.json(r);
