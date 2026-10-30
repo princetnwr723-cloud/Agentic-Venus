@@ -13,7 +13,7 @@ export type VenusProject = {
   voice: boolean; voiceName: string; captions: boolean; quality: "720p" | "1080p"; review: boolean;
   design?: "ai" | "mixed" | "library"; music?: boolean; origin?: "venus" | "chat"; chatId?: string;
   /** "edit" = the user supplied a video and wants it edited; "make" (default) = built from scratch with motion graphics. */
-  mode?: "make" | "edit"; source?: SourceRef; sourceInfo?: SourceInfo; keepAll?: boolean; matchSource?: boolean;
+  voiceMode?: "auto" | "on" | "off"; script?: boolean; mode?: "make" | "edit"; source?: SourceRef; sourceInfo?: SourceInfo; keepAll?: boolean; matchSource?: boolean;
   provider: ProviderId; model: string; stage: Stage; status: "idle" | "running" | "done" | "error";
   error?: string; storyboardJson?: string; previewPath?: string; finalPath?: string; createdAt: number; updatedAt: number;
   /** Set when the code of the designed scenes is kept in separate documents (long videos do not fit in one Firestore document). */
