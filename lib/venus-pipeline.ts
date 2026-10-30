@@ -7,6 +7,7 @@ import { hydrateProject, saveProject, type Stage, type VenusProject } from "@/li
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
 import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
 import { findSeconds } from "@/lib/dashboard/helpers";
+import { detectScript, enforceScript, scriptSeconds, splitScript, voiceModeOf, wordsOf, type ScriptInfo } from "@/lib/venus-script";
 import type { ProviderId } from "@/lib/providers";
 
 export type PipelineEnv = {
@@ -63,6 +64,27 @@ const TWISTS = [
   "Use a strong horizontal rhythm: elements enter from alternating sides.",
 ];
 const rndSeed = () => Math.floor(Math.random() * 999_000) + 1;
+
+/**
+ * After the storyboard exists: in script mode the narration IS the script (word for word, repaired when the model changed it);
+ * in "auto" voice mode the agent's own sound plan decides between a voice-over and a music-led video.
+ */
+async function applySound(run: Run, sb: Storyboard, mode: "on" | "off" | "auto", script: ScriptInfo | null, canVoice: boolean, say: (m: string) => void): Promise<Storyboard> {
+  let out = sb;
+  if (script) {
+    const r = enforceScript(out, script.script);
+    out = r.sb;
+    say(r.repaired ? "📜 The model changed some words of your script: the script was put back word for word." : "📜 Your script is used word for word.");
+  }
+  if (mode === "auto") {
+    const vo = out.sound ? out.sound.voiceover !== false : true;
+    if (!vo) out = { ...out, scenes: out.scenes.map((x) => { const { narration, ...rest } = x as Record<string, unknown>; void narration; return rest as Scene; }) };
+    const why = out.sound?.why ? ` (${out.sound.why})` : "";
+    say(vo ? `🎙️ The agent decided: this video gets a voice-over${why}.` : `🎵 The agent decided: music only, no voice-over${why}.`);
+    await upd(run, { voice: vo && canVoice });
+  }
+  return out;
+}
 
 /** The model sometimes plans a shorter video than asked (30 s instead of 45 s). Stretch the scenes so the length is the one that was asked for. */
 function stretchTo(sb: Storyboard, target: number): Storyboard {
@@ -486,19 +508,29 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       check(run);
       await upd(run, { stage: "script" });
       const aiOwn = true; // every video is designed by the agent
+      // a SCRIPT from the owner (after "script:", in quotes, or a long pasted text) is used word for word as the voice-over
+      const scriptInfo: ScriptInfo | null = run.p.mode === "edit" ? null : detectScript(run.p.brief, run.p.script);
       if (run.p.mode !== "edit") {
-        const asked = findSeconds(run.p.brief);
-        if (asked && Math.abs(asked - run.p.seconds) >= 5) {
-          const len = Math.min(3600, Math.max(15, asked));
-          say(`📏 You asked for ${len >= 90 ? Math.round((len / 60) * 10) / 10 + " minutes" : len + " seconds"}: the video will be that long (the form said ${run.p.seconds}s).`);
-          await upd(run, { seconds: len });
+        const asked = findSeconds(scriptInfo ? scriptInfo.instructions : run.p.brief);
+        const fmt = (n: number) => (n >= 90 ? Math.round((n / 60) * 10) / 10 + " minutes" : n + " seconds");
+        let len = run.p.seconds;
+        if (scriptInfo) {
+          len = Math.min(3600, Math.max(15, Math.max(scriptSeconds(scriptInfo.script), asked ?? 0)));
+          say(`📜 Script mode: your script (${wordsOf(scriptInfo.script).length} words) becomes the voice-over, word for word. The video will be about ${fmt(len)}.`);
+        } else if (asked && Math.abs(asked - run.p.seconds) >= 5) {
+          len = Math.min(3600, Math.max(15, asked));
+          say(`📏 You asked for ${fmt(len)}: the video will be that long (the form said ${run.p.seconds}s).`);
         }
+        if (len !== run.p.seconds) await upd(run, { seconds: len });
       }
-      // "add a voice-over" in the brief is enough (the chat only switched it on when an OpenAI key existed)
-      const wantsVoice = run.p.voice || /(voice[\s-]?over|voiceover|narrat|dubb|awaaz|avaaz|आवाज|वॉइस|वॉयस)/i.test(run.p.brief);
-      const voiceOn = wantsVoice ? Boolean((await mediaCall(env, "voice-status").catch(() => ({ ready: true }))).ready) : false;
-      if (wantsVoice && !voiceOn) say("ℹ️ No voice provider is connected (Settings → Voice), so there will be no voice-over.");
-      if (voiceOn !== run.p.voice) await upd(run, { voice: voiceOn });
+      // voice: on / off / auto. Auto = the agent decides from the story (voice-over or music only); a better model decides better.
+      const voiceMode = voiceModeOf(run.p, scriptInfo);
+      const vs = voiceMode === "off" ? null : await mediaCall(env, "voice-status").catch(() => ({ ready: true, provider: "studio-free" }));
+      const canVoice = Boolean(vs?.ready);
+      const voiceOn = voiceMode === "on" && canVoice;
+      const voiceArg: boolean | "auto" = voiceMode === "auto" ? "auto" : voiceOn;
+      if (vs?.ready) say(`🔊 Voice-over voice: ${vs.provider === "studio-free" ? "free voice of the studio computer" : vs.provider}${vs.note ? ` — ${String(vs.note).slice(0, 110)}` : ""}`);
+      if (voiceMode !== "auto" && voiceOn !== run.p.voice) await upd(run, { voice: voiceOn });
       const style = STYLES[Math.floor(Math.random() * STYLES.length)];
       const twist = TWISTS[Math.floor(Math.random() * TWISTS.length)];
       const agentSid = run.p.mode === "edit" ? null : await agentComputer(run);
@@ -540,11 +572,13 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
         hooks.progress({ label: "Chapter plan", value: null });
         const ctx = memory + (aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
-        const ob = { kind: "outline", brief: run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, context: ctx };
+        const ob = { kind: "outline", brief: scriptInfo ? `${scriptInfo.instructions}\nTopic of the script: ${scriptInfo.script.slice(0, 600)}` : run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg !== false, context: ctx };
         let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
         if (!o.chapters) { say("First attempt failed — trying again…"); o = await aiCall(env, run.p, ob); }
         if (!o.chapters) throw new Error(o.error || "Could not plan the chapters.");
-        const chapters = o.chapters as Array<{ title: string; summary: string; seconds: number }>;
+        let chapters = o.chapters as Array<{ title: string; summary: string; seconds: number }>;
+        // a script is cut into its own parts (the chapters of the video are the parts of the script)
+        if (scriptInfo) chapters = splitScript(scriptInfo.script, 130).map((t, k) => ({ title: `Part ${k + 1}`, summary: t, seconds: Math.min(90, Math.max(20, Math.round(scriptSeconds(t) - 4 + 2))) }));
         const styleLock = o.style as Record<string, unknown>;
         const parts: Scene[][] = chapters.map(() => []);
         let done = 0;
@@ -555,7 +589,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
             check(run);
             const ch = chapters[k];
             const pb = {
-              kind: "storyboard", brief: run.p.brief, seconds: ch.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceOn, captions: run.p.captions,
+              kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: ch.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg, scriptText: scriptInfo ? ch.summary : undefined, captions: run.p.captions,
               design: "ai", context: memory + assetsNote, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
             };
             let r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
@@ -572,10 +606,11 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const total = chapters.reduce((a, c) => a + c.seconds, 0);
         const sbNew = sanitizeStoryboard({ ...styleLock, title: o.title, scenes: all }, { aspect: run.p.aspect, theme: run.p.theme, captions: run.p.captions, maxSeconds: Math.max(run.p.seconds, total) * 1.05, maxScenes: 450 });
         sbNew.seed = rndSeed();
-        { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
+        if (!scriptInfo) { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""}` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
-        await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
+        const finalSb = await applySound(run, sbNew, voiceMode, scriptInfo, canVoice, say);
+        await upd(run, { storyboardJson: JSON.stringify(finalSb), title: finalSb.title || run.p.title });
         say(`📋 ${sbNew.scenes.length} scenes planned in ${chapters.length} chapters${aiOwn ? " (designed by the agent)" : ` (“${style[0]}” style)`}.`);
       } else {
         // ---------- a normal video ----------
@@ -588,18 +623,19 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
             : `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.`) +
           assetsNote;
         const body = {
-          kind: "storyboard", brief: run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
-          voice: voiceOn, captions: run.p.captions, design: "ai", context,
+          kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
+          voice: voiceArg, scriptText: scriptInfo?.script, captions: run.p.captions, design: "ai", context,
         };
         let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
         if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
         if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
         const sbNew = r.storyboard as Storyboard;
         sbNew.seed = rndSeed();
-        { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
+        if (!scriptInfo) { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
-        await upd(run, { storyboardJson: JSON.stringify(sbNew), title: sbNew.title || run.p.title });
+        const finalSb = await applySound(run, sbNew, voiceMode, scriptInfo, canVoice, say);
+        await upd(run, { storyboardJson: JSON.stringify(finalSb), title: finalSb.title || run.p.title });
         say(`📋 ${sbNew.scenes.length} scenes planned${aiOwn ? " (designed by the agent)" : ` in the “${style[0]}” style`}.`);
       }
     }
@@ -695,7 +731,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
           say(`🎙️ Voice-over ready (${patches.size}/${idxs.length} scenes). Video length ≈ ${Math.round(totalFramesOf(sb) / 30)}s.`);
         }
       }
-      const musicOn = run.p.mode === "edit" ? run.p.music === true : run.p.music !== false;
+      const musicOn = (run.p.mode === "edit" ? run.p.music === true : run.p.music !== false) && sb.sound?.music !== false;
       if (musicOn && !sb.music) {
         try {
           const secs = Math.ceil(totalFramesOf(sb) / 30) + 2;
