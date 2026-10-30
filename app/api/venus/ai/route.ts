@@ -46,13 +46,15 @@ export async function POST(req: Request) {
     if (body.kind === "storyboard") {
       const seconds = Math.min(90, Math.max(8, Number(body.seconds) || 45));
       const aspect = aspectOf(body.aspect);
-      const design = body.design === "library" ? "library" : body.design === "mixed" ? "mixed" : "ai";
+      const design = "ai"; // every video is designed by the agent
       const part = body.part && typeof body.part === "object"
         ? { index: Math.max(0, Number(body.part.index) || 0), total: Math.max(1, Number(body.part.total) || 1), title: String(body.part.title || "").slice(0, 120), summary: String(body.part.summary || "").slice(0, 700), seconds: Math.round(seconds) }
         : undefined;
       const style = body.style && typeof body.style === "object" ? body.style as Record<string, unknown> : undefined;
+      const voiceArg: boolean | "auto" = body.voice === "auto" ? "auto" : Boolean(body.voice);
+      const scriptText = typeof body.scriptText === "string" && body.scriptText.trim() ? body.scriptText.slice(0, 12000) : undefined;
       const reply = await ask(
-        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design, context, part, style })
+        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText })
       );
       const raw = extractJson(reply);
       if (!raw) return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
@@ -64,7 +66,7 @@ export async function POST(req: Request) {
       const minScenes = Math.max(3, Math.round(seconds / 4.5));
       if (storyboard.scenes.length < minScenes) {
         const again = extractJson(await ask(
-          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: Boolean(body.voice), captions: Boolean(body.captions), design, context, part, style }) +
+          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText }) +
           `\n\nIMPORTANT: your previous answer had only ${storyboard.scenes.length} scenes for ${Math.round(seconds)} seconds. Write the same story again with at least ${minScenes} scenes (about ${Math.round(seconds / 3.4)}): one story beat per scene, 2.5 to 5 seconds each, changing picture every time.`
         ));
         if (again) {
