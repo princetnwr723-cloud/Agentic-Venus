@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { AuthProvider } from "@/lib/auth-context";
 import { KeysProvider } from "@/lib/keys-context";
+import LimitModal from "@/components/LimitModal";
 import "./globals.css";
 
 const inter = Inter({
@@ -26,6 +27,7 @@ export default function RootLayout({
       <body className="font-sans antialiased">
         <AuthProvider>
           <KeysProvider>{children}</KeysProvider>
+          <LimitModal />
         </AuthProvider>
       </body>
     </html>
