@@ -17,6 +17,7 @@ import { REVERSE_TOOLS } from "./reverse";
 import { ATTACHMENT_TOOLS } from "./attachments";
 import { SOCIAL_TOOLS, providerOfPlatform, socialTargets } from "./social";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
+import { CONNECT_TOOLS, isTrustedMcp, runConnect } from "./connect";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
 import { oauthAccess } from "./oauth-token";
 import { assertPublicUrl, cut, http } from "./net";
@@ -32,14 +33,14 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
 const isAuto = (c: Conn, id: string) => c["auto:" + id] === "1";
 
 type McpEntry = { id: string; url: string; auth?: string; oauth?: McpOAuth };
-type ApiEntry = { id: string; baseUrl: string; header?: string; value?: string; description?: string };
+type ApiEntry = { id: string; baseUrl: string; header?: string; value?: string; headers?: Record<string, string>; description?: string };
 const mcpEntries = (c: Conn): McpEntry[] =>
   Object.entries(c).filter(([k]) => k.startsWith("mcp:")).map(([k, v]) => ({ id: k.slice(4), ...(json<{ url: string; auth?: string; oauth?: McpOAuth }>(v) ?? { url: "" }) })).filter((e) => e.url);
 const apiEntries = (c: Conn): ApiEntry[] =>
@@ -59,11 +60,19 @@ async function mcpBearer(e: McpEntry, ctx?: ToolCtx): Promise<string | undefined
   return `Bearer ${o.access}`;
 }
 
-function mcpRisk(t: McpTool): Risk {
-  if (t.annotations?.readOnlyHint === true) return "read";
-  if (t.annotations?.readOnlyHint === false || t.annotations?.destructiveHint === true) return "write";
-  return READISH.test(t.name) ? "read" : "write";
+// A tool is only "read" (no approval) when it looks like a read AND is not secretly a read-then-write ("search_and_send").
+// A server's own readOnlyHint is believed only for servers we know by name; for any other server the tool name must agree.
+const ALSO_WRITES = /(and|then)[_-]?[A-Za-z]*(delete|remove|send|post|create|update|write|publish|execute|run|pay|transfer|merge|push|commit|share|cancel|drop)/i;
+function mcpRisk(t: McpTool, url: string): Risk {
+  const hint = t.annotations?.readOnlyHint;
+  if (hint === false || t.annotations?.destructiveHint === true) return "write";
+  const looksRead = READISH.test(t.name) && !ALSO_WRITES.test(t.name);
+  if (hint === true) return isTrustedMcp(url) || looksRead ? "read" : "write";
+  return looksRead ? "read" : "write";
 }
+
+const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+  Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("The server took too long to answer.")), ms))]);
 
 // MCP tool descriptions go straight into the prompt, so they are untrusted too.
 const safeDesc = (d?: string) => {
@@ -82,7 +91,8 @@ export async function buildCatalog(c: Conn, ctx?: ToolCtx): Promise<{ specs: Too
   if (SOCIAL_PROVIDERS.some((p) => c[`oauth:${p.id}`])) specs.push(...SOCIAL_TOOLS.map((d) => toSpec(d, "social")));
 
   const mcp = mcpEntries(c);
-  const results = await Promise.allSettled(mcp.map(async (e) => mcpList(e.url, await mcpBearer(e, ctx))));
+  // One slow server must not hold the whole chat: each list gets its own time limit.
+  const results = await Promise.allSettled(mcp.map((e) => withTimeout((async () => mcpList(e.url, await mcpBearer(e, ctx), 8_000))(), 10_000)));
   results.forEach((r, i) => {
     const e = mcp[i];
     if (r.status === "rejected") {
@@ -91,7 +101,7 @@ export async function buildCatalog(c: Conn, ctx?: ToolCtx): Promise<{ specs: Too
       return;
     }
     for (const t of r.value) {
-      specs.push({ name: `mcp_${safeId(e.id)}.${t.name}`, description: safeDesc(t.description), params: paramSummary(t), risk: mcpRisk(t), source: `mcp:${e.id}` });
+      specs.push({ name: `mcp_${safeId(e.id)}.${t.name}`, description: safeDesc(t.description), params: paramSummary(t), risk: mcpRisk(t, e.url), source: `mcp:${e.id}` });
     }
   });
   for (const p of OAUTH_PROVIDERS) {
@@ -176,6 +186,12 @@ export async function callTool(
   const src = name.slice(0, dot), tool = name.slice(dot + 1);
   const mustAsk = (risk: Risk, auto: boolean) => risk === "write" && !approved && (opts.force === true || !auto);
 
+  // connect.*: connecting a service from the chat (built-in OAuth -> MCP -> API key). It asks for approval itself, where it is needed.
+  if (name.startsWith("connect.")) {
+    try { return await runConnect(name, args, c, opts.ctx, approved); }
+    catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Connecting failed." }; }
+  }
+
   const free = ALL_FREE.find((t) => t.name === name);
   if (free) {
     // mail.* honours the "don't ask before write actions" switch of any connected sender
@@ -235,7 +251,7 @@ export async function callTool(
       const auth = await mcpBearer(e, opts.ctx);
       const t = (await mcpList(e.url, auth)).find((x) => x.name === tool);
       if (!t) return { ok: false, text: `The MCP server has no tool "${tool}".` };
-      const risk = mcpRisk(t);
+      const risk = mcpRisk(t, e.url);
       if (mustAsk(risk, isAuto(c, "mcp:" + e.id))) return ask(name, args, risk);
       const r = await mcpCall(e.url, auth, tool, args);
       return good(r.text, name, risk, !r.isError);
@@ -286,7 +302,7 @@ export async function callTool(
       const url = assertPublicUrl(e.baseUrl.replace(/\/+$/, "") + path).toString();
       const r = await http(url, {
         method,
-        headers: { Accept: "application/json", ...(args.body ? { "Content-Type": "application/json" } : {}), ...(e.header && e.value ? { [e.header]: e.value } : {}) },
+        headers: { Accept: "application/json", ...(e.headers ?? {}), ...(args.body ? { "Content-Type": "application/json" } : {}), ...(e.header && e.value ? { [e.header]: e.value } : {}) },
         ...(args.body && method !== "GET" && method !== "HEAD" ? { body: JSON.stringify(args.body) } : {}),
       }, 25_000);
       return good(`HTTP ${r.status}\n${r.text}`, name, risk, r.status < 400);
