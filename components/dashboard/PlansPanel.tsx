@@ -3,22 +3,25 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check } from "lucide-react";
-import { PLANS, fmtDuration, fmtTokens, fullName, planById, type PlanId } from "@/lib/plans";
+import { PLANS, fullName, planById, type PlanId } from "@/lib/plans";
 
+type Feat = { used: number; limit: number | null; resetsAt: number | null };
 type Summary = {
   syncNote?: string;
-  plan: PlanId; status: string; cancelled: boolean; renewsAt: number | null; windowHours: number; windowEndsAt: number;
-  tokens: { used: number; limit: number | null };
-  pc: { usedSeconds: number; limitSeconds: number | null };
+  plan: PlanId; status: string; cancelled: boolean; renewsAt: number | null; rel: string; mult: number;
+  windowHours: number; windowEndsAt: number;
+  tokens: { pct: number };
+  pc: { pct: number; alwaysOn: boolean };
+  video: Feat;
+  site: Feat;
 };
 
-function Meter({ label, used, limit, text }: { label: string; used: number; limit: number | null; text: string }) {
-  const pct = limit === null ? 0 : Math.min(100, Math.round((used / limit) * 100));
+function Meter({ label, pct, text }: { label: string; pct: number; text: string }) {
   return (
     <div>
       <div className="mb-1 flex justify-between text-xs"><span className="text-muted">{label}</span><span className="text-ink">{text}</span></div>
       <div className="h-1.5 overflow-hidden rounded-full bg-panel2">
-        <div className={`h-full rounded-full ${pct >= 90 ? "bg-red-400" : "bg-gold"}`} style={{ width: `${limit === null ? 4 : Math.max(2, pct)}%` }} />
+        <div className={`h-full rounded-full ${pct >= 90 ? "bg-red-400" : "bg-gold"}`} style={{ width: `${Math.max(2, pct)}%` }} />
       </div>
     </div>
   );
@@ -28,6 +31,7 @@ const left = (ms: number) => {
   const m = Math.max(1, Math.round(ms / 60000));
   return m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+const n = (v: number | null) => (v === null ? "Unlimited" : v.toLocaleString("en-US"));
 
 export default function PlansPanel({ onNavigate }: { onNavigate?: () => void }) {
   const router = useRouter();
@@ -63,16 +67,18 @@ export default function PlansPanel({ onNavigate }: { onNavigate?: () => void }) 
       {s && (
         <div className="mb-5 rounded-xl border border-line bg-bg p-4">
           <div className="mb-3 flex items-center justify-between">
-            <p className="text-sm font-medium text-ink">{fullName(current)}</p>
+            <p className="text-sm font-medium text-ink">{fullName(current)} <span className="ml-1 text-xs text-gold">{current.rel}</span></p>
             <span className="text-[11px] text-faint">
               {s.plan === "free" ? "Free plan" : s.cancelled ? `Cancelled · active until ${s.renewsAt ? new Date(s.renewsAt).toLocaleDateString() : "period end"}` : `Renews ${s.renewsAt ? new Date(s.renewsAt).toLocaleDateString() : "monthly"}`}
             </span>
           </div>
           <div className="space-y-3">
-            <Meter label="AI tokens" used={s.tokens.used} limit={s.tokens.limit} text={`${fmtTokens(s.tokens.used)} / ${fmtTokens(s.tokens.limit)}`} />
-            <Meter label="Computer agent" used={s.pc.usedSeconds} limit={s.pc.limitSeconds} text={`${fmtDuration(s.pc.usedSeconds)} / ${fmtDuration(s.pc.limitSeconds)}`} />
+            <Meter label="AI usage" pct={s.tokens.pct} text={`${s.tokens.pct}% used`} />
+            <Meter label="Computer agent" pct={s.pc.pct} text={s.pc.alwaysOn ? "Always on" : `${s.pc.pct}% used`} />
+            <Meter label="Videos today (Venus Pro)" pct={s.video.limit ? Math.min(100, Math.round((s.video.used / s.video.limit) * 100)) : 0} text={`${n(s.video.used)} / ${n(s.video.limit)}`} />
+            <Meter label="Websites today (Venus Code)" pct={s.site.limit ? Math.min(100, Math.round((s.site.used / s.site.limit) * 100)) : 0} text={`${n(s.site.used)} / ${n(s.site.limit)}`} />
           </div>
-          {s.tokens.limit !== null && <p className="mt-3 text-[11px] text-faint">Refreshes in {left(s.windowEndsAt - Date.now())} (every {s.windowHours}h)</p>}
+          <p className="mt-3 text-[11px] text-faint">AI usage and computer time refresh in {left(s.windowEndsAt - Date.now())} (every {s.windowHours}h). Videos and websites refresh 24 hours after your first one.</p>
         </div>
       )}
 
@@ -85,6 +91,7 @@ export default function PlansPanel({ onNavigate }: { onNavigate?: () => void }) 
               {p.badge && <span className="absolute -top-2 right-3 rounded-full bg-gold px-2 py-0.5 text-[10px] font-semibold text-bg">{p.badge}</span>}
               <p className="text-sm font-medium text-ink">{fullName(p)}</p>
               <p className="mt-1 text-2xl font-semibold text-ink">{p.price === 0 ? "$0" : `$${p.price}`}<span className="text-xs font-normal text-faint">{p.price ? " /month" : ""}</span></p>
+              <p className="mt-1 text-xs font-medium text-gold">{p.rel === "1x" ? "1x usage" : `${p.rel} usage`}</p>
               <p className="mt-1 text-[11px] text-muted">{p.tagline}</p>
               <ul className="mt-3 flex-1 space-y-1.5">
                 {p.perks.map((perk) => (
