@@ -6,5 +6,11 @@ export type ToolResult = {
   flagged?: string[];   // the output tried to instruct the agent (prompt injection)
   risk?: Risk;
 };
-/** Lets a tool save something for this chat (e.g. the agent's own inbox login) into the encrypted vault. */
-export type ToolCtx = { uid: string; chatId: string; save: (key: string, value: string) => Promise<void> };
+/**
+ * Lets a tool save something for this chat (e.g. the agent's own inbox login) into the encrypted vault.
+ * baseUrl / origin = the public address of this site (used when the agent has to hand the owner a sign-in button).
+ */
+export type ToolCtx = {
+  uid: string; chatId: string; save: (key: string, value: string) => Promise<void>;
+  baseUrl?: string; origin?: string;
+};
