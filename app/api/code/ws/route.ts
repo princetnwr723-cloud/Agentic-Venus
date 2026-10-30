@@ -3,6 +3,7 @@ import { connect, exec } from "@/lib/e2b-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
 import { webRead, webSearch } from "@/lib/web-tools-server";
+import { consumeFeature } from "@/lib/billing-server";
 import { DIR, safeId, writeBinary } from "@/lib/venus-server";
 import {
   ASSETS, ROOT, checkpoint, codeState, ensureWorkspace, htmlBundle, listAssets, listTree, q, resolvePath, runTool,
@@ -82,6 +83,8 @@ export async function POST(req: Request) {
 
       case "tools": {
         const calls = (Array.isArray(body.calls) ? body.calls : []).slice(0, 8) as ToolCall[];
+        // plan limit: the first time a workspace gets files written or edited, it counts as one website for today
+        if (calls.some((c) => c.name === "write" || c.name === "edit")) await consumeFeature(uid, "site", ws || "default");
         const started = Date.now();
         const results: ToolResult[] = [];
         let mutated = false;
