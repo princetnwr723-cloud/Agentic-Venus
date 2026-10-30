@@ -11,6 +11,7 @@ import { previewFor } from "@/lib/attach-client";
 import AttachCard from "@/components/dashboard/AttachCard";
 import FountFeedback from "@/components/fount/FountFeedback";
 import StepsPanel from "@/components/dashboard/StepsPanel";
+import ConnectCard, { parseConnectCard } from "@/components/dashboard/ConnectCard";
 
 function Tool({ label, onClick, active, children }: { label: string; onClick: (e: React.MouseEvent) => void; active?: boolean; children: React.ReactNode }) {
   return (
@@ -89,6 +90,8 @@ export default function ChatThread({
           );
         }
         const active = replyingAt != null && replyingAt === m.at;
+        // The agent asked to connect a service: show the logo card with a Connect button instead of text.
+        const card = isAssistant ? parseConnectCard(m.content) : null;
         return (
           <div key={i} data-msg={i} className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}>
             {m.role === "user" ? (
@@ -116,7 +119,7 @@ export default function ChatThread({
             ) : (
               <div className="max-w-[85%]">
                 <div className={`rounded-xl border bg-panel2 px-4 py-2.5 text-sm leading-relaxed text-ink transition-colors ${active ? "border-gold/70" : "border-line"}`}>
-                  <Markdown text={body || "…"} />
+                  {card ? <ConnectCard card={card} /> : <Markdown text={body || "…"} />}
                 </div>
                 <div className="mt-1 flex items-center gap-0.5">
                   {onReply && (
@@ -124,12 +127,14 @@ export default function ChatThread({
                       <Reply size={14} />
                     </Tool>
                   )}
+                  {!card && (
                   <Tool
                     label="Copy"
                     onClick={() => { navigator.clipboard?.writeText(body); setCopied(i); setTimeout(() => setCopied((v) => (v === i ? null : v)), 1200); }}
                   >
                     {copied === i ? <Check size={14} className="text-avatar-teal" /> : <Copy size={14} />}
                   </Tool>
+                  )}
                   {onRetry && (
                     <Tool
                       label="Ask again"
