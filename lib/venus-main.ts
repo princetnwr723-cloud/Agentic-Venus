@@ -133,7 +133,7 @@ export const Main = (sb: any) => {
       {sb.music ? (
         <Audio
           src={staticFile(sb.music)}
-          volume={(f: number) => (hasClip ? 0.2 : 0.3) * duck(f, segs) * interpolate(f, [0, 30, Math.max(31, total - 50), total], [0, 1, 1, 0], CL)}
+          volume={(f: number) => (hasClip ? 0.2 : segs.length === 0 ? 0.5 : 0.3) * duck(f, segs) * interpolate(f, [0, 30, Math.max(31, total - 50), total], [0, 1, 1, 0], CL)}
         />
       ) : null}
       {sb.sfx ? <Audio src={staticFile(sb.sfx)} volume={0.9} /> : null}
