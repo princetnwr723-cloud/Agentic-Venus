@@ -35,11 +35,31 @@ function designBlock(design: "ai" | "mixed" | "library"): string {
 - The scenes of one video share ONE art direction (palette, fonts, shape language) but each has its own composition.`;
 }
 
+function voiceRule(voice: boolean | "auto"): string {
+  if (voice === "auto") {
+    return 'SOUND PLAN (you decide, like a producer): add the top-level key "sound": {"voiceover": true|false, "music": true|false, "why": "one short sentence"}. Choose voiceover=true when the viewer must be told something: explainers, facts, stories, tutorials, news, ads with a message, anything that needs words. Choose voiceover=false (a music-led video) for mood pieces, cinematic montages, kinetic-type or quote reels, loops, abstract visuals, teasers without a message, or when the brief asks for silence or music only. If voiceover is true, every scene needs a "narration" (natural spoken language of the brief, about 2 words per second of the scene) that agrees exactly with what is on screen; if false, add no "narration" and let the on-screen text and the pictures carry the story.';
+  }
+  return voice ? 'Every scene needs a "narration" (natural spoken language of the brief, about 2 words per second of the scene) that agrees exactly with what is on screen.' : 'Do not add "narration".';
+}
+
+/** The owner supplied a script: it is the voice-over, word for word. */
+function scriptBlock(text: string): string {
+  return `SCRIPT MODE: the owner supplied the SCRIPT below. It is the voice-over and you must use it WORD FOR WORD.
+- Cut the script into consecutive parts of one or two sentences. Every part becomes the "narration" of one scene, in order, from the first word to the last. Never rewrite, translate, shorten, summarize, reorder, skip or add words; keep the language and the spelling exactly as given.
+- Design the pictures of each scene to illustrate its part (what is said is what is shown). The on-screen headline is 2 to 6 key words of that part. A scene lasts (words of its part / 2.3) seconds (Hindi: words / 2.0), at least 2.5 seconds.
+- A title card (2.5 seconds at most) before the first part and an outro (2.5 seconds at most) after the last part are allowed without narration; every other scene has narration.
+SCRIPT:
+<<<
+${text.slice(0, 12000)}
+>>>
+`;
+}
+
 export type PartInfo = { index: number; total: number; title: string; summary: string; seconds: number };
 
 export function directorPrompt(o: {
-  brief: string; seconds: number; aspect: Aspect; voice: boolean; captions: boolean;
-  design: "ai" | "mixed" | "library"; context?: string; part?: PartInfo; style?: Record<string, unknown>;
+  brief: string; seconds: number; aspect: Aspect; voice: boolean | "auto"; captions: boolean;
+  design: "ai" | "mixed" | "library"; context?: string; part?: PartInfo; style?: Record<string, unknown>; scriptText?: string;
 }): string {
   const a = ASPECTS[o.aspect];
   return `You are the creative director, motion designer and sound designer of "Venus Pro", an AI motion-graphics studio. You make ONLY motion graphics: designed, animated, code-rendered scenes (not slideshows, not stock montages). Turn the brief into a storyboard for a ${o.seconds}-second video (${a.width}x${a.height}, ${o.aspect}). Reply with ONE JSON object only, no prose, no markdown fences.
@@ -65,6 +85,7 @@ ${o.style ? `\nLOCKED ART DIRECTION (this is one part of a longer video; use EXA
 THE USER'S WORDS ARE THE LAW: if the brief names a topic, a style, scenes, texts, numbers, colours, a language, a tone or a structure, build exactly that, in that order. Your own taste only fills the gaps the brief leaves open. If the brief says what to show, never replace it with something you like more.
 
 ${designBlock(o.design)}
+${o.scriptText ? scriptBlock(o.scriptText) : ""}
 STORY MODE (the brief is a story, history, legend, biography, fable, journey or any narrative): think like a film director, not like a slide designer.
 - Scene count: at least seconds / 4 scenes and ideally seconds / 3.2 (30 seconds = 8 to 10 scenes, 60 seconds = 16 to 20). One story beat per scene, 2.5 to 5 seconds each. A story with 5 scenes in 30 seconds is wrong: it feels like a slideshow.
 - Build an arc: place (establishing shot) -> hero -> problem or conflict -> the decisive moment -> the aftermath or legacy. Every scene changes the picture (time of day, place, camera, who is on screen).
@@ -80,7 +101,7 @@ DIRECTOR RULES
 - Text is SHORT (headlines max 7 words), readable on a phone, in the language of the brief (write Hindi in Devanagari when the brief is in Hindi or Hinglish and asks for Hindi; otherwise English).
 - First scene opens the video; the last is an "outro" or a closing custom scene with the product name or call to action.
 - Sound design: use "soundCue" with taste (impact for the opening reveal, whoosh for strong transitions, typing for terminals and text entry, pop/tick for items and counters, chime for the resolution, none when silence is stronger). Never put a loud effect on every scene. Do not ask for copyrighted audio.
-- ${o.voice ? 'Every scene needs a "narration" (natural spoken language of the brief, about 2 words per second of the scene) that agrees exactly with what is on screen.' : 'Do not add "narration".'}${factsFor(o.brief + (o.context ?? ""))}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
+- ${voiceRule(o.voice)}${factsFor(o.brief + (o.context ?? ""))}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
 
 OUTPUT FORMAT (example shape):
 {"thinking":{...},"title":"...","concept":"...","palette":{"bg1":"#...","bg2":"#...","accent":"#...","accent2":"#...","text":"#...","muted":"#..."},"bg":{"kind":"...","colors":["#...","#..."]},"grade":"none","fonts":{"display":"...","body":"..."},"audio":{"mood":"tech","bpm":120},"scenes":[{"type":"custom","id":"c1","seconds":4,"soundCue":"impact","headline":"...","fallbackText":"...","brief":"...","sounds":[{"at":1.2,"kind":"typing"}]}, ...]}
