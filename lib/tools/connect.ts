@@ -3,7 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { vaultDelete, vaultPut } from "@/lib/vault";
 import { appBaseUrl } from "@/lib/voice-server";
-import { assertPublicUrl, http } from "./net";
+import { assertPublicUrl, http, safeFetch } from "./net";
 import { McpAuthError, mcpList, type McpTool } from "./mcp-client";
 import { buildAuthUrl, discover, pkce, registerClient } from "./mcp-oauth";
 import { OAUTH_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
@@ -39,10 +39,10 @@ const hostOf = (u: string) => { try { return new URL(u).hostname; } catch { retu
 
 /* ------------------------------------------------------------------ MCP directory */
 
-export type McpHit = { name: string; title: string; description: string; url: string; auth: "oauth" | "token" | "none"; source: "popular" | "registry" };
+export type McpHit = { name: string; title: string; description: string; url: string; auth: "oauth" | "token" | "none"; source: "popular" | "registry" | "discovered"; verified?: boolean };
 
 // Well-known remote MCP servers. URLs can change: if one fails, search the registry or paste the URL under "Custom".
-export const POPULAR_MCP: Array<Omit<McpHit, "source">> = [
+export const POPULAR_MCP: Array<Omit<McpHit, "source" | "verified">> = [
   { name: "notion", title: "Notion", description: "Search, read and create pages and databases.", url: "https://mcp.notion.com/mcp", auth: "oauth" },
   { name: "linear", title: "Linear", description: "Issues, projects, cycles.", url: "https://mcp.linear.app/mcp", auth: "oauth" },
   { name: "sentry", title: "Sentry", description: "Errors and performance issues.", url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
@@ -105,6 +105,85 @@ export async function searchMcp(raw: string): Promise<McpHit[]> {
     }
   } catch { /* registry offline: the popular matches still work */ }
   return scored.sort((a, b) => a.sc - b.sc).map((x) => x.h).slice(0, 25);
+}
+
+/* ------------------------------------------------------------------ finding the RIGHT MCP server for any tool */
+
+/**
+ * Asks an address "are you an MCP server?" the way a real client does (an initialize request).
+ * "open" = it answered as an MCP server; "oauth" = it answered 401 and points at a sign-in; null = it is not an MCP server.
+ */
+export async function pingMcp(url: string): Promise<"open" | "oauth" | null> {
+  try {
+    assertPublicUrl(url);
+    const res = await safeFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "agenticvenus", version: "1.0" } } }),
+    }, 6000, 2);
+    if (res.status === 401) {
+      const wa = res.headers.get("www-authenticate") ?? "";
+      if (/resource_metadata/i.test(wa)) return "oauth";
+      if (!/bearer/i.test(wa)) return null;
+      // A Bearer 401 alone could be any REST API: it counts only if the site publishes MCP sign-in metadata.
+      const origin = new URL(url).origin;
+      const m = await safeFetch(`${origin}/.well-known/oauth-protected-resource`, { headers: { Accept: "application/json" } }, 4000, 2).catch(() => null);
+      return m && m.ok ? "oauth" : null;
+    }
+    if (!res.ok) return null;
+    // An event stream may stay open: only the first piece is needed.
+    const reader = res.body?.getReader();
+    if (!reader) return null;
+    const first = await reader.read();
+    reader.cancel().catch(() => undefined);
+    const text = first.value ? new TextDecoder().decode(first.value).slice(0, 4000) : "";
+    return /"jsonrpc"\s*:\s*"2\.0"/.test(text) ? "open" : null;
+  } catch { return null; }
+}
+
+const cap = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
+
+/** No list knows this tool: try the addresses services usually give their MCP server (mcp.<name>.com/mcp ...) and keep only those that really answer as MCP. */
+export async function discoverMcp(raw: string): Promise<McpHit[]> {
+  const n = norm(raw.replace(/\b(mcp|server|tool|tools|connector|connect|api|app|integration|plugin)\b/gi, " ")) || norm(raw);
+  if (n.length < 3 || n.length > 30) return [];
+  const urls: string[] = [];
+  for (const tld of ["com", "io", "app", "ai", "dev", "so"]) for (const h of [`mcp.${n}.${tld}`, `${n}.${tld}`, `api.${n}.${tld}`]) urls.push(`https://${h}/mcp`);
+  const kinds = await Promise.all(urls.map((u) => pingMcp(u)));
+  const out: McpHit[] = [];
+  urls.forEach((u, i) => {
+    const k = kinds[i];
+    if (k) out.push({ name: n, title: cap(n), description: `Found at ${hostOf(u)}`, url: u, auth: k === "oauth" ? "oauth" : "none", source: "discovered", verified: true });
+  });
+  return out.slice(0, 3);
+}
+
+/**
+ * The list search plus proof: the best candidates are really asked, so a wrong or old address is never trusted.
+ * If none of the listed servers answers, the usual addresses are tried (discoverMcp).
+ */
+export async function resolveMcp(raw: string): Promise<McpHit[]> {
+  const hits = await searchMcp(raw);
+  const top = hits.slice(0, 6);
+  const kinds = await Promise.all(top.map((h) => pingMcp(h.url)));
+  const verified: McpHit[] = [];
+  top.forEach((h, i) => {
+    const k = kinds[i];
+    if (k) verified.push({ ...h, verified: true, auth: k === "oauth" ? "oauth" : h.auth === "token" ? "token" : "none" });
+  });
+  if (verified.length) return [...verified, ...hits.filter((h) => !verified.some((v) => v.url === h.url))];
+  const found = await discoverMcp(raw);
+  return found.length ? [...found, ...hits] : hits;
+}
+
+/** The list search for the Connectors window (fast), plus the usual-address probe when no list knows the tool. */
+export async function searchMcpPlus(raw: string): Promise<McpHit[]> {
+  const hits = await searchMcp(raw);
+  if (raw.trim().length >= 4 && !hits.some((h) => h.source === "popular")) {
+    const found = await discoverMcp(raw);
+    if (found.length) return [...found, ...hits];
+  }
+  return hits;
 }
 
 /* ------------------------------------------------------------------ built-in OAuth apps (checked FIRST) */
@@ -302,18 +381,32 @@ async function connectService(args: Record<string, unknown>, c: Record<string, s
   let title = rawName;
   let idName = rawName;
   let picked: McpHit | undefined;
+  let matchNote = "";
   if (!url) {
-    const hits = await searchMcp(rawName);
+    const hits = await resolveMcp(rawName);
     const q = norm(rawName.replace(/\b(mcp|server|tool|connector|connect|api|app|integration)\b/gi, " ")) || norm(rawName);
-    picked = hits.find((h) => norm(h.name) === q || norm(h.title) === q) ?? (hits[0]?.source === "popular" ? hits[0] : undefined) ?? (hits.length === 1 ? hits[0] : undefined);
+    picked = hits.find((h) => (norm(h.name) === q || norm(h.title) === q) && (h.verified || h.source === "popular"))
+      ?? hits.find((h) => h.verified)
+      ?? (hits[0]?.source === "popular" ? hits[0] : undefined)
+      ?? hits.find((h) => norm(h.name) === q || norm(h.title) === q)
+      ?? (hits.length === 1 ? hits[0] : undefined);
     if (!picked) {
-      if (!hits.length) return fail(`${oauthNote}No built-in OAuth app and no remote MCP server found for "${rawName}". Ask the owner for an API key (then call connect.api with name and key) or for the service's MCP URL (then call connect.service with url).`);
-      return fail(`${oauthNote}Several MCP servers match "${rawName}". Ask the owner which one, then call connect.service again with its url:\n` + hits.slice(0, 6).map((h) => `- ${h.title} (${h.name}) ${h.url} [${h.auth}]`).join("\n"));
+      if (!hits.length) return fail(`${oauthNote}No built-in OAuth app and no MCP server found for "${rawName}" in the lists or at the usual addresses. Do this now: call web.search with "${rawName} remote MCP server URL", open the official page with web.read, then call connect.service again with url. If the service has no MCP server, ask the owner for an API key (connect.api).`);
+      return fail(`${oauthNote}Several MCP servers match "${rawName}" and none could be confirmed. Ask the owner which one, then call connect.service again with its url:\n` + hits.slice(0, 6).map((h) => `- ${h.title} (${h.name}) ${h.url} [${h.auth}]`).join("\n"));
     }
     url = picked.url; title = picked.title; idName = picked.name;
+    matchNote = `Matched "${rawName}" to ${picked.title} (${hostOf(picked.url)}${picked.verified ? ", confirmed to answer as an MCP server" : ", not confirmed"}). `;
+    if (picked.auth === "token" && !token) {
+      return fail(`${matchNote}${picked.title} does not use a sign-in: it needs an API key or token. Ask the owner to paste it, then call connect.service again with name "${rawName}" and token. (Or give a key: connect.api.)`);
+    }
   } else {
     if (!title) title = hostOf(url);
     if (!idName) idName = brandDomain(hostOf(url)).split(".")[0] || "mcp";
+    // This client speaks the current "Streamable HTTP" way. Many docs still list the old /sse address: try /mcp on the same host.
+    if (/\/sse\/?$/i.test(new URL(url).pathname)) {
+      const alt = url.replace(/\/sse\/?$/i, "/mcp");
+      if (await pingMcp(alt)) { matchNote = `The address ended in /sse (old style); using ${alt} instead. `; url = alt; }
+    }
   }
   try { assertPublicUrl(url); } catch (e) { return fail(e instanceof Error ? e.message : "That URL is not allowed."); }
 
@@ -322,7 +415,7 @@ async function connectService(args: Record<string, unknown>, c: Record<string, s
   if (c[key] && !token) return { ok: true, text: `"${id}" is already connected for this chat. Its tools are in your tool list; use them. If it stopped working, tell the owner to press Reconnect in Connectors → Custom.` };
 
   const probe = await probeMcp(url, token || undefined);
-  if (probe.state === "error") return fail(`${oauthNote}Could not reach ${title} at ${url}: ${probe.error} Check the URL (it must be a remote Streamable-HTTP MCP address), or ask the owner for an API key.`);
+  if (probe.state === "error") return fail(`${oauthNote}${matchNote}Could not reach ${title} at ${url}: ${probe.error} Do this now: call web.search with "${title} remote MCP server URL", read the official page with web.read, then call connect.service again with the right url. If it has no MCP server, ask the owner for an API key (connect.api).`);
 
   if (probe.state === "oauth") {
     if (token) return fail(`${title} rejected the token that was given. Ask the owner for a correct token, or connect it without a token to sign in.`);
@@ -332,7 +425,7 @@ async function connectService(args: Record<string, unknown>, c: Record<string, s
       return {
         ok: true, risk: "read",
         text: shown
-          ? `${oauthNote}SIGN-IN CARD SHOWN: ${title} (MCP at ${hostOf(url)}). The owner now sees a card with the ${title} logo and a Connect button in the chat. Say ONE short line: press Connect, sign in on the ${title} page that opens, and the ${title} tools appear on their own. Do not paste any link, do not repeat the card, do not call connect.service again for it.`
+          ? `${oauthNote}${matchNote}SIGN-IN CARD SHOWN: ${title} (MCP at ${hostOf(url)}). The owner now sees a card with the ${title} logo and a Connect button in the chat. Say ONE short line: which server you picked (${title}, ${hostOf(url)}), press Connect, sign in on the page that opens, and the tools appear on their own; if it is the wrong service, they should send the right MCP address. Do not paste any link, do not repeat the card, do not call connect.service again for it.`
           : `${oauthNote}Could not post the card. Tell the owner: open Connectors → Custom, type "${title}" and press Sign in.`,
       };
     } catch (e) { return fail(`${oauthNote}${title} needs a sign-in but it could not start: ${e instanceof Error ? e.message : "error"}. Ask the owner for an API key or token instead.`); }
@@ -345,7 +438,7 @@ async function connectService(args: Record<string, unknown>, c: Record<string, s
   const names = probe.tools.slice(0, 20).map((t) => `mcp_${id}.${t.name.replace(/[^A-Za-z0-9_.-]/g, "_")}`);
   return {
     ok: true, risk: "write",
-    text: `${oauthNote}Connected ${title} (${probe.tools.length} tools). Example tool names: ${names.join(", ")}${probe.tools.length > 20 ? ", ..." : ""}. They are callable now. Continue with the owner's task.`,
+    text: `${oauthNote}${matchNote}Connected ${title} (${probe.tools.length} tools). Example tool names: ${names.join(", ")}${probe.tools.length > 20 ? ", ..." : ""}. They are callable now. Continue with the owner's task.`,
   };
 }
 
@@ -359,8 +452,8 @@ async function findText(args: Record<string, unknown>): Promise<ToolResult> {
   if (p) out.push(`Built-in OAuth: ${p.label} (${oauthConfigured(p.id) ? "ready to connect" : `not set up: ${p.clientIdEnv} missing in Vercel`})`);
   const f = findPreset(q);
   if (f) out.push(`Known API: ${f.label}, only the API key is needed (connect.api).`);
-  const hits = await searchMcp(q);
-  for (const h of hits.slice(0, 8)) out.push(`MCP: ${h.title} (${h.name}) ${h.url} [${h.auth === "oauth" ? "sign-in" : h.auth === "token" ? "token" : "no key"}]`);
+  const hits = await resolveMcp(q);
+  for (const h of hits.slice(0, 8)) out.push(`MCP: ${h.title} (${h.name}) ${h.url} [${h.auth === "oauth" ? "sign-in" : h.auth === "token" ? "token" : "no key"}${h.verified ? ", confirmed" : ""}]`);
   return out.length ? { ok: true, text: out.join("\n") } : fail(`Nothing found for "${q}". Ask the owner for an API key or an MCP URL.`);
 }
 
