@@ -20,7 +20,7 @@ import { audioCodePrompt, checkAudioCode, extractAudioCode, randomConstraints, t
 import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider } from "@/lib/ai-providers-server";
 import { resolveValue } from "@/lib/vault";
-import { addTokens, estTokens } from "@/lib/billing-server";
+import { addTokens, consumeFeature, estTokens } from "@/lib/billing-server";
 import type { ProviderId } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -448,6 +448,8 @@ export async function POST(req: Request) {
         const crf = kind === "final" ? (scale > 1 ? 26 : 23) : 30;
         const frames = /^\d+-\d+$/.test(String(body.frames || "")) ? String(body.frames) : "";
         const part = body.part === undefined || body.part === null ? -1 : Math.max(0, Math.min(99, Math.floor(Number(body.part) || 0)));
+        // plan limit: one finished video per project counts against the daily allowance (previews and scene tests are free)
+        if (kind === "final" && part <= 0) await consumeFeature(String(body.uid), "video", pid);
         const name = `${pid}-${kind}${part >= 0 ? "-p" + part : ""}`;
         const jobId = "r" + Date.now().toString(36);
         const renderArgs = `src/index.ts Main out/${name}.mp4 --props=${DIR}/work/${pid}/storyboard.json --scale=${scale}${frames ? ` --frames=${frames}` : ""} --codec=h264 --crf=${crf} --log=info --overwrite`;
