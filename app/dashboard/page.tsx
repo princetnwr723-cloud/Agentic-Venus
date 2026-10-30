@@ -1152,7 +1152,7 @@ export default function DashboardPage() {
     const hint =
       who.tool === "pc" ? "To do work on the computer (browse, scrape, download, terminal), end your reply with [[PC:task|<clear instruction>]]."
       : who.tool === "code" ? "Only if the user wants a software project built or changed, end your reply with [[CODE:<detailed instruction>]]."
-      : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]. The brief MUST start with the exact length the owner asked for (for example \"45 seconds\" or \"2 minutes\"; any length up to one hour is possible) and the shape (vertical or horizontal): never shorten it or replace it with a default."
+      : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]. The brief MUST start with the exact length the owner asked for (for example \"45 seconds\" or \"2 minutes\"; any length up to one hour is possible) and the shape (vertical or horizontal): never shorten it or replace it with a default. If the owner gave a SCRIPT, copy it into the brief unchanged after the word SCRIPT: (it becomes the voice-over, word for word)."
       : who.tool === "email" ? "You draft emails (sending needs a Gmail MCP connector): write the full draft in your reply."
       : "Answer directly and concretely.";
     const reply = await callLLM(chat, `${personaOf(who)}\n${hint}${brainPrompt(brainOf(chat.id), text)}`, text, history.slice(-12).map((m) => ({ role: m.role, content: m.content })));
