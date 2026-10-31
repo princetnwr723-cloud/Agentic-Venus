@@ -4,7 +4,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { vaultDelete, vaultPut } from "@/lib/vault";
 import { appBaseUrl } from "@/lib/voice-server";
 import { assertPublicUrl, http, safeFetch } from "./net";
-import { McpAuthError, mcpList, type McpTool } from "./mcp-client";
+import { McpAuthError, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { buildAuthUrl, discover, pkce, registerClient } from "./mcp-oauth";
 import { OAUTH_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
 import { buildOAuthUrl, oauthConfigured } from "./oauth-begin";
@@ -42,7 +42,7 @@ const hostOf = (u: string) => { try { return new URL(u).hostname; } catch { retu
 export type McpHit = { name: string; title: string; description: string; url: string; auth: "oauth" | "token" | "none"; source: "popular" | "registry" | "discovered"; verified?: boolean };
 
 // Well-known remote MCP servers. URLs can change: if one fails, search the registry or paste the URL under "Custom".
-export const POPULAR_MCP: Array<Omit<McpHit, "source" | "verified">> = [
+export const POPULAR_MCP: Array<Omit<McpHit, "source">> = [
   { name: "notion", title: "Notion", description: "Search, read and create pages and databases.", url: "https://mcp.notion.com/mcp", auth: "oauth" },
   { name: "linear", title: "Linear", description: "Issues, projects, cycles.", url: "https://mcp.linear.app/mcp", auth: "oauth" },
   { name: "sentry", title: "Sentry", description: "Errors and performance issues.", url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
@@ -435,10 +435,11 @@ async function connectService(args: Record<string, unknown>, c: Record<string, s
   if (!approved) return ask(`Connect MCP server "${id}"\n${title} · ${url}\n${probe.tools.length} tool${probe.tools.length === 1 ? "" : "s"} found${token ? "\nA token you gave is saved encrypted." : ""}`);
   await ctx.save(key, JSON.stringify({ url, auth: token || undefined }));
   await syncAnnounced(ctx.uid, ctx.chatId);
-  const names = probe.tools.slice(0, 20).map((t) => `mcp_${id}.${t.name.replace(/[^A-Za-z0-9_.-]/g, "_")}`);
+  // Exact names + arguments, so the agent can use the new tools in this very run (its tool list is rebuilt on the next message).
+  const lines = probe.tools.slice(0, 25).map((t) => `- mcp_${id}.${t.name}(${paramSummary(t)})`);
   return {
     ok: true, risk: "write",
-    text: `${oauthNote}${matchNote}Connected ${title} (${probe.tools.length} tools). Example tool names: ${names.join(", ")}${probe.tools.length > 20 ? ", ..." : ""}. They are callable now. Continue with the owner's task.`,
+    text: `${oauthNote}${matchNote}Connected ${title} (${probe.tools.length} tools). Call them right now with [[TOOL:<name>|<JSON args>]]:\n${lines.join("\n")}${probe.tools.length > 25 ? "\n- ..." : ""}\nNow continue with the owner's task and USE these tools wherever they fit (before web.search or the computer).`,
   };
 }
 
