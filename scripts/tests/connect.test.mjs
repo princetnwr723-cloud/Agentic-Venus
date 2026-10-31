@@ -55,3 +55,34 @@ test('brandDomain finds the logo domain', () => {
   assert.equal(brandDomain('mcp.example.co.uk'), 'example.co.uk');
   assert.equal(brandDomain('notion.so'), 'notion.so');
 });
+
+import { connectIntent } from '../../lib/connect-intent.ts';
+
+test('short connect messages are understood, also in Hinglish and with typos', () => {
+  assert.deepEqual(connectIntent('can a connect kro'), { kind: 'connect', name: 'can a' });
+  assert.deepEqual(connectIntent('connect canva'), { kind: 'connect', name: 'canva' });
+  assert.deepEqual(connectIntent('can you connect canva please'), { kind: 'connect', name: 'canva' });
+  assert.deepEqual(connectIntent('canva mcp connect kar do'), { kind: 'connect', name: 'canva' });
+  assert.deepEqual(connectIntent('bhai notion add karo mcp'), { kind: 'connect', name: 'notion' });
+  assert.deepEqual(connectIntent('disconnect canva'), { kind: 'remove', name: 'canva' });
+});
+
+test('an address or an API key travels with the intent', () => {
+  const u = connectIntent('firecrawl mcp https://mcp.firecrawl.dev/fc-abc123456789012/v2/mcp');
+  assert.equal(u?.name, 'firecrawl');
+  assert.equal(u?.url, 'https://mcp.firecrawl.dev/fc-abc123456789012/v2/mcp');
+  const k = connectIntent('stripe connect kro sk_live_abcdefghijklmnop12345');
+  assert.equal(k?.name, 'stripe');
+  assert.equal(k?.key, 'sk_live_abcdefghijklmnop12345');
+  assert.deepEqual(connectIntent('connect https://mcp.example.com/mcp'), { kind: 'connect', name: '', url: 'https://mcp.example.com/mcp' });
+});
+
+test('anything that is more than a plain connect request goes to the agent', () => {
+  assert.equal(connectIntent('add milk to list'), null);
+  assert.equal(connectIntent('connect to the database'), null);
+  assert.equal(connectIntent('add feature'), null);
+  assert.equal(connectIntent('canva connect kro aur ek design banao'), null);
+  assert.equal(connectIntent('research karo isko use karke'), null);
+  assert.equal(connectIntent('/clone a/b'), null);
+  assert.equal(connectIntent(''), null);
+});
