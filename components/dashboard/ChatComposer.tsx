@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUp, AtSign, CornerUpLeft, Monitor, Paperclip, X } from "lucide-react";
 import type { Attachment } from "@/lib/attachments";
 import AttachCard from "@/components/dashboard/AttachCard";
+import CallButton from "@/components/dashboard/CallButton";
 import BotAvatar from "@/components/BotAvatar";
 import type { AvatarColor } from "@/lib/bots";
 
@@ -11,13 +12,15 @@ const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, "
 
 export default function ChatComposer({
   draft, setDraft, onSubmit, sending, agentName, hasComputerKey, computerMode, onToggleComputer, attach, onPickFiles, onRemoveAttach,
-  mentionables, onMention, replyTo, onClearReply,
+  mentionables, onMention, replyTo, onClearReply, chatId,
 }: {
   draft: string; setDraft: (v: string) => void; onSubmit: (e: React.FormEvent) => void; sending: boolean; agentName: string;
   hasComputerKey: boolean; computerMode: boolean; onToggleComputer: () => void;
   attach: Attachment[]; onPickFiles: (f: File[]) => void; onRemoveAttach: (id: string) => void;
   mentionables: Mentionable[]; onMention: (token: string, id: string) => void;
   replyTo: { at: number; preview: string } | null; onClearReply: () => void;
+  /** Optional: when given, the call button rings exactly this chat's agent. Without it the agent is found by its name. */
+  chatId?: string;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -121,6 +124,7 @@ export default function ChatComposer({
         <div className="flex w-full items-center gap-2">
         <input ref={fileRef} type="file" multiple hidden onChange={(e) => { const f = Array.from(e.target.files ?? []); e.target.value = ""; if (f.length) onPickFiles(f); }} />
         <button type="button" aria-label="Attach files (photo, video, zip, PDF, any file)" title="Attach photo, video, zip, PDF or any file" onClick={() => fileRef.current?.click()} className="rounded-full p-2 text-muted hover:bg-panel2"><Paperclip size={18} /></button>
+        <CallButton agentName={agentName} chatId={chatId} />
         {hasComputerKey && (
           <button type="button" onClick={onToggleComputer} aria-pressed={computerMode} title={computerMode ? "Computer mode ON — your message goes straight to the computer as a task" : "Computer mode — send your message straight to the computer as a task"} className={`flex items-center gap-1.5 rounded-full px-2.5 py-2 text-xs ${computerMode ? "bg-gold font-medium text-bg" : "text-muted hover:bg-panel2 hover:text-ink"}`}>
             <Monitor size={15} />{computerMode && "Computer"}
