@@ -33,6 +33,7 @@ import { ensureNode, followPcJob, proofUrl, startPcJob, type HealCtx, type PcOut
 import { SUGGEST_PROMPT, splitSuggestions, withNext } from "@/lib/suggest";
 import { looksLikeSkillInstall } from "@/lib/skills-core";
 import { repoFileIntent, repoIntent, type RepoIntent } from "@/lib/repo-intent";
+import { connectIntent, type ConnectIntent } from "@/lib/connect-intent";
 import type { ToolSpec } from "@/lib/tools/types";
 import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
 import {
@@ -168,16 +169,34 @@ export default function DashboardPage() {
   useEffect(() => { chatsRef.current = chats; for (const c of chats) if (!(c.id in sandboxRef.current)) sandboxRef.current[c.id] = c.pcSandboxId ?? null; }, [chats]);
   useEffect(() => { activeIdRef.current = activeId; setReplyTo(null); }, [activeId]);
 
-  // Messages posted by the server (agent updates, mission reports, call summaries) appear live and are never overwritten.
+  // Things the SERVER changed appear live and are never overwritten: messages (agent updates, mission reports, call summaries,
+  // the Connect card) and connections (the agent connected a service from the chat, or a sign-in finished in another tab).
   useEffect(() => {
     if (!user || !activeId) return;
     return onSnapshot(doc(db, "users", user.uid, "chats", activeId), (s) => {
-      const d = s.data() as { messages?: ChatMessage[] } | undefined;
-      if (!d?.messages || s.metadata.hasPendingWrites) return;
+      const d = s.data() as { messages?: ChatMessage[]; connectors?: Record<string, string> } | undefined;
+      if (!d || s.metadata.hasPendingWrites) return;
       const cur = chatsRef.current.find((c) => c.id === activeId);
-      if (cur && d.messages.length > cur.messages.length) {
-        chatsRef.current = chatsRef.current.map((c) => (c.id === activeId ? { ...c, messages: d.messages as ChatMessage[] } : c));
-        patchChat(activeId, { messages: d.messages });
+      if (!cur) return;
+      // connections: take the server's list and forget the cached tool list, so the very next message already sees the new tools
+      if (d.connectors && typeof d.connectors === "object") {
+        const fromServer = Object.keys(d.connectors).sort().join("|");
+        const here = Object.keys(cur.connectors ?? {}).sort().join("|");
+        if (fromServer !== here) {
+          chatsRef.current = chatsRef.current.map((c) => (c.id === activeId ? { ...c, connectors: d.connectors as Record<string, string> } : c));
+          patchChat(activeId, { connectors: d.connectors });
+          delete toolCache.current[activeId];
+        }
+      }
+      // messages: add every server message this screen does not have yet (matched by time), wherever the agent is in its work
+      if (Array.isArray(d.messages)) {
+        const have = new Set(cur.messages.map((m) => m.at));
+        const added = d.messages.filter((m) => m && typeof m.at === "number" && !have.has(m.at));
+        if (added.length) {
+          const next = [...cur.messages, ...added].sort((a, b) => a.at - b.at);
+          chatsRef.current = chatsRef.current.map((c) => (c.id === activeId ? { ...c, messages: next } : c));
+          patchChat(activeId, { messages: next });
+        }
       }
     }, () => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -916,6 +935,36 @@ export default function DashboardPage() {
 
   // ---- GitHub repository: clone into Venus Code's workspace, push all changes back (direct commands, no model needed) ----
 
+  /**
+   * "connect canva" / "firecrawl mcp <url>" / "disconnect canva": done by code, so it works in the middle of other work
+   * and is never mixed into the task the agent was busy with. If it cannot finish, the agent gets the reason and takes over.
+   */
+  async function runConnectCommand(chat: Chat, cmd: ConnectIntent): Promise<{ handled: boolean; hint: string }> {
+    if (!user) return { handled: false, hint: "" };
+    const label = cmd.name || "the service";
+    workStart(chat.id, cmd.kind === "remove" ? `${label} disconnect kar raha hoon…` : `${label} connect kar raha hoon…`, "connect");
+    try {
+      const r = cmd.kind === "remove"
+        ? await execTool(chat, "connect.remove", { name: cmd.name }, false)
+        : await execTool(chat, "connect.service", { name: cmd.name, ...(cmd.url ? { url: cmd.url } : {}), ...(cmd.key ? { key: cmd.key } : {}) }, false);
+      const text = r.text;
+      if (/^The user declined/i.test(text)) { say(chat.id, "Okay, nothing was changed."); return { handled: true, hint: "" }; }
+      if (/^ERROR:/.test(text)) {
+        return { handled: false, hint: `\n\nThe owner just asked to ${cmd.kind === "remove" ? "disconnect" : "connect"} "${label}". The tool answered: ${text.slice(0, 600)}\nFollow the instruction in that answer (for example web.search the official MCP address, then call connect.service again with url) and tell the owner what happened.` };
+      }
+      const picked = /Matched "[^"]*" to ([^(]+)\(([^,)]+)/.exec(text);
+      const pickedNote = picked ? ` I picked **${picked[1].trim()}** (${picked[2].trim()}). If that is the wrong service, send me its MCP address.` : "";
+      delete toolCache.current[chat.id]; // the next message sees the new tool list
+      if (/SIGN-IN CARD SHOWN/.test(text)) say(chat.id, `👆 Press **Connect** on the card above and sign in.${pickedNote} The tools appear on their own when you are done.`);
+      else if (/^Disconnected/i.test(text)) say(chat.id, `✅ ${text}`);
+      else if (/already connected/i.test(text)) say(chat.id, "✅ Already connected. The agent can use it.");
+      else say(chat.id, `✅ Connected.${pickedNote} The agent can use its tools from now on.`);
+      return { handled: true, hint: "" };
+    } catch (err) {
+      return { handled: false, hint: `\n\nThe owner just asked to connect "${label}" but the connect call failed: ${err instanceof Error ? err.message : "unknown error"}. Try connect.service yourself and tell the owner what happened.` };
+    } finally { workEnd(chat.id, "connect"); }
+  }
+
   async function runRepoCommand(chat: Chat, cmd: RepoIntent) {
     if (!user) return;
     if (codeBusyRef.current.has(chat.id)) return say(chat.id, "Venus Code is working in this chat right now. Wait for it to finish, then try again.");
@@ -979,8 +1028,7 @@ export default function DashboardPage() {
     venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
-    const ownerText = String([...(chatsRef.current.find((c) => c.id === chat.id)?.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "");
-    const opt = guessVenusOptions(brief, ownerText);
+    const opt = guessVenusOptions(brief);
     if (showWork) workStart(chat.id, "Venus Pro shuru ho raha hai…", "venus");
     setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
     try {
@@ -1152,7 +1200,7 @@ export default function DashboardPage() {
     const hint =
       who.tool === "pc" ? "To do work on the computer (browse, scrape, download, terminal), end your reply with [[PC:task|<clear instruction>]]."
       : who.tool === "code" ? "Only if the user wants a software project built or changed, end your reply with [[CODE:<detailed instruction>]]."
-      : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]. The brief MUST start with the exact length the owner asked for (for example \"45 seconds\" or \"2 minutes\"; any length up to one hour is possible) and the shape (vertical or horizontal): never shorten it or replace it with a default. If the owner gave a SCRIPT, copy it into the brief unchanged after the word SCRIPT: (it becomes the voice-over, word for word)."
+      : who.tool === "video" ? "To make a video, end your reply with [[VENUS:<detailed brief>]]."
       : who.tool === "email" ? "You draft emails (sending needs a Gmail MCP connector): write the full draft in your reply."
       : "Answer directly and concretely.";
     const reply = await callLLM(chat, `${personaOf(who)}\n${hint}${brainPrompt(brainOf(chat.id), text)}`, text, history.slice(-12).map((m) => ({ role: m.role, content: m.content })));
@@ -1250,10 +1298,11 @@ export default function DashboardPage() {
     const forget = /^\/forget\s+([\s\S]+)/i.exec(text);
     const remember = /^\/remember\s+([\s\S]+)/i.exec(text) ?? /^(?:please\s+)?remember(?:\s+that)?[:\s]+([\s\S]{3,})/i.exec(text);
     const rIntent = repoIntent(text);
+    const cIntent = connectIntent(text); // "connect canva": handled by code (below), works in the middle of other work
     const slash = Boolean(video || code || team || deploy || recipe || rIntent);
     const analysis = e2bKey && !slash ? analyzePcMessage(text) : { pureCommand: null, compound: false, stopAfter: false };
     const key = apiKeys[chat.provider];
-    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !key) { setSettingsOpen(true); return; }
+    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !cIntent && !key) { setSettingsOpen(true); return; }
 
     const files = slash ? [] : attach.filter((a) => a.status === "ready");
     const payload = text + attachmentBlock(files);
@@ -1300,6 +1349,12 @@ export default function DashboardPage() {
     if (forget) { await applyMemoryCommand(chat, `forget|${forget[1].trim()}`); return; }
     if (remember) { await applyMemoryCommand(chat, `add|${remember[1].trim()}`); return; }
     if (rIntent) { void runRepoCommand(chat, rIntent); return; } // /clone, /push, "clone github.com/a/b", "push all changes"
+    let connectHint = "";
+    if (cIntent) {
+      const done = await runConnectCommand(chat, cIntent);
+      if (done.handled) return;
+      connectHint = done.hint; // it could not finish alone: the agent takes over with the reason
+    }
 
     if (analysis.pureCommand) {
       setSending(true);
@@ -1327,7 +1382,10 @@ export default function DashboardPage() {
       if (r.names.length) extraSystem = `\n\nThe user just installed the skill(s): ${r.names.join(", ")}. Acknowledge briefly and carry out any remaining part of the request using the skill.`;
       if (text.replace(/https?:\/\/\S+/g, "").length < 90) return;
     }
-    extraSystem += extra;
+    extraSystem += extra + connectHint;
+    // the owner's connected services: say so on EVERY message, so the agent uses them where they fit (and never forgets them in a long chat)
+    const liveSvc = Object.keys(chatsRef.current.find((c) => c.id === chat.id)?.connectors ?? {}).filter((k) => /^(mcp|api|oauth):/.test(k));
+    if (liveSvc.length) extraSystem += `\n\nCONNECTED SERVICES (chosen by the owner): ${liveSvc.join(", ")}. When a task fits what one of them does, use ITS tools (the mcp_*, api_*, oauth_* groups in your tool list) before web.search, web.read or the computer. Example: research or scraping with a connected Firecrawl means the firecrawl tools.`;
 
     // the user switched on Computer mode: that is an explicit order
     if (e2bKey && computerMode) {
