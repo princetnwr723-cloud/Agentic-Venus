@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, Loader2, Mic, MicOff, Phone, PhoneOff, Square, X } from "lucide-react";
+import { Check, Loader2, Mic, MicOff, Phone, PhoneOff, Square, Volume2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { listChats } from "@/lib/chats";
 
@@ -14,6 +14,8 @@ const YES = /\b(yes|yeah|yep|ok|okay|sure|go ahead|do it|confirm)\b|haan|han ji|
 const NO = /\b(no|nope|cancel|stop|don'?t)\b|nahi|nahin|mat karo|ruko|नहीं|मत|रुको/i;
 const LANGS = [{ id: "", label: "Auto" }, { id: "hi-IN", label: "हिन्दी" }, { id: "en-IN", label: "English" }];
 const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, "");
+// a silent, valid WAV: playing it inside the click is what lets the browser play the agent's audio later
+const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 
 export default function CallButton({ agentName, chatId }: { agentName: string; chatId?: string }) {
   const { user } = useAuth();
@@ -29,7 +31,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
   const [canListen, setCanListen] = useState(true);
 
   const recRef = useRef<any>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null); // ONE player, unlocked by the click, reused for every reply
   const histRef = useRef<Line[]>([]);
   const followRef = useRef<string[]>([]);
   const startedRef = useRef(0);
@@ -41,6 +43,9 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
   const hangupRef = useRef(false);
   const langRef = useRef(0);
   const endingRef = useRef(false);
+  const speakId = useRef(0); // a newer reply (or an interrupt) cancels the older one
+  const lastSayRef = useRef("");
+  const safetyRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setPh = (p: Phase) => { phaseRef.current = p; setPhase(p); };
   const lang = () => LANGS[langRef.current].id || (typeof navigator !== "undefined" ? navigator.language : "") || "en-US";
@@ -53,9 +58,10 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
   }, []);
 
   const stopSpeaking = useCallback(() => {
+    speakId.current++;
+    if (safetyRef.current) { clearTimeout(safetyRef.current); safetyRef.current = null; }
     try { window.speechSynthesis?.cancel(); } catch { /* not available */ }
-    const a = audioRef.current;
-    audioRef.current = null;
+    const a = audioElRef.current;
     if (a) { a.onended = null; a.onerror = null; try { a.pause(); } catch { /* already stopped */ } }
   }, []);
 
@@ -102,7 +108,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
       if (finalText.trim()) { recRef.current = null; try { rec.abort(); } catch { /* ignore */ } void handleText(finalText.trim()); }
     };
     rec.onerror = (e: any) => {
-      if (e?.error === "not-allowed" || e?.error === "service-not-allowed") { setErr("Microphone ki permission do (browser me mic allow karo)."); setCanListen(false); openRef.current && (recRef.current = null); }
+      if (e?.error === "not-allowed" || e?.error === "service-not-allowed") { setErr("Microphone ki permission do (browser me mic allow karo)."); setCanListen(false); recRef.current = null; }
     };
     rec.onend = () => {
       recRef.current = null;
@@ -121,28 +127,55 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
     listen();
   }, [endCall, listen]);
 
+  /** The browser's own voice. Long text is spoken sentence by sentence (Chrome stops a long utterance after ~15 s). */
+  const speakBrowser = useCallback((text: string, finish: () => void) => {
+    const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
+    if (!synth) { setErr("Is browser me bolne ki suvidha nahi hai. Settings me voice provider (OpenAI/ElevenLabs/local) chuno."); finish(); return; }
+    synth.cancel();
+    const l = /[\u0900-\u097f]/.test(text) ? "hi-IN" : lang();
+    const voices = synth.getVoices();
+    const voice = voices.find((v) => v.lang.toLowerCase().replace("_", "-") === l.toLowerCase()) ?? voices.find((v) => v.lang.toLowerCase().startsWith(l.slice(0, 2).toLowerCase()));
+    if (l.startsWith("hi") && !voice) setErr("Is device me Hindi voice installed nahi hai: iPad/iPhone me Settings → Accessibility → Spoken Content → Voices → Hindi download karo, ya voice provider key wali chuno.");
+    const parts = text.match(/[^.!?।]+[.!?।]*/g)?.map((x) => x.trim()).filter(Boolean) ?? [text];
+    let started = false;
+    const warn = setTimeout(() => { if (!started) setErr((cur) => cur || "Awaaz nahi aa rahi? Volume aur silent switch check karo, phir 🔊 dabao."); }, 2500);
+    parts.forEach((p, i) => {
+      const u = new SpeechSynthesisUtterance(p);
+      u.lang = l; u.volume = 1; u.rate = 1;
+      if (voice) u.voice = voice;
+      u.onstart = () => { started = true; clearTimeout(warn); };
+      u.onerror = () => { clearTimeout(warn); finish(); };
+      if (i === parts.length - 1) u.onend = () => { clearTimeout(warn); finish(); };
+      synth.speak(u);
+    });
+  }, []);
+
   const speak = useCallback((text: string, audio?: { b64: string; mime: string } | null) => {
     stopListening(); stopSpeaking();
+    lastSayRef.current = text;
     setPh("speaking");
+    const id = ++speakId.current;
     let done = false;
-    const finish = () => { if (done) return; done = true; afterSpeak(); };
-    if (audio?.b64) {
-      const a = new Audio(`data:${audio.mime};base64,${audio.b64}`);
-      audioRef.current = a;
-      a.onended = finish; a.onerror = finish;
-      a.play().catch(finish);
-      return;
-    }
-    try {
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = /[\u0900-\u097f]/.test(text) ? "hi-IN" : lang();
-      const v = window.speechSynthesis.getVoices().find((x) => x.lang.toLowerCase().startsWith(u.lang.toLowerCase().slice(0, 2)));
-      if (v) u.voice = v;
-      u.onend = finish; u.onerror = finish;
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
-    } catch { finish(); }
-  }, [afterSpeak, stopListening, stopSpeaking]);
+    const finish = () => {
+      if (done || id !== speakId.current) return;
+      done = true;
+      if (safetyRef.current) { clearTimeout(safetyRef.current); safetyRef.current = null; }
+      afterSpeak();
+    };
+    // if the browser never reports the end of the speech (a known iOS bug), the call must not hang
+    safetyRef.current = setTimeout(finish, 6000 + text.length * 110);
+    // a short pause after the microphone stops: iOS stays silent if speech starts at the same instant
+    setTimeout(() => {
+      if (id !== speakId.current) return;
+      const el = audioElRef.current;
+      if (audio?.b64 && el) {
+        el.onended = finish;
+        el.onerror = () => speakBrowser(text, finish);
+        el.src = `data:${audio.mime};base64,${audio.b64}`;
+        el.play().catch(() => speakBrowser(text, finish));
+      } else speakBrowser(text, finish);
+    }, 300);
+  }, [afterSpeak, speakBrowser, stopListening, stopSpeaking]);
 
   const turn = useCallback(async (payload: Record<string, unknown>, userText?: string) => {
     stopListening();
@@ -150,7 +183,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
     try {
       const d = await call({ ...payload, history: histRef.current.slice(-12).map((l) => ({ role: l.role, content: l.content })) });
       const now = Date.now();
-      if (userText) { histRef.current.push({ role: "user", content: userText, at: now }); }
+      if (userText) histRef.current.push({ role: "user", content: userText, at: now });
       histRef.current.push({ role: "assistant", content: d.say, at: now + 1 });
       setLines([...histRef.current].slice(-8));
       if (Array.isArray(d.todos)) followRef.current.push(...d.todos);
@@ -188,18 +221,36 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
     void turn({ deny: p.name });
   }
 
+  /** Runs inside the click: this is what unlocks sound for the rest of the call. */
+  function unlockSound() {
+    try {
+      const el = audioElRef.current ?? new Audio();
+      audioElRef.current = el;
+      el.src = SILENT;
+      void el.play().catch(() => undefined);
+    } catch { /* no audio element */ }
+    try {
+      const synth = window.speechSynthesis;
+      synth.getVoices();
+      const u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0;
+      synth.speak(u);
+    } catch { /* no speech synthesis */ }
+  }
+
   async function begin() {
     if (!user) return;
+    unlockSound(); // must happen before any await
     histRef.current = []; followRef.current = []; setLines([]); setErr(""); setPending(null); pendingRef.current = null;
     startedRef.current = Date.now(); openRef.current = true; mutedRef.current = false; setMuted(false); endingRef.current = false;
     setCanListen(Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition));
+    setOpen(true);
     // the call goes to the agent of THIS chat: the id is given, or found by the agent's name
     let id = chatId || "";
     if (!id) {
       try { id = (await listChats(user.uid)).find((c) => norm(c.agentName) === norm(agentName))?.id ?? ""; } catch { /* the newest chat is used */ }
     }
     chatRef.current = id;
-    setOpen(true);
     void turn({ first: true });
   }
 
@@ -209,12 +260,20 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
     if (m) stopListening(); else if (phaseRef.current === "listening") listen();
   }
   function interrupt() { stopSpeaking(); afterSpeak(); }
+  function replay() {
+    unlockSound();
+    if (lastSayRef.current) speak(lastSayRef.current, null);
+  }
   function cycleLang() {
     langRef.current = (langRef.current + 1) % LANGS.length; setLangIdx(langRef.current);
     stopListening(); if (phaseRef.current === "listening") listen();
   }
 
-  useEffect(() => () => { openRef.current = false; stopListening(); stopSpeaking(); }, [stopListening, stopSpeaking]);
+  useEffect(() => {
+    // the list of voices loads late in most browsers
+    try { window.speechSynthesis?.getVoices(); window.speechSynthesis?.addEventListener?.("voiceschanged", () => window.speechSynthesis.getVoices()); } catch { /* ignore */ }
+    return () => { openRef.current = false; stopListening(); stopSpeaking(); };
+  }, [stopListening, stopSpeaking]);
 
   const label = phase === "thinking" ? "Soch raha hai…" : phase === "speaking" ? "Bol raha hai…" : muted ? "Mic band" : "Sun raha hai…";
 
@@ -262,9 +321,11 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
             className="mt-3 w-full max-w-md rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:border-gold focus:outline-none"
           />
 
-          <div className="mt-5 flex items-center gap-4">
+          <div className="mt-5 flex items-center gap-3">
             <button type="button" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"} className="rounded-full bg-panel2 p-4 text-ink">{muted ? <MicOff size={20} /> : <Mic size={20} />}</button>
-            {phase === "speaking" && <button type="button" onClick={interrupt} aria-label="Interrupt" className="rounded-full bg-panel2 p-4 text-ink"><Square size={20} /></button>}
+            {phase === "speaking"
+              ? <button type="button" onClick={interrupt} aria-label="Interrupt" className="rounded-full bg-panel2 p-4 text-ink"><Square size={20} /></button>
+              : <button type="button" onClick={replay} aria-label="Dobara bolo" title="Last jawab dobara bolo" className="rounded-full bg-panel2 p-4 text-ink"><Volume2 size={20} /></button>}
             <button type="button" onClick={cycleLang} className="rounded-full bg-panel2 px-4 py-3 text-sm text-ink">{LANGS[langIdx].label}</button>
             <button type="button" onClick={() => void endCall()} aria-label="End call" className="rounded-full bg-red-600 p-4 text-white"><PhoneOff size={20} /></button>
           </div>
