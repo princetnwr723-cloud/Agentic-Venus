@@ -2,6 +2,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { getVoiceSettings, getResolvedVoiceSecrets, signVoiceToken, verifyVoiceToken, verifyTwilioSignature, appBaseUrl, gatherXml, sayTag, twimlResponse, voiceSafeError } from "@/lib/voice-server";
 import { defaultChatId, openingLine, speechXml, watchInboundCall } from "@/lib/voice-calls";
 import { resolveLanguage } from "@/lib/voice-local";
+import { chatForNumber, type TeleSettings } from "@/lib/telephony";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -20,7 +21,7 @@ export async function POST(req: Request) {
     if (!callSid) return bye("Call identifier missing.", 400);
 
     const userRef = getAdminDb().collection("users").doc(claims.uid);
-    const settings = await getVoiceSettings(claims.uid);
+    const settings = (await getVoiceSettings(claims.uid)) as TeleSettings;
     let callId: string;
     let chatId = "";
     let number = "";
@@ -31,12 +32,13 @@ export async function POST(req: Request) {
       const to = String(form.get("To") || "").slice(0, 40);
       callId = callSid;
       number = from;
-      chatId = await defaultChatId(claims.uid);
+      // the number that was dialled decides which agent answers; a number nobody owns goes to the default agent
+      chatId = chatForNumber(settings, to) || (await defaultChatId(claims.uid));
       await userRef.collection("voiceCalls").doc(callId).set({
         direction: "inbound", from, to, providerCallId: callSid, status: "in-progress", createdAt: Date.now(), updatedAt: Date.now(),
         chatId, history: [], transcript: [], followUps: [],
       }, { merge: true });
-      await audit(claims.uid, { kind: "voice_inbound_call", text: `Inbound call ${from}` });
+      await audit(claims.uid, { kind: "voice_inbound_call", chatId, text: `Inbound call ${from} to ${to}` });
       // so that the summary of this call reaches the chat when it ends (never blocks the call for long)
       await Promise.race([watchInboundCall(claims.uid, callId, callSid, req).catch(() => undefined), new Promise((r) => setTimeout(r, 2500))]);
     } else {
