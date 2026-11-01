@@ -5,6 +5,8 @@ import { normalizePhone, placeOutboundCall } from "@/lib/voice-calls";
 import { getExistingOpenAIKey } from "@/lib/voice-utils";
 import { getResolvedVoiceSecrets, saveVoiceSettings, type VoiceSettings } from "@/lib/voice-server";
 import { assignNumber, buyNumber, connectProvider, describeAccount, getTele, listNumbers, patchTele } from "@/lib/telephony";
+import { FILE_TOOLS } from "./files";
+import { BOT_TOOLS } from "./bots";
 import type { ToolCtx } from "./types";
 import type { Def } from "./plugins";
 
@@ -46,7 +48,13 @@ async function statusText(uid: string): Promise<string> {
   return lines.join("\n");
 }
 
-export const VOICE_TOOLS: Def[] = [
+async function ownerNumber(uid: string): Promise<string> {
+  const n = (await getTele(uid)).ownerNumber;
+  if (!n) throw new Error("Owner ka number abhi saved nahi hai. Owner se uska number maango aur voice.settings (owner_number) se save karo.");
+  return n;
+}
+
+const CALL_TOOLS: Def[] = [
   {
     name: "voice.status", risk: "read", params: "",
     description: "START HERE whenever the owner talks about phone calls, calling setup, call limits, balance or numbers. Shows the connected phone company, account details, balance and limits, numbers, owner number and voice, and tells you the next setup step to ask the owner.",
@@ -194,8 +202,6 @@ export const VOICE_TOOLS: Def[] = [
   },
 ];
 
-async function ownerNumber(uid: string): Promise<string> {
-  const n = (await getTele(uid)).ownerNumber;
-  if (!n) throw new Error("Owner ka number abhi saved nahi hai. Owner se uska number maango aur voice.settings (owner_number) se save karo.");
-  return n;
-}
+// file.* (PDF, ZIP, text files) and bot.* (Telegram / Slack bot setup) are registered here, next to the calling tools,
+// so the tool registry itself needs no change.
+export const VOICE_TOOLS: Def[] = [...CALL_TOOLS, ...FILE_TOOLS, ...BOT_TOOLS];
