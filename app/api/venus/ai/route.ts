@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
-import { directorPrompt, editPlanPrompt, editPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, type EditFacts } from "@/lib/venus-prompts";
+import { directorPrompt, editPlanPrompt, editPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, templateExtractPrompt, type EditFacts } from "@/lib/venus-prompts";
 import { checkCode, sanitizeScene, sanitizeSource, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
 
@@ -41,6 +41,8 @@ export async function POST(req: Request) {
     };
     const aspectOf = (v: unknown): Aspect => (ASPECT_LIST.includes(String(v)) ? String(v) : "16:9") as Aspect;
     const context = typeof body.context === "string" ? body.context.slice(0, 3000) : undefined;
+    // a saved video template to clone (look, pace, structure): its own field, so memory text can never push it out
+    const template = typeof body.template === "string" && body.template.trim() ? body.template.slice(0, 7000) : undefined;
 
     // ---- a storyboard for one video, or for ONE PART of a long video ----
     if (body.kind === "storyboard") {
@@ -54,7 +56,7 @@ export async function POST(req: Request) {
       const voiceArg: boolean | "auto" = body.voice === "auto" ? "auto" : Boolean(body.voice);
       const scriptText = typeof body.scriptText === "string" && body.scriptText.trim() ? body.scriptText.slice(0, 12000) : undefined;
       const reply = await ask(
-        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText })
+        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText, template })
       );
       const raw = extractJson(reply);
       if (!raw) return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
@@ -66,7 +68,7 @@ export async function POST(req: Request) {
       const minScenes = Math.max(3, Math.round(seconds / 4.5));
       if (storyboard.scenes.length < minScenes) {
         const again = extractJson(await ask(
-          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText }) +
+          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText, template }) +
           `\n\nIMPORTANT: your previous answer had only ${storyboard.scenes.length} scenes for ${Math.round(seconds)} seconds. Write the same story again with at least ${minScenes} scenes (about ${Math.round(seconds / 3.4)}): one story beat per scene, 2.5 to 5 seconds each, changing picture every time.`
         ));
         if (again) {
@@ -82,7 +84,7 @@ export async function POST(req: Request) {
     if (body.kind === "outline") {
       const seconds = Math.min(3600, Math.max(120, Number(body.seconds) || 600));
       const chapters = Math.min(80, Math.max(2, Math.round(seconds / 55)));
-      const raw = extractJson(await ask(outlinePrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect: aspectOf(body.aspect), voice: Boolean(body.voice), chapters, context })));
+      const raw = extractJson(await ask(outlinePrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect: aspectOf(body.aspect), voice: Boolean(body.voice), chapters, context, template })));
       const list = Array.isArray(raw?.chapters) ? raw.chapters : [];
       if (!raw || list.length < 2) return NextResponse.json({ error: "The model did not return a chapter plan." }, { status: 422 });
       const chs = list.slice(0, 90).map((c: any, i: number) => ({ title: String(c?.title ?? "Part " + (i + 1)).slice(0, 120), summary: String(c?.summary ?? "").slice(0, 700), seconds: Math.max(20, Math.min(90, Number(c?.seconds) || seconds / list.length)) }));
@@ -111,6 +113,20 @@ export async function POST(req: Request) {
       const storyboard = sanitizeStoryboard(raw, { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: body.keepAll ? Math.min(1200, source.duration + 120) : Math.min(1200, seconds * 1.15 + 6), keepFiles: false });
       if (!storyboard.scenes.some((s) => s.type === "clip")) return NextResponse.json({ error: "The edit plan has no clips of your video. Try again or describe the edit more clearly." }, { status: 422 });
       return NextResponse.json({ storyboard });
+    }
+
+    // ---- reverse-engineering a real video into a reusable template ----
+    if (body.kind === "template-extract") {
+      const facts = body.facts as EditFacts | undefined;
+      const img = body.image as { mediaType?: string; data?: string } | undefined;
+      if (!facts || !Array.isArray(facts.tiles)) return NextResponse.json({ error: "The analysis of the video is missing." }, { status: 400 });
+      const prompt = templateExtractPrompt({
+        facts, hint: String(body.hint || "").slice(0, 600), name: String(body.name || "").slice(0, 60), category: String(body.category || "").slice(0, 20), fileName: String(body.fileName || "").slice(0, 100),
+      });
+      const reply = await ask(prompt, img?.data ? { mediaType: img.mediaType || "image/jpeg", data: img.data } : undefined);
+      const raw = extractJson(reply);
+      if (!raw || !Array.isArray(raw.structure)) return NextResponse.json({ error: "The model did not return a template: " + reply.slice(0, 160) }, { status: 422 });
+      return NextResponse.json({ template: raw });
     }
 
     if (body.kind === "scene-code") {
