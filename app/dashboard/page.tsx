@@ -18,8 +18,10 @@ import { addMemory, brainPrompt, forgetMemory, loadBrain, rankSkills, reflect, s
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
 import { acquire, releaseNow } from "@/lib/computers";
-import type { VenusProject } from "@/lib/venus";
-import { runPipeline, signedUrl, type PipelineEnv } from "@/lib/venus-pipeline";
+import type { SourceRef, VenusProject } from "@/lib/venus";
+import { analyzeVideoTemplate, runPipeline, signedUrl, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
+import { categoryOf, NEW_FROM_SCRATCH, pickTemplate, stripTemplateMarker, wantsTemplateFromVideo, type TemplateListItem, type VideoTemplate } from "@/lib/venus-clone";
+import TemplateModal from "@/components/venus/TemplateModal";
 import { personaOf, type Member } from "@/lib/team-catalog";
 import { assembleTeam, runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
 import { pickModel, fallbackChain, type Role } from "@/lib/router";
@@ -38,7 +40,7 @@ import type { ToolSpec } from "@/lib/tools/types";
 import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
 import {
   DEPLOY_PROMPT, EMPTY_SESSION, IDLE_PAUSE_MS, RUN_CYCLE_MS, analyzePcMessage, defaultProviderAndModel,
-  extractCommands, guessVenusOptions, normSite, readJson, type Cmd, type PcSession,
+  extractCommands, findSeconds, guessVenusOptions, normSite, readJson, type Cmd, type PcSession,
 } from "@/lib/dashboard/helpers";
 import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
@@ -111,6 +113,7 @@ export default function DashboardPage() {
   const [computerMode, setComputerMode] = useState(false);
   const [cfg, setCfg] = useState<{ supabase: boolean; pexels: boolean } | null>(null);
   const [venusRun, setVenusRun] = useState<{ title: string; label: string; value: number | null } | null>(null);
+  const [tplOpen, setTplOpen] = useState(false);
   const [codeRun, setCodeRun] = useState<{ title: string; label: string } | null>(null);
   const [teamRun, setTeamRun] = useState<string | null>(null);
   const [pcOpen, setPcOpen] = useState(false);
@@ -136,6 +139,8 @@ export default function DashboardPage() {
   const activeIdRef = useRef<string | null>(null);
   // Locks are scoped per chat so one conversation cannot block unrelated work in another.
   const venusBusyRef = useRef<Set<string>>(new Set());
+  // the last video attached in each chat: Venus Pro edits it (or studies it for a template) when the owner asks for a video
+  const recentVideoRef = useRef<Record<string, { id: string; name: string; at: number }>>({});
   const codeBusyRef = useRef<Set<string>>(new Set());
   const teamBusyRef = useRef<Set<string>>(new Set());
   const brains = useRef<Record<string, Brain>>({});
@@ -1015,9 +1020,43 @@ export default function DashboardPage() {
     return `\n\nREPO TASK: no repository is cloned in the workspace. Make the file change DIRECTLY through the GitHub API with github.put_files (all files in ONE call). Do NOT start Venus Code, do NOT open the computer. If the owner did not name the repository (owner/name), ask which one.${noGithub}`;
   }
 
-  // ---- Venus Pro: its OWN computer (unless it needs assets the computer agent downloaded) ----
+  // ---- Venus Pro: its OWN studio computer. Assets (photos, logos, footage) are downloaded onto IT, never onto the chat's computer. ----
 
-  async function startVenus(chat: Chat, brief: string, opts: { silent?: boolean } = {}): Promise<string> {
+  /** Calls the template API of the account (list, get, save, delete). */
+  async function templateApi(action: string, extra: Record<string, unknown> = {}) {
+    if (!user) throw new Error("Not signed in.");
+    const res = await fetch("/api/venus/template", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) },
+      body: JSON.stringify({ action, uid: user.uid, ...extra }),
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data?.error || "Template request failed.");
+    return data;
+  }
+
+  /** The saved template this request means (a marker, its name, or "a launch video"), or null. */
+  async function templateFor(brief: string): Promise<VideoTemplate | null> {
+    try {
+      const all = ((await templateApi("list")).templates ?? []) as TemplateListItem[];
+      const hit = pickTemplate(brief, all);
+      return hit ? ((await templateApi("get", { id: hit.id })).template as VideoTemplate) : null;
+    } catch { return null; }
+  }
+
+  /** What Venus Pro reports while it works: the bar above the message box and the working steps of the chat. */
+  function venusHooks(chatId: string): PipelineHooks {
+    return {
+      log: (m) => { setVenusRun((prev) => (prev ? { ...prev, label: m.slice(0, 100) } : prev)); workSet(chatId, m.slice(0, 110), "venus"); },
+      progress: (p) => {
+        setVenusRun((prev) => (prev ? { ...prev, label: p?.label ?? prev.label, value: p ? p.value : null } : prev));
+        if (p) workSet(chatId, `${p.label}${p.value != null ? " " + Math.round(p.value * 100) + "%" : ""}`, "venus");
+      },
+      update: () => {}, cancelled: () => false,
+    };
+  }
+
+  async function startVenus(chat: Chat, briefIn: string, opts: { silent?: boolean } = {}): Promise<string> {
     if (!user) return "";
     const out = (m: string) => { if (!opts.silent) say(chat.id, m); return m; };
     if (!e2bKey) return out("Venus Pro needs an E2B key. Add it under API keys first.");
@@ -1028,38 +1067,48 @@ export default function DashboardPage() {
     venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
-    const opt = guessVenusOptions(brief);
     if (showWork) workStart(chat.id, "Venus Pro shuru ho raha hai…", "venus");
-    setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
+    setVenusRun({ title: briefIn.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
     try {
-      // Assets are downloaded by the computer agent onto the chat's computer, so then the video is made there too.
-      // Otherwise Venus Pro gets its own studio computer and never waits for the chat's computer.
-      const needsAssets = /\b(assets?|footage|stock|photos?|images?|logos?|clips?|b-?roll|download)\b/i.test(brief);
-      let sid: string | undefined;
-      if (needsAssets) {
-        workSet(chat.id, "Computer assets download kar raha hai…", "venus");
-        setVenusRun((p) => (p ? { ...p, label: "The computer is downloading assets…" } : p));
-        await runPcTask(chat, `Find and download 5-10 royalty-free images or short video clips (and logos if the brief names a brand) for a video about: ${brief.slice(0, 400)}. Save them into the folder ~/venus-assets (create it if needed) with short file names using only letters, numbers and dashes (e.g. skyline-night.jpg). Use free sources (Pexels, Pixabay, Unsplash, Wikimedia). Finish by listing the file names you saved.`, false, { quiet: true });
-        sid = sandboxRef.current[chat.id] ?? undefined;
-        if (!sid) return out("The computer for downloading assets could not be started — turn it on with the monitor button first.");
+      // 1) a video attached in this chat is EDITED (the same video), unless the owner asks for a brand-new one from scratch
+      const att = recentVideoRef.current[chat.id];
+      const editing = Boolean(att && Date.now() - att.at < 30 * 60_000 && !NEW_FROM_SCRATCH.test(briefIn));
+      let source: SourceRef | undefined;
+      if (editing && att) {
+        const links = await attachmentLinks(chat.id, [att.id]);
+        if (!links.length) return out("The attached video could not be opened. Attach it again and ask once more.");
+        source = { kind: "url", url: links[0].url, name: att.name };
+        delete recentVideoRef.current[chat.id];
       }
-      if (!opts.silent) say(chat.id, `🎬 Venus Pro is making your video (${opt.seconds}s, ${opt.aspect}) on its own computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
+      // 2) a saved template (a marker, its name, or "a launch video") is cloned: same look, pace and structure, new content
+      const tpl = editing ? null : await templateFor(briefIn);
+      const brief = stripTemplateMarker(briefIn);
+      const opt = guessVenusOptions(brief);
+      const asked = findSeconds(brief);
+      const wantsShape = /9:16|1:1|16:9|reel|shorts?|tiktok|vertical|square|story/i.test(brief);
+      const seconds = editing ? asked ?? 60 : tpl && !asked ? Math.min(3600, Math.max(15, Math.round(tpl.seconds))) : opt.seconds;
+      const aspect = tpl && !wantsShape ? tpl.aspect : opt.aspect;
+      setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
+      if (!opts.silent) {
+        say(chat.id, editing
+          ? `✂️ Venus Pro is editing YOUR video “${att?.name}” (about ${seconds}s) on its own computer. Progress shows above the message box. Keep this tab open.`
+          : tpl
+            ? `🧬 Venus Pro is making your video (${seconds}s, ${aspect}) as a clone of the template “${tpl.name}”, on its own computer. Progress shows above the message box. Keep this tab open.`
+            : `🎬 Venus Pro is making your video (${seconds}s, ${aspect}) on its own computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
+      }
 
       const project: VenusProject = {
         id: "v" + Date.now().toString(36), title: brief.replace(/\s+/g, " ").slice(0, 48), brief,
-        seconds: opt.seconds, aspect: opt.aspect, theme: "midnight", voice: Boolean(apiKeys.openai), voiceName: "nova",
-        captions: true, quality: "720p", review: true, design: "ai", music: true, origin: "chat", chatId: chat.id,
+        seconds, aspect, theme: "midnight", voice: editing ? false : Boolean(apiKeys.openai), voiceName: "nova",
+        captions: true, quality: "720p", review: true, design: "ai", music: editing ? /\bmusic\b/i.test(brief) : true, origin: "chat", chatId: chat.id,
         provider: chat.provider, model: chat.model, stage: "studio", status: "idle", createdAt: Date.now(), updatedAt: Date.now(),
+        ...(editing
+          ? { mode: "edit" as const, source, keepAll: /\b(full|whole|entire|keep all|poora|pura)\b/i.test(brief), matchSource: !wantsShape }
+          : { mode: "make" as const }),
+        ...(tpl ? { templateJson: JSON.stringify(tpl), templateName: tpl.name } : {}),
       };
-      const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels), sandboxId: sid };
-      const final = await runPipeline(env, {
-        log: (m) => { setVenusRun((prev) => (prev ? { ...prev, label: m.slice(0, 100) } : prev)); workSet(chat.id, m.slice(0, 110), "venus"); },
-        progress: (p) => {
-          setVenusRun((prev) => (prev ? { ...prev, label: p?.label ?? prev.label, value: p ? p.value : null } : prev));
-          if (p) workSet(chat.id, `${p.label}${p.value != null ? " " + Math.round(p.value * 100) + "%" : ""}`, "venus");
-        },
-        update: () => {}, cancelled: () => false,
-      }, project, "studio");
+      const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels) };
+      const final = await runPipeline(env, venusHooks(chat.id), project, "studio");
       if (final.status === "done" && final.finalPath) {
         const url = await signedUrl(env, final.finalPath, "venus-video.mp4").catch(() => "");
         const msg = `✅ Your video is ready: **${final.title}**.\n\n- [Open and edit it in Venus Pro](/venus?project=${final.id})${url ? `\n- [Download the video](${url})` : ""}`;
@@ -1072,6 +1121,44 @@ export default function DashboardPage() {
     } finally {
       venusBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setVenusRun(null);
       if (showWork) workEnd(chat.id, "venus");
+    }
+  }
+
+  /** A video was attached and the owner wants it studied: Venus Pro saves its look, pace and structure as a TEMPLATE
+   *  (and as a "video" skill of this chat), so a new video can be made in the same style at any time. Works for every video. */
+  async function analyzeTemplateFor(chat: Chat, att: { id: string; name: string }, hint: string, meta: { name?: string; category?: string } = {}): Promise<string> {
+    if (!user) return "";
+    const out = (m: string) => { say(chat.id, m); return m; };
+    if (!e2bKey) return out("Venus Pro needs an E2B key. Add it under API keys first.");
+    if (cfg && !cfg.supabase) return out("Venus Pro needs Supabase for video storage. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel and redeploy.");
+    if (venusBusyRef.current.has(chat.id)) return out("Venus Pro is already busy in this chat. Wait for it to finish, then ask again.");
+    if (!apiKeys[chat.provider]) return out("No API key is saved for this chat's model.");
+
+    venusBusyRef.current.add(chat.id);
+    busyChats.current.add(chat.id);
+    workStart(chat.id, "Venus Pro video ko padh raha hai…", "venus");
+    setVenusRun({ title: `Template: ${att.name}`.slice(0, 48), label: "Starting…", value: null });
+    try {
+      const links = await attachmentLinks(chat.id, [att.id]);
+      if (!links.length) return out("The video could not be opened. Attach it again and ask once more.");
+      say(chat.id, "🧬 Venus Pro is studying your video to save it as a template (about 5-10 minutes, the first time a little more). Progress shows above the message box. Keep this tab open.");
+      const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels) };
+      const r = await analyzeVideoTemplate(env, venusHooks(chat.id), {
+        provider: chat.provider, model: chat.model, chatId: chat.id, source: { kind: "url", url: links[0].url, name: att.name },
+        name: meta.name, category: meta.category || categoryOf(hint), hint,
+      });
+      if (r.template) {
+        const t = r.template;
+        const msg = `✅ Template saved: **${t.name}** (${t.category}, ${t.seconds}s, ${t.aspect}, ${t.pace} pace)\n\n${t.summary}\n\n**Structure:** ${t.structure.map((b) => `${b.role} ${b.seconds}s`).join(" → ")}\n\nNow say, for example: “make a ${t.category} video for <your product>: tagline, features, call to action”, or tap the clapperboard button next to the message box. Venus Pro clones this style.${r.skill ? `\n\nIt is also saved as a video skill in this chat: ${r.skill}.` : ""}`;
+        await sayNext(chat, msg, [`Make a ${t.category} video like this template`, "Show my saved video templates"]);
+        return msg;
+      }
+      return out(`⚠️ The template could not be saved: ${r.error ?? "unknown error"}`);
+    } catch (err) {
+      return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    } finally {
+      venusBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setVenusRun(null);
+      workEnd(chat.id, "venus");
     }
   }
 
@@ -1288,6 +1375,7 @@ export default function DashboardPage() {
   /** Used by the composer AND by the two suggestion buttons under every reply. */
   async function submitText(text: string) {
     if (!text || !user || !activeChat || sending) return;
+    if (/^\/templates?\s*$/i.test(text)) { setDraft(""); setTplOpen(true); return; }
     const chat = activeChat;
     const reply = replyTo; // the agent reply this message is about (null when the owner did not use the reply icon)
     const video = /^\/video\s+([\s\S]+)/i.exec(text);
@@ -1305,6 +1393,9 @@ export default function DashboardPage() {
     if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !cIntent && !key) { setSettingsOpen(true); return; }
 
     const files = slash ? [] : attach.filter((a) => a.status === "ready");
+    // a video attached here is the one Venus Pro edits (or studies for a template) when the owner asks for a video
+    const vidAtt = attach.find((a) => a.status === "ready" && a.kind === "video");
+    if (vidAtt) recentVideoRef.current[chat.id] = { id: vidAtt.id, name: vidAtt.name, at: Date.now() };
     const payload = text + attachmentBlock(files);
     const vision = files.find((a) => a.vision)?.vision;
     files.forEach((a) => rememberPreview(a.id, a.preview)); // the thumbnail stays visible in the sent message
@@ -1341,6 +1432,7 @@ export default function DashboardPage() {
     const taskExtra = extra + fileLinks;
 
     // explicit commands: the user chose them, no guessing
+    if (vidAtt && !video && wantsTemplateFromVideo(text)) { void analyzeTemplateFor(chat, vidAtt, text + extra); return; }
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
     if (deploy) { void runDeploy(chat, deploy[1]); return; }
     if (video) { void startVenus(chat, video[1].trim() + extra); return; }
@@ -1604,6 +1696,7 @@ export default function DashboardPage() {
                 attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
                 mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
                 replyTo={replyTo} onClearReply={() => setReplyTo(null)}
+                chatId={activeChat.id} onTemplates={() => setTplOpen(true)}
               />
             </>
           )}
@@ -1642,6 +1735,13 @@ export default function DashboardPage() {
 
       <NewChatModal open={newChatOpen} onClose={() => setNewChatOpen(false)} customAgents={customAgents} onPick={handlePickAgent} onCreateAgent={handleCreateAgent} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {activeChat && (
+        <TemplateModal
+          open={tplOpen} onClose={() => setTplOpen(false)} chatId={activeChat.id} agentName={activeChat.agentName}
+          onMake={(b) => void startVenus(activeChat, b)}
+          onAnalyze={(a, m) => void analyzeTemplateFor(activeChat, a, m.hint ?? "", { name: m.name, category: m.category })}
+        />
+      )}
       {activeChat && (
         <RoutinesPanel open={routinesOpen} onClose={() => { setRoutinesOpen(false); setRoutinePrefill(null); }} chatName={activeChat.agentName} routines={routines} prefillInstructions={routinePrefill} busyId={runningRoutineId} onCreate={handleCreateRoutine} onToggle={handleToggleRoutine} onDelete={handleDeleteRoutine} onRunNow={handleRunRoutineNow} />
       )}
