@@ -18,6 +18,8 @@ export type VenusProject = {
   error?: string; storyboardJson?: string; previewPath?: string; finalPath?: string; createdAt: number; updatedAt: number;
   /** Set when the code of the designed scenes is kept in separate documents (long videos do not fit in one Firestore document). */
   codeChunks?: number;
+  /** A saved video template that is cloned for this video (the JSON of a VideoTemplate: look, pace, structure, sound). */
+  templateJson?: string; templateName?: string;
 };
 
 const CHUNK_BYTES = 600_000;
