@@ -59,7 +59,7 @@ export type PartInfo = { index: number; total: number; title: string; summary: s
 
 export function directorPrompt(o: {
   brief: string; seconds: number; aspect: Aspect; voice: boolean | "auto"; captions: boolean;
-  design: "ai" | "mixed" | "library"; context?: string; part?: PartInfo; style?: Record<string, unknown>; scriptText?: string;
+  design: "ai" | "mixed" | "library"; context?: string; part?: PartInfo; style?: Record<string, unknown>; scriptText?: string; template?: string;
 }): string {
   const a = ASPECTS[o.aspect];
   return `You are the creative director, motion designer and sound designer of "Venus Pro", an AI motion-graphics studio. You make ONLY motion graphics: designed, animated, code-rendered scenes (not slideshows, not stock montages). Turn the brief into a storyboard for a ${o.seconds}-second video (${a.width}x${a.height}, ${o.aspect}). Reply with ONE JSON object only, no prose, no markdown fences.
@@ -101,7 +101,7 @@ DIRECTOR RULES
 - Text is SHORT (headlines max 7 words), readable on a phone, in the language of the brief (write Hindi in Devanagari when the brief is in Hindi or Hinglish and asks for Hindi; otherwise English).
 - First scene opens the video; the last is an "outro" or a closing custom scene with the product name or call to action.
 - Sound design: use "soundCue" with taste (impact for the opening reveal, whoosh for strong transitions, typing for terminals and text entry, pop/tick for items and counters, chime for the resolution, none when silence is stronger). Never put a loud effect on every scene. Do not ask for copyrighted audio.
-- ${voiceRule(o.voice)}${factsFor(o.brief + (o.context ?? ""))}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
+- ${voiceRule(o.voice)}${factsFor(o.brief + (o.context ?? ""))}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}${o.template ? `\n\n${o.template}\nTEMPLATE RULES: the scene order, the number of scenes, the rhythm, the palette, the fonts, the motion and the transitions come from the template; the words, the product, the facts and the numbers come ONLY from the brief.` : ""}
 
 OUTPUT FORMAT (example shape):
 {"thinking":{...},"title":"...","concept":"...","palette":{"bg1":"#...","bg2":"#...","accent":"#...","accent2":"#...","text":"#...","muted":"#..."},"bg":{"kind":"...","colors":["#...","#..."]},"grade":"none","fonts":{"display":"...","body":"..."},"audio":{"mood":"tech","bpm":120},"scenes":[{"type":"custom","id":"c1","seconds":4,"soundCue":"impact","headline":"...","fallbackText":"...","brief":"...","sounds":[{"at":1.2,"kind":"typing"}]}, ...]}
@@ -270,7 +270,7 @@ OUTPUT FORMAT: {"thinking":{...},"title":"...","concept":"...","palette":{...},"
 
 
 /** Long videos (several minutes up to one hour): first a chapter plan, then every chapter is written as its own storyboard. */
-export function outlinePrompt(o: { brief: string; seconds: number; aspect: Aspect; voice: boolean; chapters: number; context?: string }): string {
+export function outlinePrompt(o: { brief: string; seconds: number; aspect: Aspect; voice: boolean; chapters: number; context?: string; template?: string }): string {
   const a = ASPECTS[o.aspect];
   return `You are the creative director of "Venus Pro", an AI motion-graphics studio. The user wants ONE long video of ${Math.round(o.seconds / 60 * 10) / 10} minutes (${a.width}x${a.height}, ${o.aspect}). Plan it as ${o.chapters} chapters. Reply with ONE JSON object only, no prose, no markdown fences.
 
@@ -278,8 +278,34 @@ THE USER'S WORDS ARE THE LAW: topic, structure, style, language, tone, texts and
 Think like a documentary showrunner: a strong opening, a clear progression, variety in rhythm (data, story, explanation, humour, pause), a satisfying ending. Never invent statistics, quotes or product claims.
 
 Return {"title":"...","concept":"one sentence about the look and motion style","palette":{"bg1","bg2","accent","accent2","text","muted"} (six hex colours that fit THIS topic; not blue/purple by default),"fonts":{"display": inter|montserrat|poppins|spacegrotesk|playfair|oswald,"body": inter|poppins|spacegrotesk},"bg":{"kind": mesh|aurora|grid|halftone|stripes|rings|waves|noise|spot|blocks|flow|stars|paper|conic|topo|checker|rays|bokeh|circuit|glass,"colors":[2-4 hex]},"grade":"none|warm|cool|noir|vivid|fade|teal-orange|dream","audio":{"mood":"dark|epic|bright|tech|calm|playful"},"chapters":[{"title":"...","seconds":<number>,"summary":"2-3 sentences: exactly what is shown and said in this chapter, with the facts it may use"}]}
-The chapter seconds add up to about ${o.seconds}; each chapter is 30-75 seconds.${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
+The chapter seconds add up to about ${o.seconds}; each chapter is 30-75 seconds.${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}${o.template ? `\n\n${o.template}` : ""}
 
 BRIEF:
 ${o.brief}`;
+}
+
+
+/** Reverse-engineers a real video into a reusable TEMPLATE (look, pace, structure, sound) with slots for new content. */
+export function templateExtractPrompt(o: { facts: EditFacts; hint: string; name: string; category: string; fileName: string }): string {
+  const f = o.facts;
+  const tr = f.transcript.map((x) => `[${x.s.toFixed(1)}-${x.e.toFixed(1)}] ${x.t}`).join("\n").slice(0, 5000);
+  const ratio = f.height > f.width ? "9:16" : f.width === f.height ? "1:1" : "16:9";
+  return `You are the lead motion designer and editor of "Venus Pro". Study the REAL VIDEO below and reverse-engineer its TEMPLATE: everything needed to make a DIFFERENT video (another product, other words) in exactly the same style, pace and structure. Reply with ONE JSON object only, no prose, no markdown fences.
+
+THE VIDEO: ${f.duration.toFixed(1)}s, ${f.width}x${f.height} (${ratio}), ${f.hasAudio ? "has audio" : "NO audio"}${o.fileName ? `, file "${o.fileName}"` : ""}.
+SHOT CHANGES at (s): ${f.cuts.length ? f.cuts.map((x) => x.toFixed(1)).join(", ") : "none detected (one continuous shot or slow dissolves: judge the beats from the frames)"}
+SILENCES (start-end s): ${f.silences.length ? f.silences.map((x) => x[0].toFixed(1) + "-" + x[1].toFixed(1)).join(", ") : "none"}
+TRANSCRIPT:
+${tr || "(no speech: it is music-led or silent)"}
+CONTACT SHEET: the image holds ${f.tiles.length} frames, left to right and top to bottom, taken at (s): ${f.tiles.map((x) => x.toFixed(1)).join(", ")}. Look at it closely: backgrounds, colours, type, layout, devices, icons, light, depth, what is shown in each beat.
+${o.name ? `THE OWNER CALLS IT: ${o.name}\n` : ""}${o.category ? `KIND OF VIDEO: ${o.category}\n` : ""}${o.hint ? `THE OWNER SAID: ${o.hint.slice(0, 500)}\n` : ""}
+RULES
+- The template holds PATTERNS, never the original content: no brand names, no product names, no logos, no exact words, no numbers from this video. Write text patterns with {slots}, e.g. "{product}: {tagline}", "{feature 1}".
+- "structure" covers the WHOLE video in playing order, one entry per beat (a beat is one idea; use the shot changes and the frames). 5-30 beats. The seconds of the beats add up to about ${f.duration.toFixed(0)}.
+- Describe what you SEE and HEAR, concretely enough that a motion designer can rebuild it: colours (hex), shapes, layout, how text enters, easing, speed, camera moves, transitions, UI mockups or device frames, particles, depth.
+- "howTo" = 5-8 rules for cloning it for a new subject: what must stay identical (palette, type, rhythm, transitions), what is replaced (words, product, features), what the first 2 seconds must do, how the ending closes.
+- Never invent things that are not in the frames or the transcript.
+
+OUTPUT FORMAT:
+{"name":"short name of this style, e.g. Neon product launch","category":"launch|promo|ad|explainer|tutorial|testimonial|trailer|intro|reel|demo|announcement|recap|other","summary":"2 sentences: what kind of video it is and what makes its style recognisable","aspect":"${ratio}","seconds":${Math.round(f.duration)},"pace":"slow|medium|fast","palette":{"bg":"#hex","fg":"#hex","accent":"#hex","accent2":"#hex"},"fonts":{"display":"describe the display type and name the nearest of inter|montserrat|poppins|spacegrotesk|playfair|oswald","body":"describe the body type"},"look":"3-5 sentences: the overall visual language (backgrounds, depth, light, shapes, textures, layout rules)","typography":"how text looks and behaves (size, weight, case, placement, how it enters)","motion":"how things enter, move and leave: easing, speed, kinetic text, parallax","transitions":["the transitions used, in words"],"camera":"camera moves and framing","graphics":"UI mockups, icons, device frames, charts, particles and similar","sound":{"music":"genre, mood, bpm, energy curve","voice":"narrated? tone, gender, pace; or none","captions":"caption style or none"},"structure":[{"role":"hook|problem|reveal|feature|demo|proof|social|cta|outro|...","seconds":3.2,"visual":"what is on screen","motion":"how it moves","text":"on-screen text pattern with {slots}","transition":"into the next beat","camera":"camera","narration":"pattern of what is said, with {slots}, or empty"}],"slots":["product name","tagline","feature 1","feature 2","feature 3","call to action","website"],"howTo":"the cloning rules"}`;
 }
