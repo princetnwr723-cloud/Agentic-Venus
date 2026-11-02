@@ -4,26 +4,20 @@
 // - scriptSeconds / splitScript / enforceScript: the length of the video follows the script; the narration is the script, word for word
 // - voiceModeOf: "on" | "off" | "auto" (auto = the agent decides from the story whether a voice-over fits or music only)
 import type { Scene, Storyboard } from "@/lib/venus-schema";
-
 export type ScriptInfo = { script: string; instructions: string };
-
 const MARKER = /(?:^|\n)[ \t]*(?:(?:the|my|this)[ \t]+)?(?:script|narration|voice[\s-]?over(?:[ \t]+(?:text|script))?|dialogue|voiceover[ \t]+script)[ \t]*(?:is|:|-|–|—)[ \t]*/i;
 const LISTY = /(?:^|\n)[ \t]*(?:\d+[.)]|[-*•])[ \t]/g;
-
 export const wordsOf = (t: string): string[] => t.toLowerCase().replace(/[^\p{L}\p{N}\p{M}\s]/gu, " ").split(/\s+/).filter(Boolean);
-
-// ---------------- what is spoken, and what is only an instruction ----------------
-// A line that starts with one of these words and a colon describes the picture, the sound or the editing: it is never spoken.
 const DIRECTION_KEYS =
-  "scenes?|shots?|visuals?|video|on[- ]?screen|screen|b[- ]?roll|footage|camera|cut(?:[ \\t]+to)?|transitions?|music|sound(?:[ \\t]*effects?)?|sfx|fx|audio|bgm|background|animations?|graphics?|text(?:[ \\t]+on[ \\t]+screen)?|captions?|titles?|lower[- ]third|notes?|directions?|instructions?|style|mood|tone|colou?rs?|palette|fonts?|duration|length|aspect|format|timing|fade|zoom|pan|overlay|logo|images?|clips?|assets?|pacing|speed|emotion|delivery|effects?";
+  "scenes?|shots?|दृश्य|सीन|शॉट|संगीत|म्यूजिक|विजुअल|विज़ुअल|निर्देश|visuals?|video|on[- ]?screen|screen|b[- ]?roll|footage|camera|cut(?:[ \\t]+to)?|transitions?|music|sound(?:[ \\t]*effects?)?|sfx|fx|audio|bgm|background|animations?|graphics?|text(?:[ \\t]+on[ \\t]+screen)?|captions?|titles?|lower[- ]third|notes?|directions?|instructions?|style|mood|tone|colou?rs?|palette|fonts?|duration|length|aspect|format|timing|fade|zoom|pan|overlay|logo|images?|clips?|assets?|pacing|speed|emotion|delivery|effects?";
 const DIRECTION_LINE = new RegExp(`^(?:${DIRECTION_KEYS})(?:[ \\t]+[\\w#/.&-]+){0,2}[ \\t]*[:：]`, "i");
-const SCENE_HEAD = /^(?:scene|shot|part|chapter|act|segment|slide)[ \t]*#?\d+\b/i;
+const SCENE_HEAD = /^(?:scene|shot|part|chapter|act|segment|slide|दृश्य|सीन|शॉट|भाग|अध्याय)[ \t]*#?[\d०-९]+/i;
+// a direction in the MIDDLE of a line ("... set up. Visual: phone mockup. Try it today"): it runs to the end of its sentence
+const INLINE_DIRECTION = /(^|[.!?।]\s+)(?:visuals?|music|sfx|sound effects?|camera|b[- ]?roll|on[- ]?screen(?: text)?|transition|scene[ \t]*\d*|shot[ \t]*\d*|दृश्य|संगीत)[ \t]*[:：][^.!?।\n]*[.!?।]?/gi;
 const SPEAKER = /^(?:narrator|narration|voice[\s-]?over|voiceover|v\.?o\.?|speaker(?:[ \t]*\d+)?|host|presenter|anchor)[ \t]*[:：][ \t]*/i;
 const SECTION = /^(?:hook|intro(?:duction)?|outro|conclusion|cta|call to action|opening|closing|ending|body)[ \t]*[:：][ \t]*/i;
 const STAMP = /^[(\[]?\d{1,2}:\d{2}(?::\d{2})?(?:[ \t]*[-–—][ \t]*\d{1,2}:\d{2}(?::\d{2})?)?[)\]]?[ \t]*[-–—:]?[ \t]*/;
 const CUE = /^\s*(?:pause|beat|music|sfx|sound|visual|scene|cut|fade|zoom|pan|camera|b[- ]?roll|on[- ]?screen|text|graphic|animation|transition|whisper(?:s|ing)?|laugh(?:s|ing)?|sigh(?:s|ing)?|smil(?:e|es|ing)|excited|slowly|softly|quickly|dramatic|emphasis|voice|vo|v\.o\.|sound effect|\d+\s*s(?:ec(?:onds?)?)?)\b/i;
-
-/** Splits a script into the words that are SPOKEN and the directions around them (never spoken). */
 export function splitDirections(text: string): { spoken: string; directions: string[] } {
   const directions: string[] = [];
   const keep: string[] = [];
@@ -33,30 +27,26 @@ export function splitDirections(text: string): { spoken: string; directions: str
     if (!line) { keep.push(""); continue; }
     if (/^[-=_*~]{3,}$/.test(line)) continue;
     if (/^#{1,6}\s/.test(line)) { note(line.replace(/^#+\s*/, "")); continue; }
-    // the line without bullets, numbers and bold marks, to see what it starts with
     const bare = line.replace(/^[\s>*_\-•·]+/, "").replace(/^\d+[.)]\s+/, "").replace(/\*\*|__/g, "").trim();
     if (DIRECTION_LINE.test(bare)) { note(bare); continue; }
     if (SCENE_HEAD.test(bare) && wordsOf(bare).length <= 14) { note(bare); continue; }
     let t = bare;
-    t = t.replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, "$1"); // a markdown link keeps its words
+    t = t.replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, "$1");
     t = t.replace(/\[[^\]\n]{0,240}\]/g, (m) => { note(m); return " "; });
     t = t.replace(/\{[^}\n]{0,240}\}/g, (m) => { note(m); return " "; });
     t = t.replace(/<[^>\n]{0,200}>/g, (m) => { note(m); return " "; });
     t = t.replace(/\(([^)\n]{0,200})\)/g, (m, inner: string) => (CUE.test(inner) ? (note(m), " ") : m));
+    t = t.replace(/\s+/g, " ").trim(); // a removed [cue] must not leave a space in front of "Narrator:"
     t = t.replace(STAMP, "").replace(SPEAKER, "").replace(SECTION, "");
+    t = t.replace(INLINE_DIRECTION, (m, lead: string) => { note(m.slice(lead.length)); return lead; });
     t = t.replace(/`+/g, "").replace(/\s+/g, " ").trim();
     if (/\p{L}/u.test(t)) keep.push(t);
   }
   const spoken = keep.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return { spoken: wordsOf(spoken).length >= 3 ? spoken : "", directions };
 }
-
-/** Only the words a voice should say. */
 export const spokenOnly = (t: string): string => splitDirections(t).spoken;
-
 const joinInstr = (a: string, d: string[]) => [a, ...d].filter(Boolean).join(" ").slice(0, 3000);
-
-/** The script the owner gave, or null when the brief is a normal brief. `forced` = the owner ticked "this is my script". */
 export function detectScript(brief: string, forced?: boolean): ScriptInfo | null {
   if (forced === false) return null;
   const text = brief.trim();
