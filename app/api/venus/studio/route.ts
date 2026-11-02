@@ -551,6 +551,13 @@ base64 -w0 sheet.jpg`;
         return NextResponse.json({ analysis, source: { path: `p/${pid}/vid/src.mp4`, duration: analysis.duration, width: analysis.width, height: analysis.height, hasAudio: analysis.hasAudio }, image: img.stdout.trim(), mediaType: "image/jpeg" });
       }
 
+      // The working files of a project that is finished with (a template analysis leaves a big video behind).
+      case "forget": {
+        const pid = safeId(body.projectId);
+        await exec(sb, `cd ${DIR} && rm -rf work/${pid} public/p/${pid}`, 30_000).catch(() => null);
+        return NextResponse.json({ ok: true });
+      }
+
       default:
         return fail("Unknown action.", 400);
     }
