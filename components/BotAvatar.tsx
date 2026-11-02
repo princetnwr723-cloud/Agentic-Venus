@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
-import { buildTheme, mix, type AvatarTheme } from "@/lib/avatar-theme";
+import { useEffect, useId, useState, type CSSProperties } from "react";
+import { buildTheme, type AvatarTheme } from "@/lib/avatar-theme";
 import { parseAvatar, type AvatarColor, type MascotExpr } from "@/lib/bots";
 
 const STAR =
@@ -41,213 +41,6 @@ function hash(s: string) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
   return Math.abs(h);
-}
-
-/* ------------------------------------------------------------------ */
-/* Fur: fluffy scalloped edge + hair strands + soft inner tufts        */
-/* Built ONCE at module load (seeded, so every avatar looks the same), */
-/* merged into a few <path>s per shade so it stays cheap to render.    */
-/* ------------------------------------------------------------------ */
-
-const TONES = 5; // 0 = lightest ... 4 = darkest
-
-function rng(seed: number) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-const f1 = (n: number) => n.toFixed(1);
-
-type FurSet = { bumps: string[]; strands: string[] };
-
-function emptyTones(): string[] {
-  return Array.from({ length: TONES }, () => "");
-}
-
-// the body is shaded by a radial gradient (light top-left, dark bottom-right) -> pick the matching tone
-function bodyTone(x: number, y: number): number {
-  const s = Math.min(1, Math.hypot((x - 622) / 600, (y - 540) / 627));
-  const idx = s < 0.55 ? (s / 0.55) * 2 : 2 + ((s - 0.55) / 0.45) * 2;
-  return Math.max(0, Math.min(TONES - 1, Math.round(idx)));
-}
-
-function buildRing(o: {
-  cx: number;
-  cy: number;
-  rx: number;
-  ry: number;
-  bumps: number;
-  bumpR: number;
-  strands: number;
-  len: number;
-  seed: number;
-  skip?: (x: number, y: number) => boolean;
-  tone: (x: number, y: number) => number;
-}): FurSet {
-  const r = rng(o.seed);
-  const out: FurSet = { bumps: emptyTones(), strands: emptyTones() };
-  const clampT = (n: number) => Math.max(0, Math.min(TONES - 1, n));
-
-  // fluffy "cloud" bumps = scalloped silhouette
-  for (let i = 0; i < o.bumps; i++) {
-    const a = (i / o.bumps) * Math.PI * 2 + (r() - 0.5) * 0.12;
-    const x = o.cx + o.rx * 0.99 * Math.cos(a);
-    const y = o.cy + o.ry * 0.99 * Math.sin(a);
-    const rad = o.bumpR * (0.8 + r() * 0.5);
-    if (o.skip?.(x, y)) continue;
-    const k = clampT(o.tone(x, y));
-    out.bumps[k] += `M ${f1(x - rad)} ${f1(y)} a ${f1(rad)} ${f1(rad)} 0 1 0 ${f1(rad * 2)} 0 a ${f1(rad)} ${f1(rad)} 0 1 0 ${f1(-rad * 2)} 0 Z `;
-  }
-
-  // hair strands sticking out, each with a little curl
-  for (let i = 0; i < o.strands; i++) {
-    const a = (i / o.strands) * Math.PI * 2 + (r() - 0.5) * ((Math.PI * 2) / o.strands) * 0.9;
-    const ca = Math.cos(a);
-    const sa = Math.sin(a);
-    const bx = o.cx + o.rx * 0.93 * ca;
-    const by = o.cy + o.ry * 0.93 * sa;
-    if (o.skip?.(bx, by)) continue;
-    let nx = ca / o.rx;
-    let ny = sa / o.ry;
-    const nl = Math.hypot(nx, ny) || 1;
-    nx /= nl;
-    ny /= nl;
-    const L = o.len * (0.65 + r() * 0.85);
-    const curl = (r() - 0.5) * 1.1;
-    const mx = bx + nx * L * 0.55 - ny * L * curl * 0.45;
-    const my = by + ny * L * 0.55 + nx * L * curl * 0.45;
-    const tx = bx + nx * L - ny * L * curl * 0.9;
-    const ty = by + ny * L + nx * L * curl * 0.9;
-    const k = clampT(o.tone(bx, by) + (r() < 0.5 ? -1 : 0) + (r() < 0.2 ? 1 : 0));
-    out.strands[k] += `M ${f1(bx)} ${f1(by)} Q ${f1(mx)} ${f1(my)} ${f1(tx)} ${f1(ty)} `;
-  }
-  return out;
-}
-
-const inBody = (x: number, y: number, k = 0.9) =>
-  ((x - 712) / 375) ** 2 + ((y - 713) / 392) ** 2 < k * k;
-
-const FUR_BODY = buildRing({
-  cx: 712,
-  cy: 713,
-  rx: 375,
-  ry: 392,
-  bumps: 34,
-  bumpR: 50,
-  strands: 120,
-  len: 62,
-  seed: 7,
-  tone: bodyTone,
-});
-
-const FUR_LOBE_L = buildRing({
-  cx: 388,
-  cy: 770,
-  rx: 120,
-  ry: 135,
-  bumps: 12,
-  bumpR: 34,
-  strands: 26,
-  len: 44,
-  seed: 21,
-  skip: (x, y) => inBody(x, y, 0.97),
-  tone: () => 2,
-});
-
-const FUR_LOBE_R = buildRing({
-  cx: 1036,
-  cy: 770,
-  rx: 120,
-  ry: 135,
-  bumps: 12,
-  bumpR: 34,
-  strands: 26,
-  len: 44,
-  seed: 33,
-  skip: (x, y) => inBody(x, y, 0.97),
-  tone: () => 2,
-});
-
-// arms are generated around (0,0) and placed with translate + rotate
-const FUR_ARM = buildRing({
-  cx: 0,
-  cy: 0,
-  rx: 102,
-  ry: 74,
-  bumps: 14,
-  bumpR: 24,
-  strands: 24,
-  len: 34,
-  seed: 55,
-  tone: () => 1,
-});
-
-// short soft tufts scattered over the tummy / cheeks / forehead (never over the face)
-const INNER = (() => {
-  const r = rng(99);
-  let light = "";
-  let dark = "";
-  let n = 0;
-  let guard = 0;
-  while (n < 80 && guard++ < 2000) {
-    const a = r() * Math.PI * 2;
-    const rr = Math.sqrt(r()) * 0.9;
-    const x = 712 + 375 * rr * Math.cos(a);
-    const y = 713 + 392 * rr * Math.sin(a);
-    if (x > 430 && x < 995 && y > 480 && y < 930) continue; // face + laptop zone
-    let dx = x - 712;
-    let dy = y - 700;
-    const dl = Math.hypot(dx, dy) || 1;
-    dx /= dl;
-    dy /= dl;
-    const L = 34 + r() * 40;
-    const bend = (r() - 0.5) * 0.8;
-    const x2 = x + dx * L - dy * L * bend;
-    const y2 = y + dy * L + dx * L * bend;
-    const mx = x + dx * L * 0.5 - dy * L * bend * 0.6;
-    const my = y + dy * L * 0.5 + dx * L * bend * 0.6;
-    const seg = `M ${f1(x)} ${f1(y)} Q ${f1(mx)} ${f1(my)} ${f1(x2)} ${f1(y2)} `;
-    if (r() < 0.55) light += seg;
-    else dark += seg;
-    n++;
-  }
-  return { light, dark };
-})();
-
-function FurRing({
-  set,
-  tones,
-  sw,
-  strands = true,
-}: {
-  set: FurSet;
-  tones: string[];
-  sw: number;
-  strands?: boolean;
-}) {
-  return (
-    <g>
-      {set.bumps.map((d, i) => (d ? <path key={`b${i}`} d={d} fill={tones[i]} /> : null))}
-      {strands &&
-        set.strands.map((d, i) =>
-          d ? (
-            <path
-              key={`s${i}`}
-              d={d}
-              fill="none"
-              stroke={tones[i]}
-              strokeWidth={sw}
-              strokeLinecap="round"
-            />
-          ) : null
-        )}
-    </g>
-  );
 }
 
 function Antenna({ t, side }: { t: AvatarTheme; side: "l" | "r" }) {
@@ -385,10 +178,6 @@ function Face({ expr, uid, t }: { expr: MascotExpr; uid: string; t: AvatarTheme 
         <g className="mv-wink">
           <path d="M 772 680 C 792 628 852 602 904 688" fill="none" stroke={t.line} strokeWidth="12" strokeLinecap="round" />
           <path d="M 794 668 C 828 642 866 646 886 666" fill="none" stroke={t.line} strokeWidth="8" strokeLinecap="round" />
-        </g>
-        <g className="mv-cheek" opacity="0.7">
-          <ellipse cx="500" cy="790" rx="46" ry="30" fill={t.blushLight} />
-          <ellipse cx="924" cy="790" rx="46" ry="30" fill={t.blushLight} />
         </g>
         <Smile t={t} d="M 645 782 Q 712 866 779 782" w={12} />
       </g>
@@ -637,10 +426,6 @@ function Face({ expr, uid, t }: { expr: MascotExpr; uid: string; t: AvatarTheme 
     <g>
       <BigEye t={t} cx={579} cy={637} rx={89} ry={118} px={598} py={641} prx={58} pry={72} hx={572} hy={613} hr={18} />
       <BigEye t={t} cx={841} cy={637} rx={89} ry={118} px={829} py={641} prx={58} pry={72} hx={803} hy={613} hr={18} />
-      <g className="mv-cheek" opacity="0.7">
-        <ellipse cx="500" cy="790" rx="46" ry="30" fill={t.blushLight} />
-        <ellipse cx="924" cy="790" rx="46" ry="30" fill={t.blushLight} />
-      </g>
       <Smile t={t} d="M 645 782 Q 712 866 779 782" />
     </g>
   );
@@ -678,26 +463,17 @@ function Mascot({
   size,
   working,
   animate,
-  fur,
 }: {
   value: AvatarColor;
   size: number;
   working: boolean;
   animate: boolean;
-  fur: boolean;
 }) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const { expr, hex } = parseAvatar(value);
   const t = buildTheme(hex);
   const delay = (hash(uid) % 40) / 10;
   const showBrows = !NO_BROWS.includes(expr);
-  // lightest -> darkest shades of this mascot, used by all the fur
-  const tones = useMemo(
-    () => [t.hi, mix(t.hi, t.body, 0.5), t.body, mix(t.body, t.shade, 0.5), t.shade],
-    [t.hi, t.body, t.shade]
-  );
-  const fluff = fur && size >= 14; // scalloped fluffy edge
-  const hairy = fur && size >= 36; // strands + tufts (too fine to see when tiny)
 
   // the PC comes out of the avatar's back when work starts and goes back in when it ends
   const [pc, setPc] = useState<"off" | "in" | "out">(working ? "in" : "off");
@@ -750,31 +526,10 @@ function Mascot({
           </g>
         </g>
 
-        {/* fluffy fur behind the body (scalloped edge + hair strands) */}
-        {fluff && (
-          <g>
-            <FurRing set={FUR_LOBE_L} tones={tones} sw={16} strands={hairy} />
-            <FurRing set={FUR_LOBE_R} tones={tones} sw={16} strands={hairy} />
-            <FurRing set={FUR_BODY} tones={tones} sw={20} strands={hairy} />
-          </g>
-        )}
-
         {/* side lobes + body */}
         <ellipse cx="388" cy="770" rx="120" ry="135" fill={t.body} />
         <ellipse cx="1036" cy="770" rx="120" ry="135" fill={t.body} />
         <ellipse cx="712" cy="713" rx="375" ry="392" fill={`url(#${uid}g)`} />
-
-        {/* soft fur tufts on the body + a baby curl on top */}
-        {hairy && (
-          <g fill="none" strokeLinecap="round">
-            <path d={INNER.dark} stroke={t.shade} strokeOpacity="0.22" strokeWidth="13" />
-            <path d={INNER.light} stroke={t.hi} strokeOpacity="0.5" strokeWidth="13" />
-            <path d="M 712 352 C 706 300 764 276 778 318 C 788 348 746 360 742 332" stroke={t.shade} strokeOpacity="0.3" strokeWidth="30" />
-            <path d="M 712 352 C 706 300 764 276 778 318 C 788 348 746 360 742 332" stroke={t.arm} strokeWidth="22" />
-            <path d="M 672 366 C 650 330 624 322 612 340" stroke={t.arm} strokeWidth="18" />
-            <path d="M 752 366 C 776 336 806 334 814 354" stroke={t.arm} strokeWidth="18" />
-          </g>
-        )}
 
         {/* antennae with stars */}
         <Antenna t={t} side="l" />
@@ -796,19 +551,9 @@ function Mascot({
 
         {/* arms */}
         <g className="mv-arm-l">
-          {fluff && (
-            <g transform="translate(368 830) rotate(35)">
-              <FurRing set={FUR_ARM} tones={tones} sw={13} strands={hairy} />
-            </g>
-          )}
           <ellipse cx="368" cy="830" rx="102" ry="74" transform="rotate(35 368 830)" fill={t.arm} stroke={t.shade} strokeOpacity="0.35" strokeWidth="5" />
         </g>
         <g className="mv-arm-r">
-          {fluff && (
-            <g transform="translate(1056 830) rotate(-35)">
-              <FurRing set={FUR_ARM} tones={tones} sw={13} strands={hairy} />
-            </g>
-          )}
           <ellipse cx="1056" cy="830" rx="102" ry="74" transform="rotate(-35 1056 830)" fill={t.arm} stroke={t.shade} strokeOpacity="0.35" strokeWidth="5" />
         </g>
 
@@ -837,7 +582,6 @@ export default function BotAvatar({
   ring = false,
   working = false,
   animate = true,
-  fur = true,
 }: {
   color: AvatarColor;
   paired?: AvatarColor;
@@ -845,16 +589,15 @@ export default function BotAvatar({
   ring?: boolean;
   working?: boolean;
   animate?: boolean;
-  fur?: boolean;
 }) {
   if (paired) {
     return (
       <div className="relative shrink-0" style={{ width: size, height: size }}>
         <div className="absolute left-0 top-0">
-          <Mascot value={paired} size={size * 0.72} working={working} animate={animate} fur={fur} />
+          <Mascot value={paired} size={size * 0.72} working={working} animate={animate} />
         </div>
         <div className="absolute bottom-0 right-0 rounded-full ring-2 ring-panel">
-          <Mascot value={color} size={size * 0.72} working={working} animate={animate} fur={fur} />
+          <Mascot value={color} size={size * 0.72} working={working} animate={animate} />
         </div>
       </div>
     );
@@ -865,7 +608,7 @@ export default function BotAvatar({
       className={`shrink-0 ${ring ? "rounded-full ring-2 ring-gold/70" : ""}`}
       style={{ width: size, height: size }}
     >
-      <Mascot value={color} size={size} working={working} animate={animate} fur={fur} />
+      <Mascot value={color} size={size} working={working} animate={animate} />
     </div>
   );
 }
