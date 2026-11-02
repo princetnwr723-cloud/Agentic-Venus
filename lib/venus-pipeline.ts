@@ -3,7 +3,8 @@ import { listChats } from "@/lib/chats";
 import { acquire, releaseNow, touch } from "@/lib/computers";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { hydrateProject, saveProject, type Stage, type VenusProject } from "@/lib/venus";
+import { hydrateProject, saveProject, type SourceRef, type Stage, type VenusProject } from "@/lib/venus";
+import { templateContext, type VideoTemplate } from "@/lib/venus-clone";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
 import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
 import { findSeconds } from "@/lib/dashboard/helpers";
@@ -500,7 +501,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const m = /ERR: ([^\n]+)/.exec(res.log);
         throw new Error(m ? m[1] : "Your video could not be prepared:\n" + res.log.slice(-400));
       }
-      if (src.kind === "upload" && src.path) void mediaCall(env, "delete", { paths: [src.path] }).catch(() => {}); // the studio computer has its own copy now
+      if (src.kind === "upload" && src.path && !src.path.includes("/attachments/")) void mediaCall(env, "delete", { paths: [src.path] }).catch(() => {}); // the studio computer has its own copy now
       say("✅ Your video is ready for editing.");
     }
 
@@ -537,6 +538,11 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       const files = agentSid ? (((await pcCall(env, "listassets", { sandboxId: agentSid }).catch(() => ({ files: [] as string[] }))).files ?? []) as string[]) : [];
       const memory = brainPrompt(brain, run.p.brief, { noSkills: true });
       const assetsNote = files.length ? `\n\nAssets the computer already downloaded (use up to 6 by setting a scene's "assetFile" to the EXACT file name; images → type "image", videos → type "footage"): ${files.slice(0, 40).join(", ")}` : "";
+      // a saved video template: the new video is a clone of its look, pace and structure (only the content is new)
+      let tpl: VideoTemplate | null = null;
+      try { tpl = run.p.templateJson ? (JSON.parse(run.p.templateJson) as VideoTemplate) : null; } catch { tpl = null; }
+      const tplNote = tpl ? templateContext(tpl, { seconds: run.p.seconds }) : "";
+      if (tpl) say(`🧬 Cloning the template “${tpl.name}”: same look, pace and structure, with your content.`);
 
       if (run.p.mode === "edit") {
         // ---------- the agent edits the user's own video ----------
@@ -571,8 +577,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         // ---------- a long video (up to one hour): chapter plan first, then every chapter is written on its own ----------
         say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
         hooks.progress({ label: "Chapter plan", value: null });
-        const ctx = memory + (aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
-        const ob = { kind: "outline", brief: scriptInfo ? `${scriptInfo.instructions}\nTopic of the script: ${scriptInfo.script.slice(0, 600)}` : run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg !== false, context: ctx };
+        const ctx = memory + (tpl ? "" : aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
+        const ob = { kind: "outline", brief: scriptInfo ? `${scriptInfo.instructions}\nTopic of the script: ${scriptInfo.script.slice(0, 600)}` : run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg !== false, context: ctx, template: tplNote || undefined };
         let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
         if (!o.chapters) { say("First attempt failed — trying again…"); o = await aiCall(env, run.p, ob); }
         if (!o.chapters) throw new Error(o.error || "Could not plan the chapters.");
@@ -590,7 +596,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
             const ch = chapters[k];
             const pb = {
               kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: ch.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg, scriptText: scriptInfo ? ch.summary : undefined, captions: run.p.captions,
-              design: "ai", context: memory + assetsNote, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
+              design: "ai", context: memory + assetsNote, template: tplNote || undefined, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
             };
             let r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
             if (!r.storyboard) r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
@@ -618,13 +624,13 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         hooks.progress({ label: "Storyboard", value: null });
         const context =
           memory +
-          (aiOwn
+          (tpl ? "" : aiOwn
             ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject, and it must not look like a template video): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.`
             : `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.`) +
           assetsNote;
         const body = {
           kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
-          voice: voiceArg, scriptText: scriptInfo?.script, captions: run.p.captions, design: "ai", context,
+          voice: voiceArg, scriptText: scriptInfo?.script, captions: run.p.captions, design: "ai", context, template: tplNote || undefined,
         };
         let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
         if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
@@ -674,12 +680,12 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         }
         // 2) stock media for scenes that only have a search query
         const idxs = cur.scenes
-          .map((s, i) => (!s.image && !s.video && ((s.type === "image" && s.imageQuery) || (s.type === "footage" && s.footageQuery)) ? i : -1))
+          .map((s, i) => (!s.image && !s.video && ((s.type === "image" && s.imageQuery) || (env.pexels && s.type === "footage" && s.footageQuery)) ? i : -1))
           .filter((i) => i >= 0);
         if (idxs.length > 0) {
-          if (!env.pexels) say("ℹ️ PEXELS_API_KEY is not set — remaining photo/footage scenes use a gradient. (Tip: ask the agent in chat to download assets for you.)");
-          else {
-            say("🖼️ Finding stock photos and footage…");
+          {
+            if (!env.pexels && cur.scenes.some((s) => s.type === "footage" && s.footageQuery && !s.video)) say("ℹ️ Stock video clips need PEXELS_API_KEY (not set): those scenes use a designed background. Photos and logos are still downloaded.");
+            say("🖼️ Downloading photos, logos and footage onto Venus Pro's own computer…");
             for (const [n, i] of idxs.entries()) {
               check(run);
               hooks.progress({ label: `Media ${n + 1}/${idxs.length}`, value: n / idxs.length });
@@ -816,4 +822,73 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
   }
   if (run.sid) void releaseNow(env.e2bKey, run.sid); // work is over → switch the studio computer off
   return run.p;
+}
+
+
+/**
+ * Studies a real video and saves it as a reusable TEMPLATE (look, pace, structure, sound), then returns it.
+ * Same first steps as editing a video (the studio computer takes the video in and finds shots, silences and speech),
+ * but the result is a template, not an edit. Nothing is added to the project list.
+ */
+export async function analyzeVideoTemplate(
+  env: PipelineEnv, hooks: PipelineHooks,
+  o: { provider: ProviderId; model: string; chatId: string; source: SourceRef; name?: string; category?: string; hint?: string }
+): Promise<{ template?: VideoTemplate; skill?: string | null; error?: string }> {
+  const now = Date.now();
+  const p: VenusProject = {
+    id: "t" + now.toString(36), title: "Template analysis", brief: "", seconds: 30, aspect: "16:9", theme: "midnight", voice: false, voiceName: "nova",
+    captions: false, quality: "720p", review: false, origin: "chat", chatId: o.chatId, provider: o.provider, model: o.model,
+    stage: "studio", status: "running", createdAt: now, updatedAt: now, mode: "edit", source: o.source,
+  };
+  const run = newRun(env, hooks, p);
+  const say = hooks.log;
+  try {
+    say("🎬 Checking the studio computer…");
+    hooks.progress({ label: "Computer", value: null });
+    await ensureStudio(run);
+    say("📥 Taking in the video…");
+    hooks.progress({ label: "Reading the video", value: null });
+    const st = await studioCall(env, "ingest-start", { sandboxId: run.sid, projectId: p.id, source: o.source });
+    if (!st.speech) say("ℹ️ No OpenAI key found for reading the speech: the template is built from the pictures and the shot changes only.");
+    const res = await waitJob(run, st.jobId, "Reading the video", 0, 60);
+    if (!res.ok) {
+      const m = /ERR: ([^\n]+)/.exec(res.log);
+      throw new Error(m ? m[1] : "The video could not be read:\n" + res.log.slice(-400));
+    }
+    const ing = await studioCall(env, "ingest-read", { sandboxId: run.sid, projectId: p.id });
+    const an = ing.analysis as { duration: number; width: number; height: number; hasAudio: boolean; cuts: number[]; silences: Array<[number, number]>; transcript: Array<{ s: number; e: number; t: string }>; tiles: number[] };
+    say("🧬 The agent is studying the look, the pace and the structure…");
+    hooks.progress({ label: "Studying the video", value: null });
+    const body = {
+      kind: "template-extract", hint: o.hint ?? "", name: o.name ?? "", category: o.category ?? "", fileName: o.source.name ?? "",
+      facts: { duration: an.duration, width: an.width, height: an.height, fps: 30, hasAudio: an.hasAudio, cuts: an.cuts, silences: an.silences, transcript: an.transcript, tiles: an.tiles },
+      image: { mediaType: ing.mediaType, data: ing.image },
+    };
+    let r = await aiCall(env, p, body).catch((e) => ({ error: (e as Error).message }));
+    if (!r.template) { say("First attempt failed — trying again…"); r = await aiCall(env, p, body); }
+    if (!r.template) throw new Error(r.error || "The model did not return a template.");
+    hooks.progress({ label: "Saving the template", value: null });
+    const res2 = await fetch("/api/venus/template", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
+      body: JSON.stringify({
+        action: "save", uid: env.uid, chatId: o.chatId, template: r.template, name: o.name, category: o.category, sourceName: o.source.name, sourceSeconds: an.duration,
+        aspect: an.height > an.width ? "9:16" : an.width === an.height ? "1:1" : "16:9",
+      }),
+    });
+    const saved = await readJson(res2);
+    if (!res2.ok) throw new Error(saved?.error || "The template could not be saved.");
+    hooks.progress(null);
+    return { template: saved.template as VideoTemplate, skill: (saved.skill as string | null) ?? null };
+  } catch (e) {
+    hooks.progress(null);
+    const msg = e instanceof Error ? e.message : "The analysis failed.";
+    say("⚠️ " + msg);
+    return { error: msg };
+  } finally {
+    if (run.sid) {
+      await studioCall(env, "forget", { sandboxId: run.sid, projectId: p.id }).catch(() => null); // the big video is not kept on the studio computer
+      void releaseNow(env.e2bKey, run.sid);
+    }
+  }
 }
