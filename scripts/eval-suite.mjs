@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DATASET_PATH = path.join(ROOT, 'evals', 'tasks.json');
+// The 40-task quality suite lives in evals/suite.json. (evals/tasks.json belongs to the Venus Code coding evals, scripts/eval.mjs.)
+const DATASET_PATH = path.join(ROOT, 'evals', 'suite.json');
 const CATEGORIES = {
   lead_research: 10,
   browser_forms: 10,
