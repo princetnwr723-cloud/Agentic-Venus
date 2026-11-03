@@ -2,7 +2,9 @@ name: AgenticVenus routine runner
 
 # GitHub schedules are best-effort (a run can start a few minutes late). That is safe: routines are anchored to
 # wall-clock times and protected by leases, so a late or doubled tick never duplicates a run.
-# For extra safety also run `npm run routines:run` on your own machine, or point cron-job.org at the same URLs.
+# Computer tasks started from Telegram/WhatsApp are followed in near real time by /api/runner/watch;
+# this schedule is only the safety net that restarts it and finishes anything that was missed.
+# For extra safety also point cron-job.org at the same URLs.
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -25,6 +27,13 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
           RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
         run: |
+          if [ -z "$APP_URL" ] || [ -z "$RUNNER_SECRET" ]; then
+            echo "::error::GitHub secret APP_URL and/or ROUTINE_RUNNER_SECRET is missing (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+          # a pasted secret often carries a trailing space or newline: trim both ends
+          APP_URL=$(printf '%s' "$APP_URL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          RUNNER_SECRET=$(printf '%s' "$RUNNER_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           fail=0
           for path in routines/run runner/tick missions/tick proactive/tick; do
             url="${APP_URL%/}/api/${path}"
@@ -34,6 +43,9 @@ jobs:
             echo "== ${path}: HTTP ${code}"
             head -c 1500 out.txt
             echo
+            if [ "$code" = "401" ]; then
+              echo "::error::${path}: GitHub secret ROUTINE_RUNNER_SECRET is NOT the same text as ROUTINE_RUNNER_SECRET in Vercel. Set both to the same value, then redeploy on Vercel."
+            fi
             if [ "$code" = "000" ] || [ "$code" -ge 400 ]; then
               echo "::error::${path} returned HTTP ${code}"
               fail=1
