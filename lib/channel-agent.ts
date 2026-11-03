@@ -7,6 +7,7 @@ import { extractToolCalls, toolPrompt } from "@/lib/tools/prompt";
 import { brainText, runAfter } from "@/lib/channels";
 import { learnFromRun } from "@/lib/learning";
 import { audit } from "@/lib/audit";
+import { handleChannelCommand } from "@/lib/channel-control";
 
 type Turn = { role: "user" | "assistant"; content: string };
 type Pending = { name: string; args: Record<string, unknown>; summary: string };
@@ -21,13 +22,17 @@ const keep = (turns: Turn[]): Turn[] => turns.slice(-14).map((x) => turn(x.role,
  * A message from the OWNER (the sender was already checked against the allowlist) arrives in a chat app.
  * The agent answers with the same model, memory, skills and tools as the dashboard chat.
  * Anything that changes something outside asks "reply YES to approve" first.
+ * Commands (/jobs, /stop, approve <id> <PIN> ...) and answers to a waiting computer task are handled before the model sees the message.
+ * `wipe` (optional) deletes the owner's message again: used for PINs where the chat app allows it (Telegram).
  */
-export async function handleInbound(p: { uid: string; chatId: string; channel: string; from: string; text: string; reply: (t: string) => Promise<void> }) {
+export async function handleInbound(p: { uid: string; chatId: string; channel: string; from: string; text: string; reply: (t: string) => Promise<void>; wipe?: () => Promise<void> }) {
   const { uid } = p;
   const t0 = Date.now();
   const key = `${p.channel}_${p.from.replace(/[^A-Za-z0-9]/g, "")}`.slice(0, 80);
   const sref = getAdminDb().collection("users").doc(uid).collection("channelState").doc(key);
   try {
+    if (await handleChannelCommand({ uid, chatId: p.chatId, text: p.text, reply: p.reply, wipe: p.wipe })) return;
+
     const st = ((await sref.get()).data() ?? {}) as { history?: Turn[]; pending?: Pending | null };
     const agent = await loadAgent(uid, p.chatId);
     const ctx = makeCtx(uid, p.chatId);
@@ -57,7 +62,9 @@ export async function handleInbound(p: { uid: string; chatId: string; channel: s
       [
         `You are ${agent.name}, the owner's AI teammate. You are chatting with your owner in a messaging app (${p.channel}).`,
         `Reply like a chat message: short, clear, plain text (no markdown tables), in the owner's language (Hindi/Hinglish is fine). Use tools whenever they help; never say something is done unless a tool result confirms it.`,
-        `Long multi-step jobs (research many leads, call people one by one, update sheets, then report) → start a mission with mission.start instead of doing them inline. Actions that change things outside need the owner's OK: the system asks them to reply YES.`,
+        `Long multi-step jobs (research many leads, call people one by one, update sheets, then report) → start a mission with mission.start instead of doing them inline.`,
+        `Anything that needs a real BROWSER or the computer (open websites, fill forms, log in with saved logins, scrape pages, download files, buy something with an approved card) → pc.run with a complete task. It keeps running when the website is closed; questions, login help and payment approvals reach the owner in this chat, and the final result is sent here. Use pc.status to check on it and pc.stop to stop it. After pc.run, just tell the owner it started: do not wait for it.`,
+        `Actions that change things outside need the owner's OK: the system asks them to reply YES.`,
         bt.role ? `YOUR ROLE: ${bt.role}` : "",
         bt.mem ? `WHAT YOU REMEMBER:\n${bt.mem}` : "",
       ].filter(Boolean).join("\n\n") + toolPrompt(specs);
