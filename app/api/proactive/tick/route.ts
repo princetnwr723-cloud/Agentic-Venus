@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { runProactive } from "@/lib/proactive";
+import { cronDenied } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 // Called every few minutes by the GitHub Actions workflow with the same secret as the other ticks.
 export async function POST(req: Request) {
-  const secret = process.env.ROUTINE_RUNNER_SECRET;
-  if (!secret) return NextResponse.json({ error: "ROUTINE_RUNNER_SECRET is not set." }, { status: 500 });
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  const denied = cronDenied(req);
+  if (denied) return denied;
   try {
     const results = await runProactive();
     return NextResponse.json({ checked: results.length, results });
