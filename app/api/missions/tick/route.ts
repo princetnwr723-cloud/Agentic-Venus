@@ -2,15 +2,15 @@ import { NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { runAfter } from "@/lib/channels";
 import { advance, kickMission, type Mission } from "@/lib/mission";
+import { cronDenied } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 // Called by missions themselves (with uid+id) and every 5 minutes by GitHub Actions (no body) as a safety net.
 export async function POST(req: Request) {
-  const secret = process.env.ROUTINE_RUNNER_SECRET;
-  if (!secret) return NextResponse.json({ error: "ROUTINE_RUNNER_SECRET is not set." }, { status: 500 });
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  const denied = cronDenied(req);
+  if (denied) return denied;
 
   const b = (await req.json().catch(() => ({}))) as { uid?: string; id?: string };
   if (b.uid && b.id) {
