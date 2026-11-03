@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs the fixed evaluation tasks (evals/tasks.json) against a live agent endpoint, grades each answer and writes
+// Runs the fixed evaluation tasks (evals/suite.json) against a live agent endpoint, grades each answer and writes
 // results in the format that `npm run eval:check -- --results <file>` understands.
 //
 //   EVAL_ENDPOINT=https://your-app/api/eval  EVAL_TOKEN=...  npm run eval:run
@@ -74,7 +74,7 @@ export async function runTask(task, { endpoint, token, fetchImpl = fetch, timeou
 async function main() {
   const args = process.argv.slice(2);
   const arg = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
-  const dataset = JSON.parse(fs.readFileSync(path.join(ROOT, 'evals', 'tasks.json'), 'utf8'));
+  const dataset = JSON.parse(fs.readFileSync(path.join(ROOT, 'evals', 'suite.json'), 'utf8'));
   const problems = validateDataset(dataset);
   if (problems.length) { console.error(problems.map((p) => `✗ ${p}`).join('\n')); process.exit(1); }
 
