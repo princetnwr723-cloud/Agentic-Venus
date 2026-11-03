@@ -1,7 +1,7 @@
 // Called by your scheduler (GitHub Actions) every few minutes with the same secret as /api/routines/run.
-// 1) keeps background jobs alive, 2) finishes jobs nobody is watching, posts the report in the chat and
-// switches the computer off, 3) pings you when an unattended job needs an approval,
-// 4) pauses idle computers (saves money).
+// 1) keeps background jobs alive, 2) finishes jobs nobody is watching (reports to the chat and to every connected chat app,
+// forwards questions and payment approvals, switches the computer off), 3) restarts the real-time watcher for running jobs
+// and for tasks queued from chat apps, 4) pauses idle computers (saves money).
 // Plans: it also counts the time of computer-agent jobs (even with the tab closed) and stops a job
 // when the plan's computer time for the current window is used up.
 import { NextResponse } from "next/server";
@@ -9,11 +9,10 @@ import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { connect, GONE_PREFIX, pauseSandbox } from "@/lib/e2b-server";
 import { runnerStatus, stopRunner, type RunnerEvent, type RunnerState } from "@/lib/runner-server";
-import { createSignedDownload } from "@/lib/supabase-server";
 import { resolveValue } from "@/lib/vault";
-import { http } from "@/lib/tools/net";
-import { unpack } from "@/lib/tools/catalog";
-import { pcExhausted, settlePcJob, touchPcSeen } from "@/lib/billing-server";
+import { cronDenied } from "@/lib/cron-auth";
+import { postChat, processPcJob, switchOff } from "@/lib/pc-tick";
+import { kickWatcher } from "@/lib/pc-start-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -24,43 +23,13 @@ type Job = { id: string; sandboxId: string; offset?: number; hb?: number };
 type ProjectDoc = { running?: boolean; stop?: boolean; updatedAt?: number; runnerJob?: Job; log?: unknown[]; ctx?: string; chatId?: string };
 /** A chat can have several Venus Code projects ("<chatId>__<suffix>"); the chat is what gets the report and switches off the computer. */
 const chatOf = (id: string, p?: ProjectDoc) => (p?.chatId && String(p.chatId)) || id.split("__")[0];
-type PcJobDoc = { running?: boolean; task?: string; startedAt?: number; job?: Job; notified?: string };
 type Db = ReturnType<typeof getAdminDb>;
 type Ref = FirebaseFirestore.DocumentReference;
 
-async function postChat(userRef: Ref, chatId: string, content: string) {
-  const ref = userRef.collection("chats").doc(chatId);
-  const snap = await ref.get();
-  if (!snap.exists) return;
-  const msgs = Array.isArray((snap.data() as { messages?: unknown[] }).messages) ? (snap.data() as { messages: unknown[] }).messages : [];
-  await ref.update({ messages: [...msgs, { role: "assistant", content, at: Date.now() }] });
-}
-
-async function telegram(userRef: Ref, chatId: string, text: string) {
-  try {
-    const raw = ((await userRef.collection("chats").doc(chatId).get()).data() as { connectors?: Record<string, string> } | undefined)?.connectors?.telegram;
-    const c = raw ? await resolveValue(userRef.id, raw) : undefined;
-    if (!c) return;
-    const [token, chat] = unpack(c);
-    if (token && chat) await http(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chat, text: text.slice(0, 3500) }) });
-  } catch { /* notification is best-effort */ }
-}
-
-/** The work is finished and nobody is watching: switch the computer off right away. */
-async function switchOff(userRef: Ref, chatId: string, e2bKey: string, sandboxId: string) {
-  try {
-    await pauseSandbox(e2bKey, sandboxId);
-    const ref = userRef.collection("chats").doc(chatId);
-    const ch = (await ref.get()).data() as { pcSandboxId?: string | null } | undefined;
-    if (ch?.pcSandboxId === sandboxId) await ref.update({ pcPaused: true });
-  } catch { /* already off or gone */ }
-}
-
 export async function POST(req: Request) {
   const t0 = Date.now();
-  const secret = process.env.ROUTINE_RUNNER_SECRET;
-  if (!secret) return NextResponse.json({ error: "ROUTINE_RUNNER_SECRET is not set on the server." }, { status: 500 });
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  const denied = cronDenied(req);
+  if (denied) return denied;
 
   try {
     const db: Db = getAdminDb();
@@ -143,71 +112,23 @@ export async function POST(req: Request) {
 
     // ---------------- 2) background computer-agent jobs ----------------
     const pcs = await db.collectionGroup("pcJobs").where("running", "==", true).get();
+    const kicked = new Set<string>();
     for (const d of pcs.docs) {
-      const p = d.data() as PcJobDoc;
-      const job = p.job;
-      const userRef = d.ref.parent.parent;
-      if (!userRef) continue;
-      if (!job) {
-        if (Date.now() - (p.startedAt ?? 0) > 3 * 3600_000) await d.ref.update({ running: false });
-        continue;
-      }
-      try {
-        const e2bKey = await e2bFor(userRef);
-        if (!e2bKey) { out.push({ pc: d.id, skipped: "no E2B key" }); continue; }
-        let state: RunnerState & { pending?: { id: string; question?: string; site?: string; message?: string; kind?: string }; proof?: string | null } = {
-          status: "error", summary: "The computer expired or was deleted while the task was running.",
-        };
-        let pcSb: Awaited<ReturnType<typeof connect>> | null = null;
-        try {
-          pcSb = await connect(e2bKey, job.sandboxId); // keeps the computer alive while the job runs
-          state = (await runnerStatus(pcSb, job.id, 0)).state as typeof state;
-        } catch { /* expired */ }
+      const r = await processPcJob(d, e2bFor);
+      out.push(r);
+      // nobody has the site open: make sure the real-time watcher is running (it exits at once if one already is)
+      if (r.status === "running" && r.watched === false && typeof r.uid === "string" && !kicked.has(r.uid)) { kicked.add(r.uid); kickWatcher(r.uid); }
+    }
 
-        if (state.status === "running") {
-          // plan: count the time even when the tab is closed, and stop the job when the plan's time is used up
-          await touchPcSeen(userRef.id, job.id).catch(() => {});
-          if (pcSb && (await pcExhausted(userRef.id).catch(() => false))) {
-            await stopRunner(pcSb, job.id).catch(() => {});
-            await postChat(userRef, d.id, "⏱️ The computer-agent time of your plan for this window is used up, so the task was stopped. It refreshes automatically — see Settings → Plans.").catch(() => {});
-          }
-
-          const watched = Date.now() - (job.hb ?? 0) < 90_000;
-          const pend = state.pending;
-          if (!watched && pend && p.notified !== pend.id) {
-            const what = pend.kind === "login" ? `a login for ${pend.site ?? "a site"}` : pend.question ?? pend.message ?? "your input";
-            const msg = `⏸️ Your background task is waiting for ${what}. Open AgenticVenus to answer — it waits up to 30 minutes, then cancels the risky step.`;
-            await postChat(userRef, d.id, msg);
-            await telegram(userRef, d.id, msg);
-            await d.ref.update({ notified: pend.id });
-          }
-          out.push({ pc: d.id, status: "running", watched });
-          continue;
-        }
-        if (Date.now() - (job.hb ?? 0) < 90_000) { out.push({ pc: d.id, status: state.status, watched: true }); continue; } // the open tab will finish it
-
-        const ok = state.status === "done";
-        const summary = String(state.summary || (ok ? "Done." : "Stopped."));
-        let replay = "";
-        if (state.proof) { const url = await createSignedDownload(state.proof, 6 * 3600).catch(() => ""); if (url) replay = `\n\n🎥 [Watch the replay](${url}) (link works for 6 hours)`; }
-        let finalized = false;
-        await db.runTransaction(async (tx) => {
-          const c = (await tx.get(d.ref)).data() as PcJobDoc | undefined;
-          if (!c?.job || c.job.id !== job.id) return;
-          tx.update(d.ref, { running: false, job: FieldValue.delete() });
-          finalized = true;
-        });
-        if (finalized) {
-          await settlePcJob(userRef.id, job.id, state.updatedAt ?? Date.now()).catch(() => {}); // plan: close the time of this job
-          const msg = `${ok ? "✅ Your background task finished while you were away." : "⚠️ Your background task stopped:"}\n\n**${(p.task ?? "").slice(0, 120)}**\n\n${summary}${replay}\n\n🔌 The computer was switched off to save credits.`;
-          await postChat(userRef, d.id, msg);
-          await telegram(userRef, d.id, `${ok ? "✅" : "⚠️"} ${(p.task ?? "Task").slice(0, 100)}\n${summary.slice(0, 600)}`);
-          await switchOff(userRef, d.id, e2bKey, job.sandboxId);
-        }
-        out.push({ pc: d.id, status: state.status, finalized });
-      } catch (e) {
-        out.push({ pc: d.id, error: e instanceof Error ? e.message : "failed" });
-      }
+    // ---------------- 2b) tasks queued from chat apps ----------------
+    try {
+      const queued = await db.collectionGroup("pcQueue").where("status", "in", ["queued", "setup"]).get();
+      const uids = new Set<string>();
+      for (const x of queued.docs) { const u = x.ref.parent.parent?.id; if (u) uids.add(u); }
+      for (const u of [...uids].slice(0, 20)) if (!kicked.has(u)) { kicked.add(u); kickWatcher(u); }
+      out.push({ queued: queued.size });
+    } catch (e) {
+      out.push({ queue: e instanceof Error ? e.message : "failed" }); // usually the missing collection-group index; the message has the link
     }
 
     // ---------------- 3) idle reaper: pause computers nobody is using ----------------
