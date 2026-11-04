@@ -5,6 +5,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { resolveDeep, vaultDelete, vaultGet, vaultPut } from "@/lib/vault";
 import { connect, exec } from "@/lib/e2b-server";
 import { writeFiles } from "@/lib/venus-server";
+import { cleanProduct, type PayProduct } from "@/lib/pay-product";
 import {
   applySpend, brandOf, checkSpend, cleanProxy, hostMatches, luhn, maskUser, maxAmount, normSite, pageTotalChanged,
   parseAmount, spendLeft, totalLooksWrong, totp, type VpKind, type VpMeta,
@@ -31,6 +32,7 @@ class Deny extends Error {
 type PayDoc = {
   id: string; entry: string; label: string; last4: string; chatId: string; host: string;
   amount: number; detected: number | null; mismatch: boolean; note: string; tainted: boolean;
+  brand?: string; pitch?: string; product?: PayProduct | null;
   status: "pending" | "approved" | "denied" | "expired" | "used";
   createdAt: number; expiresAt: number; approvedAt?: number; approvedUntil?: number; usedAt?: number;
 };
@@ -234,12 +236,23 @@ export async function POST(req: Request) {
           const m = metas.get(p.entry);
           const left = m ? spendLeft(m, now) : { budgetLeft: null, dailyLeft: null };
           out.push({
-            id: p.id, label: p.label, last4: p.last4, host: p.host, amount: p.amount, detected: p.detected, mismatch: p.mismatch,
-            note: p.note, tainted: p.tainted, createdAt: p.createdAt, expiresAt: p.expiresAt, limit: m?.limit ?? null, ...left,
+            id: p.id, chatId: p.chatId, label: p.label, last4: p.last4, brand: p.brand ?? m?.brand ?? "", host: p.host, amount: p.amount, detected: p.detected, mismatch: p.mismatch,
+            note: p.note, pitch: p.pitch ?? "", tainted: p.tainted,
+            // the picture is big: it is fetched once with payment_image, never with every poll
+            product: p.product ? { ...p.product, image: "" } : null, hasImage: Boolean(p.product?.image), createdAt: p.createdAt, expiresAt: p.expiresAt, limit: m?.limit ?? null, ...left,
           });
         }
         out.sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
         return NextResponse.json({ payments: out.slice(0, 10) });
+      }
+
+      // The product picture of one waiting payment (only you, signed in).
+      case "payment_image": {
+        const id = s(body.id, 60);
+        if (!ID.test(id)) return fail("Unknown payment.", 400);
+        const snap = await pays.doc(id).get();
+        if (!snap.exists) return fail("That payment request does not exist.", 404);
+        return NextResponse.json({ image: (snap.data() as PayDoc).product?.image ?? "" });
       }
 
       case "approve_payment": {
@@ -316,6 +329,7 @@ export async function POST(req: Request) {
         const doc: PayDoc = {
           id: payId, entry: m.id, label: m.label, last4: m.last4 ?? "", chatId, host, amount, detected,
           mismatch: totalLooksWrong(amount, detected), note: s(body.note, 140), tainted: body.tainted === true,
+          brand: m.brand ?? "", pitch: s(body.pitch, 300), product: cleanProduct(body.product),
           status: "pending", createdAt: now, expiresAt: now + PENDING_MS,
         };
         await pays.doc(payId).set(JSON.parse(JSON.stringify(doc)));
