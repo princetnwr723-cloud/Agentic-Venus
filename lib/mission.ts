@@ -3,6 +3,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider, type ChatMsg } from "@/lib/ai-providers-server";
 import { loadAgent, placeOutboundCall, type Agent } from "@/lib/voice-calls";
 import { appBaseUrl } from "@/lib/voice-server";
+import { getTele } from "@/lib/telephony";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
 import { makeCtx } from "@/lib/tools/connectors";
 import { extractToolCalls, toolPrompt } from "@/lib/tools/prompt";
@@ -15,6 +16,8 @@ export type MissionStatus = "running" | "waiting_call" | "needs_approval" | "don
 export type Mission = {
   chatId: string; goal: string; status: MissionStatus; steps: number; maxSteps: number; calls: number; maxCalls: number;
   allowWrites: boolean; tainted: boolean; notify: string[];
+  /** The owner asked to be PHONED when the mission is over (voice call with the result, on the saved owner number). */
+  callOwner?: boolean;
   messages: Array<{ role: "user" | "assistant"; content: string }>; notes: string; log: Array<{ t: number; text: string }>;
   waitCall: string | null; pending: { name: string; args: Record<string, unknown>; summary: string } | null;
   result?: string; lease?: number; createdAt: number; updatedAt: number;
@@ -40,7 +43,10 @@ export function kickMission(uid: string, id: string) {
   try { waitUntil(p); } catch { /* not on Vercel */ }
 }
 
-export async function startMission(uid: string, p: { chatId: string; goal: string; maxCalls?: number; allowWrites?: boolean; notify?: string[]; maxSteps?: number; routine?: { id: string; runId: string } }) {
+/** "call me when it is done", "phone me with the result", "mujhe call karna": the mission ends with a phone call to the owner. */
+export const CALL_ME_RE = /\b(?:call|phone|ring|dial)\s+(?:me|the\s+owner|my\s+(?:phone|number))\b|\b(?:mujhe|mere\s+(?:number|phone)\s+(?:pe|par))\s+(?:call|phone|fone)|\bcall\s+kar(?:na|o|ke|dena|dijiye)\b|\bphone\s+kar(?:na|o|ke|dena)\b|कॉल\s*कर/i;
+
+export async function startMission(uid: string, p: { chatId: string; goal: string; maxCalls?: number; allowWrites?: boolean; notify?: string[]; maxSteps?: number; callOwner?: boolean; routine?: { id: string; runId: string } }) {
   const goal = String(p.goal || "").trim().slice(0, 4000);
   if (goal.length < 10) throw new Error("Give the mission a clear goal (what to do, for whom, what the result should be).");
   const maxCalls = Math.max(0, Math.min(50, Math.floor(Number(p.maxCalls) || 0)));
@@ -49,6 +55,7 @@ export async function startMission(uid: string, p: { chatId: string; goal: strin
   const m: Mission = {
     chatId: p.chatId, goal, status: "running", steps: 0, maxSteps: Math.max(10, Math.min(120, Math.floor(Number(p.maxSteps) || 60))),
     calls: 0, maxCalls, allowWrites: Boolean(p.allowWrites), tainted: false, notify: (p.notify ?? []).map(String).slice(0, 6),
+    callOwner: p.callOwner === true || (p.callOwner !== false && CALL_ME_RE.test(goal)),
     messages: [{ role: "user", content: `MISSION GOAL:\n${goal}` }], notes: "", log: [{ t: now, text: "Mission started" }],
     waitCall: null, pending: null, lease: 0, createdAt: now, updatedAt: now,
     ...(p.routine ? { routine: p.routine } : {}),
@@ -56,7 +63,7 @@ export async function startMission(uid: string, p: { chatId: string; goal: strin
   await ref.set(clean(m));
   await audit(uid, { kind: "mission_start", chatId: p.chatId, text: `${ref.id}: ${clip(goal, 150)} (calls ${maxCalls}, writes ${m.allowWrites})` });
   kickMission(uid, ref.id);
-  return { id: ref.id, maxCalls, allowWrites: m.allowWrites, maxSteps: m.maxSteps };
+  return { id: ref.id, maxCalls, allowWrites: m.allowWrites, maxSteps: m.maxSteps, callOwner: m.callOwner === true };
 }
 
 async function postToChat(uid: string, chatId: string, content: string) {
@@ -86,6 +93,22 @@ function systemPrompt(m: Mission, agent: Agent, specs: ToolSpec[], bt: { role: s
   ].filter(Boolean).join("\n\n") + toolPrompt(specs);
 }
 
+/** Rings the owner at the end of a mission. A failure never hides the result: it is already in the chat; the reason is added there. */
+async function callOwnerAboutMission(uid: string, m: Mission, status: "done" | "error", text: string) {
+  try {
+    const to = (await getTele(uid)).ownerNumber;
+    if (!to) throw new Error("Owner ka number saved nahi hai (chat me bolo: mera number ye hai, +91...).");
+    const goal = status === "done"
+      ? `Report to your owner: the mission is finished. MISSION: ${clip(m.goal, 300)}. RESULT: ${clip(text, 1000)}`
+      : `Tell your owner: the mission stopped with a problem. MISSION: ${clip(m.goal, 300)}. PROBLEM: ${clip(text, 700)}`;
+    const r = await placeOutboundCall(uid, { to, goal, context: "The owner asked to be phoned when this mission is over. They may ask follow-up questions or give new orders.", chatId: m.chatId, approved: true });
+    m.log.push({ t: Date.now(), text: `Called the owner (${r.to})` });
+  } catch (e) {
+    const why = e instanceof Error ? e.message : "unknown error";
+    await postToChat(uid, m.chatId, `📞 Mission khatam hui, par owner ko call nahi lag payi: ${why}`).catch(() => {});
+  }
+}
+
 async function finish(uid: string, m: Mission, status: "done" | "error" | "stopped", text: string) {
   m.status = status;
   const ref = col(uid).doc((m as Mission & { id: string }).id);
@@ -99,6 +122,8 @@ async function finish(uid: string, m: Mission, status: "done" | "error" | "stopp
     const msg = `${head}: ${clip(m.goal, 140)}\n\n${clip(text, 3500)}`;
     await postToChat(uid, m.chatId, msg).catch(() => {});
     await notifyOwner(uid, m.chatId, msg, m.notify).catch(() => {});
+    // the owner asked to be phoned when the work is over: the agent rings the saved owner number and tells the result
+    if (m.callOwner && status !== "stopped") await callOwnerAboutMission(uid, m, status, text);
   }
   if (!m.tainted && m.steps >= 4 && status !== "stopped") {
     void learnFromRun(uid, m.chatId, { task: m.goal, outcome: text, steps: m.log.map((l) => l.text).join("\n"), verdict: status === "done" ? "pass" : "fail" });
