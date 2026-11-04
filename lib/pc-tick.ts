@@ -19,7 +19,8 @@ type Pending = { id: string; kind?: string; site?: string; question?: string; op
 type PcRunState = RunnerState & { pending?: Pending | null; proof?: string | null };
 type Button = { text: string; data: string };
 
-const OTHER_CHANNELS = ["whatsapp", "sms", "slackbot", "email", "webhook"];
+// everything except Telegram (which gets its own buttons message) + the Android app push
+const OTHER_CHANNELS = ["whatsapp", "sms", "slackbot", "email", "webhook", "app"];
 
 export async function postChat(userRef: Ref, chatId: string, content: string) {
   const ref = userRef.collection("chats").doc(chatId);
