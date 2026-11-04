@@ -150,6 +150,8 @@ export function appBaseUrl(req?: Request) {
 
 /** Validates Twilio's signature. Twilio signs the exact URL configured in its dashboard, so we try the public URL first and then req.url. */
 export function verifyTwilioSignature(req: Request, authToken: string, form: FormData): boolean {
+  // Telnyx signs its webhooks in another way (Ed25519). Its saved token starts with "telnyx:": for it the signed, per-call token in the URL (checked before this) is the protection.
+  if (authToken.startsWith("telnyx:")) return true;
   const supplied = req.headers.get("x-twilio-signature") || "";
   if (!supplied || !authToken) return false;
   const u = new URL(req.url);
