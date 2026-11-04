@@ -12,6 +12,7 @@ import AttachCard from "@/components/dashboard/AttachCard";
 import FountFeedback from "@/components/fount/FountFeedback";
 import StepsPanel from "@/components/dashboard/StepsPanel";
 import ConnectCard, { parseConnectCard } from "@/components/dashboard/ConnectCard";
+import PayCards from "@/components/dashboard/PayCard";
 
 function Tool({ label, onClick, active, children }: { label: string; onClick: (e: React.MouseEvent) => void; active?: boolean; children: React.ReactNode }) {
   return (
@@ -58,6 +59,7 @@ export default function ChatThread({
   onReply,
   onRetry,
   replyingAt,
+  agentName,
 }: {
   chatId?: string;
   messages: ChatMessage[];
@@ -68,6 +70,7 @@ export default function ChatThread({
   onReply?: (preview: string, at: number) => void;
   onRetry?: (text: string) => void;
   replyingAt?: number | null;
+  agentName?: string;
 }) {
   const [copied, setCopied] = useState<number | null>(null);
 
@@ -186,6 +189,9 @@ export default function ChatThread({
           </div>
         </div>
       )}
+
+      {/* The agent wants to pay: its message and the order card (product, card, total, Allow / Deny) right here in the chat */}
+      {chatId && <PayCards chatId={chatId} agentName={agentName} />}
 
       {/* Progress: every step of the work, the one running now, and exactly where something broke (agent checklist + team plan) */}
       {chatId && <StepsPanel chatId={chatId} busy={Boolean(busy)} onRun={(t) => (onSuggest ?? onRetry)?.(t)} />}
