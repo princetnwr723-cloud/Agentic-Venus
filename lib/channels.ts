@@ -5,6 +5,7 @@ import { getResolvedVoiceSecrets } from "@/lib/voice-server";
 import { resolveConnectorsSafe } from "@/lib/tools/connectors";
 import { unpack } from "@/lib/tools/catalog";
 import { assertPublicUrl, http } from "@/lib/tools/net";
+import { pushToOwner } from "@/lib/push-server";
 
 export type ChannelKind = "telegram" | "twilio" | "slack";
 export const WA_SANDBOX = "+14155238886";
@@ -121,7 +122,10 @@ export async function sendEmail(key: string, from: string, to: string, subject: 
   if (r.status >= 400) throw new Error(`Email: ${String(r.json?.message ?? r.status)}`);
 }
 
-/** Sends a message to the OWNER on every connected channel (or only the ones in `only`). */
+/**
+ * Sends a message to the OWNER on every connected channel (or only the ones in `only`).
+ * The Android app ("app") gets a push too: always when `only` is empty, otherwise only when `only` contains "app".
+ */
 export async function notifyOwner(uid: string, chatId: string, text: string, only?: string[]): Promise<{ sent: string[]; failed: string[] }> {
   const snap = await getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId).get();
   const stored = ((snap.data() as { connectors?: Record<string, string> } | undefined)?.connectors) ?? {};
@@ -141,6 +145,9 @@ export async function notifyOwner(uid: string, chatId: string, text: string, onl
       const r = await http(u.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(discord ? { content: text.slice(0, 1900) } : { text: text.slice(0, 3000) }) });
       if (r.status >= 400) throw new Error(`webhook HTTP ${r.status}`);
     }]);
+  }
+  if (!only?.length || only.includes("app")) {
+    tasks.push(["app", async () => { await pushToOwner(uid, chatId, text); }]);
   }
   const sent: string[] = [], failed: string[] = [];
   for (const [id, fn] of tasks) {
