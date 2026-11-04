@@ -123,6 +123,17 @@ export function wantsTemplateFromVideo(text: string): boolean {
   return !edit || study;
 }
 
+// ---------------- an attached video that the owner wants EDITED ----------------
+const EDIT_WORDS = /\b(?:edit(?:ing)?|re-?edit|cut|trim|shorten|crop|enhance|polish|clean(?: it)? up|speed(?:ing)? (?:it )?up|slow(?: it)? down|stitch|merge|jump[- ]?cuts?|colou?r[- ]?grade|highlights?|resize|reel|shorts?|remove (?:the )?(?:silences?|pauses?|filler(?: words)?|ums|uhs|background noise|watermark|dead air)|add (?:the )?(?:captions?|subtitles?|music|text|titles?|logo|intro|outro|transitions?|b-?roll|effects?|zoom)|(?:with|burn(?:ed)?(?: in)?) (?:captions?|subtitles?))\b|edit\s*kar|kaat\s*(?:do|de|kar)|chh?ota\s*kar|subtitle|caption\s*laga|music\s*laga|ise\s*edit|isko\s*edit|सुधार|एडिट|काट/i;
+// posting / describing / writing about a video is NOT editing it
+const NOT_EDIT = /\b(?:post|upload|publish|share|schedule)\b[\s\S]{0,80}\b(?:youtube|instagram|insta|twitter|linkedin|tiktok|facebook|reddit|pinterest|threads)\b|\b(?:transcribe|transcript|summari[sz]e|describe|what(?:'s| is) (?:in|happening)|kya (?:hai|hota)|write|draft|suggest|give me)\b[\s\S]{0,40}\b(?:captions?|hashtags?|title|description|summary|script)\b/i;
+
+/** The owner wants the attached video edited (cut, trimmed, captioned, enhanced ...): Venus Pro edits THAT video. */
+export function wantsVideoEdit(text: string): boolean {
+  const t = String(text ?? "");
+  return EDIT_WORDS.test(t) && !NOT_EDIT.test(t);
+}
+
 export const stripTemplateMarker = (brief: string): string => String(brief ?? "").replace(/\[\s*template\s*:\s*[\w-]+\s*\]/gi, "").replace(/\s+\n/g, "\n").trim();
 
 const words = (s: string) => s.toLowerCase().split(/[^a-z0-9\u0900-\u097f]+/).filter((w) => w.length > 2);
