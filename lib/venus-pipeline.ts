@@ -1,7 +1,7 @@
 import { brainPrompt, loadBrain, reflect, type Brain } from "@/lib/brain";
 import { listChats } from "@/lib/chats";
 import { acquire, releaseNow, touch } from "@/lib/computers";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { hydrateProject, saveProject, type SourceRef, type Stage, type VenusProject } from "@/lib/venus";
 import { templateContext, type VideoTemplate } from "@/lib/venus-clone";
@@ -190,9 +190,28 @@ export function newRun(env: PipelineEnv, hooks: PipelineHooks, p: VenusProject):
 async function upd(run: Run, patch: Partial<VenusProject>) {
   run.p = { ...run.p, ...patch, updatedAt: Date.now() };
   run.hooks.update(run.p);
+  beat(run);
   await saveProject(run.env.uid, run.p).catch(() => {});
 }
 const check = (run: Run) => { if (run.hooks.cancelled()) throw new Error("Stopped."); };
+
+// HEARTBEAT: proves that a browser is still working on this project (the project is saved at every step, and a long render
+// has no step for minutes: this fills the gap). A "running" project whose heartbeat is old was LEFT BEHIND (the tab was closed or
+// the phone went to sleep): the dashboard then continues it from where it stopped.
+const beatTimes = new WeakMap<object, number>();
+function beat(run: Run) {
+  const now = Date.now();
+  if (now - (beatTimes.get(run) ?? 0) < 20_000) return;
+  beatTimes.set(run, now);
+  void setDoc(doc(db, "users", run.env.uid, "venusProjects", run.p.id, "code", "hb"), { at: now }).catch(() => {});
+}
+/** When this project was last worked on by a browser (0 = never). */
+export async function lastBeat(uid: string, projectId: string): Promise<number> {
+  try {
+    const snap = await getDoc(doc(db, "users", uid, "venusProjects", projectId, "code", "hb"));
+    return snap.exists() ? Number((snap.data() as { at?: number }).at) || 0 : 0;
+  } catch { return 0; }
+}
 
 async function mediaCall(env: PipelineEnv, action: string, extra: Record<string, unknown> = {}) {
   const res = await fetch("/api/venus/media", {
@@ -211,6 +230,7 @@ async function waitJob(run: Run, jobId: string, label: string, total: number, ma
   let lastLine = "";
   for (;;) {
     check(run);
+    beat(run);
     if (Date.now() - t0 > maxMinutes * 60_000) throw new Error(`${label} is taking over ${maxMinutes} minutes — stopped.`);
     await sleep(3500);
     const s = await studioCall(run.env, "progress", { sandboxId: run.sid, jobId, total });
