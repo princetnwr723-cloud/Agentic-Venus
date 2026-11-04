@@ -1,8 +1,9 @@
 import { getAdminDb } from "@/lib/firebase-admin";
-import { getVoiceSettings, getResolvedVoiceSecrets, signVoiceToken, verifyVoiceToken, verifyTwilioSignature, appBaseUrl, gatherXml, sayTag, twimlResponse, voiceSafeError } from "@/lib/voice-server";
+import { getVoiceSettings, getResolvedVoiceSecrets, signVoiceToken, verifyVoiceToken, verifyTwilioSignature, appBaseUrl, gatherXml, sayTag, twimlResponse, voiceSafeError, xmlEscape } from "@/lib/voice-server";
 import { defaultChatId, openingLine, speechXml, watchInboundCall } from "@/lib/voice-calls";
 import { resolveLanguage } from "@/lib/voice-local";
 import { chatForNumber, type TeleSettings } from "@/lib/telephony";
+import { prepareRealtime } from "@/lib/voice-rt";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -17,7 +18,7 @@ export async function POST(req: Request) {
     const form = await req.formData();
     const secrets = await getResolvedVoiceSecrets(claims.uid);
     if (!secrets.twilioToken || !verifyTwilioSignature(req, secrets.twilioToken, form)) return bye("Webhook signature is invalid.", 403);
-    const callSid = String(form.get("CallSid") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+    const callSid = String(form.get("CallSid") || "").replace(/[^A-Za-z0-9_:.-]/g, "").slice(0, 120);
     if (!callSid) return bye("Call identifier missing.", 400);
 
     const userRef = getAdminDb().collection("users").doc(claims.uid);
@@ -45,16 +46,28 @@ export async function POST(req: Request) {
       if (!claims.callId) return bye("Call session was not found.", 404);
       callId = claims.callId;
       const snap = await userRef.collection("voiceCalls").doc(callId).get();
-      if (!snap.exists || (snap.data()?.providerCallId && snap.data()?.providerCallId !== callSid)) return bye("Call session was not found.", 404);
+      const known = String(snap.data()?.providerCallId ?? "");
+      // "pending" = the phone company did not tell us the call id when the call was created (Telnyx): it is learned here
+      if (!snap.exists || (known && known !== "pending" && known !== callSid)) return bye("Call session was not found.", 404);
       number = String(snap.data()?.to ?? "");
       chatId = String(snap.data()?.chatId ?? "");
-      await snap.ref.set({ status: "in-progress", answeredAt: Date.now(), updatedAt: Date.now() }, { merge: true });
+      await snap.ref.set({ status: "in-progress", answeredAt: Date.now(), updatedAt: Date.now(), providerCallId: callSid }, { merge: true });
     }
 
     // "auto" language follows the country of the number (any country can be called or can call)
     settings.language = resolveLanguage(settings.language, number);
     const base = appBaseUrl(req);
     const callToken = signVoiceToken({ uid: claims.uid, callId, purpose: "call", exp: Date.now() + 4 * 3600_000 });
+
+    // REAL-TIME mode (beta): the audio goes to the bridge on the cloud PC, where the caller can interrupt the agent.
+    // When the bridge or the key is not ready within a few seconds, the call simply runs in the normal turn-based mode below.
+    const rt = settings.realtime === true ? await prepareRealtime(claims.uid, chatId, base, settings, 6500) : null;
+    if (rt) {
+      return twimlResponse(
+        `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(rt.url)}"><Parameter name="token" value="${xmlEscape(callToken)}"/><Parameter name="secret" value="${xmlEscape(rt.secret)}"/></Stream></Connect></Response>`
+      );
+    }
+
     const action = `${base}/api/voice/turn?token=${encodeURIComponent(callToken)}`;
     const opening = await openingLine(claims.uid, callId);
     const inner = await speechXml(claims.uid, base, opening, settings, chatId);
