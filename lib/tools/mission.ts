@@ -1,10 +1,11 @@
 import type { Def } from "./plugins";
+import { VOICE_EXTRA_TOOLS } from "./voice-extra";
 
 // Despite the file name this also holds the computer tools (pc.*): both are "start something that runs in the background".
-export const MISSION_TOOLS: Def[] = [
+const MISSION_LIST: Def[] = [
   {
     name: "mission.start", risk: "write",
-    params: "goal:string (complete instructions), max_calls?:number (phone calls allowed, default 0), allow_writes?:boolean (may write to Sheets/CRM/send messages without asking each time), notify?:string[] (default: all connected channels)",
+    params: "goal:string (complete instructions), max_calls?:number (phone calls allowed, default 0), allow_writes?:boolean (may write to Sheets/CRM/send messages without asking each time), notify?:string[] (default: all connected channels), call_me?:boolean (phone the OWNER with the result when the mission is over; set it whenever the owner says call me / phone me / kaam ke baad call karna)",
     description: "Start a long MULTI-STEP mission that runs in the background on the server: research, many tool calls, phone calls one by one, updating sheets, then a report to the owner (chat / WhatsApp / Telegram / email). The owner approves it first and sees the limits you set. Put EVERY detail in `goal`: who, what, numbers, sheet name, how to report.",
     run: async (a, _cred, ctx) => {
       if (!ctx) throw new Error("Missions can only be started from a chat.");
@@ -12,8 +13,9 @@ export const MISSION_TOOLS: Def[] = [
       const r = await startMission(ctx.uid, {
         chatId: ctx.chatId, goal: String(a.goal ?? ""), maxCalls: Number(a.max_calls) || 0, allowWrites: a.allow_writes === true,
         notify: Array.isArray(a.notify) ? a.notify.map((x) => String(x)) : undefined,
+        callOwner: typeof a.call_me === "boolean" ? a.call_me : undefined,
       });
-      return `Mission ${r.id} started (up to ${r.maxCalls} calls, writes ${r.allowWrites ? "allowed" : "ask first"}, ${r.maxSteps} steps). It runs in the background; the report arrives in this chat and on the connected channels. Progress: Missions page.`;
+      return `Mission ${r.id} started (up to ${r.maxCalls} calls, writes ${r.allowWrites ? "allowed" : "ask first"}, ${r.maxSteps} steps). It runs in the background; the report arrives in this chat and on the connected channels. Progress: Missions page.${r.callOwner ? " When it is over the agent phones the owner with the result." : ""}`;
     },
   },
   {
@@ -57,3 +59,6 @@ export const MISSION_TOOLS: Def[] = [
     },
   },
 ];
+
+// the extra calling tools (Telnyx, real-time mode) are registered here so the tool registry needs no change
+export const MISSION_TOOLS: Def[] = [...MISSION_LIST, ...VOICE_EXTRA_TOOLS];
