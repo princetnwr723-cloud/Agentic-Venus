@@ -83,7 +83,7 @@ export async function POST(req: Request) {
     if (!sec.twilioToken || !verifyTwilioSignature(req, sec.twilioToken, form)) return bad("Webhook signature is invalid.", 403);
 
     const speech = String(form.get("SpeechResult") || "").trim().slice(0, 2000);
-    const callSid = String(form.get("CallSid") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+    const callSid = String(form.get("CallSid") || "").replace(/[^A-Za-z0-9_:.-]/g, "").slice(0, 120);
     const ref = getAdminDb().collection("users").doc(uid).collection("voiceCalls").doc(claims.callId);
     callRef = ref;
     const snap = await ref.get();
