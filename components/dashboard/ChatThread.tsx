@@ -10,7 +10,6 @@ import { splitAttachmentBlock, type AttachKind } from "@/lib/attachments";
 import { previewFor } from "@/lib/attach-client";
 import AttachCard from "@/components/dashboard/AttachCard";
 import FountFeedback from "@/components/fount/FountFeedback";
-import StepsPanel from "@/components/dashboard/StepsPanel";
 import ConnectCard, { parseConnectCard } from "@/components/dashboard/ConnectCard";
 import PayCards from "@/components/dashboard/PayCard";
 
@@ -192,9 +191,6 @@ export default function ChatThread({
 
       {/* The agent wants to pay: its message and the order card (product, card, total, Allow / Deny) right here in the chat */}
       {chatId && <PayCards chatId={chatId} agentName={agentName} />}
-
-      {/* Progress: every step of the work, the one running now, and exactly where something broke (agent checklist + team plan) */}
-      {chatId && <StepsPanel chatId={chatId} busy={Boolean(busy)} onRun={(t) => (onSuggest ?? onRetry)?.(t)} />}
     </div>
   );
 }
