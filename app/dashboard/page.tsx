@@ -18,9 +18,9 @@ import { addMemory, brainPrompt, forgetMemory, loadBrain, rankSkills, reflect, s
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
 import { acquire, releaseNow } from "@/lib/computers";
-import type { SourceRef, VenusProject } from "@/lib/venus";
-import { analyzeVideoTemplate, runPipeline, signedUrl, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
-import { categoryOf, NEW_FROM_SCRATCH, pickTemplate, stripTemplateMarker, wantsTemplateFromVideo, type TemplateListItem, type VideoTemplate } from "@/lib/venus-clone";
+import { hydrateProject, listProjects, type SourceRef, type VenusProject } from "@/lib/venus";
+import { analyzeVideoTemplate, lastBeat, runPipeline, signedUrl, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
+import { categoryOf, NEW_FROM_SCRATCH, pickTemplate, stripTemplateMarker, wantsTemplateFromVideo, wantsVideoEdit, type TemplateListItem, type VideoTemplate } from "@/lib/venus-clone";
 import TemplateModal from "@/components/venus/TemplateModal";
 import { personaOf, type Member } from "@/lib/team-catalog";
 import { assembleTeam, runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
@@ -89,6 +89,16 @@ const histText = (m: ChatMessage) => {
 };
 
 type Work = { label: string; startedAt: number; steps: string[]; owner: string };
+
+/** Keeps the screen awake while a video is made (a phone that goes to sleep stops the browser, and with it the video). */
+async function keepAwake(): Promise<() => void> {
+  let lock: { release?: () => Promise<void> } | null = null;
+  const take = async () => { try { lock = (await (navigator as unknown as { wakeLock?: { request: (t: string) => Promise<{ release?: () => Promise<void> }> } }).wakeLock?.request("screen")) ?? null; } catch { lock = null; } };
+  await take();
+  const onVisible = () => { if (document.visibilityState === "visible") void take(); }; // the lock is dropped when the tab is hidden
+  document.addEventListener("visibilitychange", onVisible);
+  return () => { document.removeEventListener("visibilitychange", onVisible); try { void lock?.release?.(); } catch { /* already released */ } };
+}
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
@@ -1056,6 +1066,69 @@ export default function DashboardPage() {
     };
   }
 
+  /** A video that was left half-made (the tab was closed, the phone slept) is continued from the step where it stopped. */
+  async function resumeVenusProject(chat: Chat, p0: VenusProject) {
+    if (!user || !e2bKey) return;
+    venusBusyRef.current.add(chat.id);
+    busyChats.current.add(chat.id);
+    workStart(chat.id, "Venus Pro video ko aage badha raha hai…", "venus");
+    setVenusRun({ title: p0.title.slice(0, 48), label: "Continuing…", value: null });
+    const releaseAwake = await keepAwake();
+    try {
+      say(chat.id, `🔄 Venus Pro was interrupted (the tab was closed or the phone went to sleep). Continuing your video “${p0.title}” from where it stopped. Keep this tab open.`);
+      const project = await hydrateProject(user.uid, p0);
+      const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels) };
+      const final = await runPipeline(env, venusHooks(chat.id), project, project.stage);
+      if (final.status === "done" && final.finalPath) {
+        const url = await signedUrl(env, final.finalPath, "venus-video.mp4").catch(() => "");
+        await sayNext(chat, `✅ Your video is ready: **${final.title}**.\n\n- [Open and edit it in Venus Pro](/venus?project=${final.id})${url ? `\n- [Download the video](${url})` : ""}`, ["Make a shorter vertical version of it", "Write a caption and hashtags for this video"]);
+      } else {
+        say(chat.id, `⚠️ The video could not be finished: ${final.error ?? "unknown error"}\n\n[Open it in Venus Pro](/venus?project=${final.id}) to retry from the failed step.`);
+      }
+    } catch (err) {
+      say(chat.id, `⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    } finally {
+      releaseAwake();
+      venusBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setVenusRun(null);
+      workEnd(chat.id, "venus");
+    }
+  }
+
+  /** Looks for videos of this account that are "running" but nobody is working on them any more (old heartbeat), and continues them. */
+  async function resumeStale() {
+    if (!user || !e2bKey || (cfg && !cfg.supabase)) return;
+    try {
+      const all = await listProjects(user.uid);
+      for (const p0 of all) {
+        if (p0.origin !== "chat" || p0.status !== "running" || !p0.chatId) continue;
+        const chat = chatsRef.current.find((c) => c.id === p0.chatId);
+        if (!chat || venusBusyRef.current.has(chat.id) || !apiKeys[chat.provider]) continue;
+        const alive = Math.max(p0.updatedAt ?? 0, await lastBeat(user.uid, p0.id));
+        if (Date.now() - alive < 90_000) continue; // a browser is still working on it
+        if (Date.now() - alive > 6 * 3600_000) continue; // too old (its links have expired): retry it in Venus Pro
+        void resumeVenusProject(chat, p0);
+        return; // one at a time
+      }
+    } catch { /* the owner can still retry it in Venus Pro */ }
+  }
+
+  useEffect(() => {
+    if (!user || !chatsLoaded || !e2bKey) return;
+    void resumeStale();
+    const onVisible = () => { if (document.visibilityState === "visible") void resumeStale(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, chatsLoaded, e2bKey]);
+
+  // while a video is being made, closing the tab asks first
+  useEffect(() => {
+    if (!venusRun) return;
+    const h = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [venusRun]);
+
   async function startVenus(chat: Chat, briefIn: string, opts: { silent?: boolean } = {}): Promise<string> {
     if (!user) return "";
     const out = (m: string) => { if (!opts.silent) say(chat.id, m); return m; };
@@ -1069,6 +1142,7 @@ export default function DashboardPage() {
     const showWork = !opts.silent;
     if (showWork) workStart(chat.id, "Venus Pro shuru ho raha hai…", "venus");
     setVenusRun({ title: briefIn.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
+    const releaseAwake = await keepAwake();
     try {
       // 1) a video attached in this chat is EDITED (the same video), unless the owner asks for a brand-new one from scratch
       const att = recentVideoRef.current[chat.id];
@@ -1119,6 +1193,7 @@ export default function DashboardPage() {
     } catch (err) {
       return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
+      releaseAwake();
       venusBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setVenusRun(null);
       if (showWork) workEnd(chat.id, "venus");
     }
@@ -1138,6 +1213,7 @@ export default function DashboardPage() {
     busyChats.current.add(chat.id);
     workStart(chat.id, "Venus Pro video ko padh raha hai…", "venus");
     setVenusRun({ title: `Template: ${att.name}`.slice(0, 48), label: "Starting…", value: null });
+    const releaseAwake = await keepAwake();
     try {
       const links = await attachmentLinks(chat.id, [att.id]);
       if (!links.length) return out("The video could not be opened. Attach it again and ask once more.");
@@ -1157,6 +1233,7 @@ export default function DashboardPage() {
     } catch (err) {
       return out(`⚠️ Venus Pro failed: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
+      releaseAwake();
       venusBusyRef.current.delete(chat.id); busyChats.current.delete(chat.id); setVenusRun(null);
       workEnd(chat.id, "venus");
     }
@@ -1433,6 +1510,15 @@ export default function DashboardPage() {
 
     // explicit commands: the user chose them, no guessing
     if (vidAtt && !video && wantsTemplateFromVideo(text)) { void analyzeTemplateFor(chat, vidAtt, text + extra); return; }
+    // a video attached here (or just before) that the owner wants EDITED goes straight to Venus Pro: this must never depend on the model's guess
+    {
+      const recent = recentVideoRef.current[chat.id];
+      const justBefore = Boolean(recent && Date.now() - recent.at < 30 * 60_000) && /\b(video|clip|footage|reel|ise|isko|is video)\b/i.test(text);
+      if (!video && wantsVideoEdit(text) && (vidAtt || justBefore)) {
+        void startVenus(chat, text + extra);
+        return;
+      }
+    }
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
     if (deploy) { void runDeploy(chat, deploy[1]); return; }
     if (video) { void startVenus(chat, video[1].trim() + extra); return; }
