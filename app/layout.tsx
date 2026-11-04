@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import { AuthProvider } from "@/lib/auth-context";
 import { KeysProvider } from "@/lib/keys-context";
 import LimitModal from "@/components/LimitModal";
+import NativeBridge from "@/components/NativeBridge";
 import "./globals.css";
 
 const inter = Inter({
@@ -28,6 +29,7 @@ export default function RootLayout({
         <AuthProvider>
           <KeysProvider>{children}</KeysProvider>
           <LimitModal />
+          <NativeBridge />
         </AuthProvider>
       </body>
     </html>
