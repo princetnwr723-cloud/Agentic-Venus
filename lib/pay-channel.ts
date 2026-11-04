@@ -6,6 +6,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { checkSpend, type VpMeta } from "@/lib/vpassword";
 import { hashPin, lockAfterFail, pinProblem, verifyPin } from "@/lib/channel-commands";
+import { dealWarning, money, productLine, type PayProduct } from "@/lib/pay-product";
 
 const APPROVED_MS = 10 * 60_000;
 const pepper = () => process.env.CHANNEL_PAY_PEPPER || process.env.ROUTINE_RUNNER_SECRET || "";
@@ -15,6 +16,7 @@ const cfgRef = (uid: string) => userRef(uid).collection("channelPay").doc("main"
 export type PayRec = {
   id: string; entry: string; label: string; last4: string; chatId: string; host: string; amount: number;
   detected: number | null; mismatch: boolean; note: string; tainted: boolean;
+  brand?: string; pitch?: string; product?: PayProduct | null;
   status: "pending" | "approved" | "denied" | "expired" | "used"; createdAt: number; expiresAt: number; chNotified?: boolean;
 };
 export type ChannelPay = { salt?: string; hash?: string; enabled?: boolean; maxPerPayment?: number; fails?: number; lockedUntil?: number };
@@ -50,10 +52,12 @@ export async function pendingPayments(uid: string): Promise<PayRec[]> {
 export function describePay(p: PayRec): string {
   return [
     "💳 Payment approval chahiye",
-    `${p.amount} • ${p.host}`,
+    productLine(p.product),
+    `${money(p.amount, p.product?.currency ?? "")} • ${p.host}`,
     `Card: ${p.label}${p.last4 ? ` •••• ${p.last4}` : ""}`,
     p.note ? `Note: ${p.note}` : "",
     p.mismatch ? "⚠️ Page ka total is amount se match nahi karta — dhyan se dekho." : "",
+    dealWarning(p.product) ? `⚠️ ${dealWarning(p.product)}` : "",
     p.tainted ? "⚠️ Agent ne aisa content padha jisme use instructions diye gaye the." : "",
   ].filter(Boolean).join("\n");
 }
