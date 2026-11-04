@@ -1,4 +1,8 @@
+import type { BuddyValue } from "@/lib/buddy-kit";
+
 // Mascot avatars: 15 expressions x ANY colour.
+// Buddy avatars (150+ shapes, see lib/buddies.ts) are also valid values:
+//   "bd.cat:#ffa94d" or "bd.cat.joy:#ffa94d"
 // An avatar value is one of:
 //   - a preset id            "red-calm"
 //   - a custom value         "love:#ff3ea5"   (expression:#hex)
@@ -73,7 +77,7 @@ export type LegacyColor = "teal" | "amber" | "violet" | "sky" | "coral" | "sage"
 
 export type CustomAvatar = `${MascotExpr}:#${string}`;
 
-export type AvatarColor = MascotId | LegacyColor | CustomAvatar;
+export type AvatarColor = MascotId | LegacyColor | CustomAvatar | BuddyValue;
 
 export type MascotDef = { label: string; expr: MascotExpr; hex: string };
 
