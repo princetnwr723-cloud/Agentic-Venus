@@ -46,8 +46,7 @@ import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
 import ChatComposer, { type Mentionable } from "@/components/dashboard/ChatComposer";
-import RunBars from "@/components/dashboard/RunBars";
-import WorkingBar from "@/components/dashboard/WorkingBar";
+import RunBar from "@/components/dashboard/RunBar";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
 import ModelPicker from "@/components/dashboard/ModelPicker";
 import { fountBegin } from "@/lib/fount/client";
@@ -1165,10 +1164,10 @@ export default function DashboardPage() {
       setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
       if (!opts.silent) {
         say(chat.id, editing
-          ? `✂️ Venus Pro is editing YOUR video “${att?.name}” (about ${seconds}s) on its own computer. Progress shows above the message box. Keep this tab open.`
+          ? `✂️ Venus Pro is editing YOUR video “${att?.name}” (about ${seconds}s) on its own computer. Progress shows right here in the chat. Keep this tab open.`
           : tpl
-            ? `🧬 Venus Pro is making your video (${seconds}s, ${aspect}) as a clone of the template “${tpl.name}”, on its own computer. Progress shows above the message box. Keep this tab open.`
-            : `🎬 Venus Pro is making your video (${seconds}s, ${aspect}) on its own computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
+            ? `🧬 Venus Pro is making your video (${seconds}s, ${aspect}) as a clone of the template “${tpl.name}”, on its own computer. Progress shows right here in the chat. Keep this tab open.`
+            : `🎬 Venus Pro is making your video (${seconds}s, ${aspect}) on its own computer. Progress shows right here in the chat. The first video can take 15-30 minutes — keep this tab open.`);
       }
 
       const project: VenusProject = {
@@ -1217,7 +1216,7 @@ export default function DashboardPage() {
     try {
       const links = await attachmentLinks(chat.id, [att.id]);
       if (!links.length) return out("The video could not be opened. Attach it again and ask once more.");
-      say(chat.id, "🧬 Venus Pro is studying your video to save it as a template (about 5-10 minutes, the first time a little more). Progress shows above the message box. Keep this tab open.");
+      say(chat.id, "🧬 Venus Pro is studying your video to save it as a template (about 5-10 minutes, the first time a little more). Progress shows right here in the chat. Keep this tab open.");
       const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels) };
       const r = await analyzeVideoTemplate(env, venusHooks(chat.id), {
         provider: chat.provider, model: chat.model, chatId: chat.id, source: { kind: "url", url: links[0].url, name: att.name },
@@ -1771,10 +1770,12 @@ export default function DashboardPage() {
                     onRetry={(t) => void submitText(t)}
                     replyingAt={replyTo?.at ?? null}
                   />
+                  {/* the run bar lives INSIDE the chat, right under the last message */}
+                  {(activeWork || venusRun || codeRun || teamRun) && (
+                    <RunBar work={activeWork ?? null} venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
+                  )}
                 </div>
               </div>
-              {activeWork && <WorkingBar key={`${activeChat.id}:${activeWork.startedAt}`} label={activeWork.label} startedAt={activeWork.startedAt} steps={activeWork.steps} />}
-              <RunBars venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
               <ChatComposer
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
