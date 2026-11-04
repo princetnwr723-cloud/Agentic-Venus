@@ -8,7 +8,8 @@
 
 // v8: longer answers (output-token ladder), Anthropic prompt caching, lighter fallback model when the main one stays overloaded.
 // v9: proxy for the browser (vPassword proxy entry), Google account session loaded up front, payments only with a server-side approval ticket, budgets, anti-bot Chrome flags.
-export const PC_RUNNER_VERSION = "9";
+// v10: before a payment is asked for, the runner reads the product from the page (name, price, usual price, rating, small picture) so the chat can show an order card.
+export const PC_RUNNER_VERSION = "10";
 
 export const PC_RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -763,6 +764,70 @@ async function pageTotals(page) {
     return out;
   } catch (e) { return []; }
 }
+// v10: what is being bought, read from the page itself (JSON-LD, meta tags, the page picture). Used for the order card in the chat.
+// The picture is a small screenshot of the product image (never a link), so nothing can leak through an image address.
+async function pageProduct(page) {
+  const out = {};
+  try {
+    const d = await page.evaluate(function () {
+      function num(t) { var m = String(t || "").match(/[0-9][0-9.,]*/); return m ? m[0] : ""; }
+      function meta(n) { var e = document.querySelector('meta[property="' + n + '"],meta[name="' + n + '"],meta[itemprop="' + n + '"]'); return e ? String(e.getAttribute("content") || "").trim() : ""; }
+      var r = {name: "", brand: "", variant: "", price: "", was: "", currency: "", rating: "", reviews: "", img: ""};
+      function find(o, depth) {
+        if (!o || depth > 6) return null;
+        if (Array.isArray(o)) { for (var i = 0; i < o.length; i++) { var f = find(o[i], depth + 1); if (f) return f; } return null; }
+        if (typeof o !== "object") return null;
+        var t = o["@type"];
+        if (t === "Product" || (Array.isArray(t) && t.indexOf("Product") >= 0)) return o;
+        if (o["@graph"]) return find(o["@graph"], depth + 1);
+        return null;
+      }
+      var scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      var prod = null;
+      for (var i = 0; i < scripts.length && !prod; i++) { try { prod = find(JSON.parse(scripts[i].textContent || ""), 0); } catch (e) {} }
+      if (prod) {
+        r.name = String(prod.name || "");
+        r.brand = String(prod.brand && (prod.brand.name || prod.brand) || "");
+        var offer = Array.isArray(prod.offers) ? prod.offers[0] : prod.offers;
+        if (offer) { r.price = String(offer.price || offer.lowPrice || ""); r.currency = String(offer.priceCurrency || ""); }
+        if (prod.aggregateRating) { r.rating = String(prod.aggregateRating.ratingValue || ""); r.reviews = String(prod.aggregateRating.reviewCount || prod.aggregateRating.ratingCount || ""); }
+        var im = Array.isArray(prod.image) ? prod.image[0] : prod.image;
+        r.img = String(im && (im.url || im) || "");
+      }
+      if (!r.name) r.name = meta("og:title") || (document.querySelector("h1") ? String(document.querySelector("h1").textContent || "").trim() : "") || document.title;
+      if (!r.price) r.price = meta("product:price:amount") || meta("price");
+      if (!r.currency) r.currency = meta("product:price:currency") || meta("priceCurrency");
+      if (!r.img) r.img = meta("og:image");
+      var del = document.querySelectorAll('del, s, strike, [class*="compare"], [class*="was-price"], [class*="original-price"], [class*="list-price"], [class*="mrp"], [class*="strike"]');
+      for (var j = 0; j < del.length && !r.was; j++) { var n = num(del[j].textContent); if (n) r.was = n; }
+      var sel = document.querySelector('[class*="selected"][class*="color"], [aria-checked="true"], [class*="color"] [class*="active"]');
+      if (sel) r.variant = String(sel.getAttribute("aria-label") || sel.getAttribute("title") || sel.textContent || "").trim().slice(0, 60);
+      // the main product picture: the one that matches the page image, else the biggest visible one near the top
+      var imgs = document.images, best = null, bestA = 0, file = String(r.img).split("/").pop().split("?")[0];
+      for (var k = 0; k < imgs.length; k++) {
+        var b = imgs[k].getBoundingClientRect();
+        if (b.width < 90 || b.height < 90 || b.top > 1800 || b.bottom < 0) continue;
+        var a = b.width * b.height;
+        if (file && String(imgs[k].currentSrc || imgs[k].src).indexOf(file) >= 0) a *= 4;
+        if (a > bestA) { bestA = a; best = imgs[k]; }
+      }
+      if (best) best.setAttribute("data-vv-prod", "1");
+      return r;
+    });
+    out.name = String(d.name || "").slice(0, 140); out.brand = String(d.brand || "").slice(0, 60); out.variant = String(d.variant || "").slice(0, 60);
+    out.price = d.price; out.was = d.was; out.currency = d.currency; out.rating = d.rating; out.reviews = d.reviews;
+    try {
+      const el = page.locator('[data-vv-prod="1"]').first();
+      await el.scrollIntoViewIfNeeded({timeout: 2000});
+      for (const q of [55, 30]) {
+        const buf = await el.screenshot({type: "jpeg", quality: q, timeout: 4000});
+        if (buf.length <= 100000) { out.image = "data:image/jpeg;base64," + buf.toString("base64"); break; }
+      }
+    } catch (e) {}
+    try { await page.evaluate(function () { var e = document.querySelector('[data-vv-prod="1"]'); if (e) e.removeAttribute("data-vv-prod"); }); } catch (e) {}
+  } catch (e) {}
+  return out;
+}
 // v9 payment flow. The agent only ASKS. The server stores the request, YOU approve it in the app (banner), and only then does the server release the card
 // for exactly the approved amount, once. Budget and limits are checked on the server. This code cannot approve anything.
 async function fillCard(a) {
@@ -773,10 +838,20 @@ async function fillCard(a) {
   const amount = String(a.amount == null ? "" : a.amount).slice(0, 30);
   if (!/[0-9]/.test(amount)) throw new Error("fill_card needs the real total shown on the page, for example amount:\"499.00\".");
   const before = await pageTotals(page);
-  const rq = await api("/api/vpassword", {action: "payment_request", id: e.id, host: host, amount: amount, detected: before, note: String(a.note || "").slice(0, 140), tainted: tainted});
+  // the product as the PAGE shows it wins; what the agent wrote only fills the gaps
+  const seen = await pageProduct(page);
+  const given = a.product && typeof a.product === "object" ? a.product : {};
+  const product = {};
+  for (const k of ["name", "variant", "brand", "price", "was", "currency", "rating", "reviews", "qty"]) {
+    const v = seen[k] !== undefined && seen[k] !== "" ? seen[k] : given[k];
+    if (v !== undefined && v !== "") product[k] = v;
+  }
+  if (seen.image) product.image = seen.image;
+  const pitch = String(a.pitch || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  const rq = await api("/api/vpassword", {action: "payment_request", id: e.id, host: host, amount: amount, detected: before, note: String(a.note || "").slice(0, 140), tainted: tainted, product: product, pitch: pitch});
   if (!rq.ok) return {text: "payment refused", out: "The payment was refused before asking the user: " + String(rq.d.error || "refused").slice(0, 260) + " Do not look for another way to pay. Tell the user in your summary."};
   const payId = String(rq.d.payId || "");
-  emit("info", "Payment of " + amount + " on " + (host || "this page") + " is waiting for YOUR approval in the app (banner at the top of the screen).");
+  emit("info", "Payment of " + amount + (product.name ? " for " + String(product.name).slice(0, 60) : "") + " on " + (host || "this page") + " is waiting for YOUR approval: the order card is in the chat.");
   const end = Date.now() + 30 * 60000;
   let status = "pending";
   while (Date.now() < end) {
@@ -972,7 +1047,7 @@ function systemPrompt(w, h, tools) {
     '{"type":"save_file","path":"~/Documents/result.csv","content":"..."}   save collected data as a file on this computer.',
     '{"type":"shell","command":"...","timeout":120}   run a command in a REAL terminal window (non-interactive: -y, CI=1). {"type":"shell_check","job":"j1"} waits for one that is still running.',
     '{"type":"note","text":"..."}   save a short finding for the whole task',
-    vl ? '{"type":"login_with","entry":"<id or label>","user_id":N,"pass_id":N,"totp_id":N}   fill a saved vPassword login on the CURRENT page. N = element numbers from the last browse. Leave out ids you do not need (for example only totp_id on a 2FA page). Then click sign-in with browse. {"type":"fill_card","entry":"<id or label>","amount":"499.00","note":"what is being bought","fields":{"number":N,"exp":N,"cvc":N,"name":N,"zip":N}}   amount = the TOTAL the page shows. The USER approves it in the app, the system checks the budget and limits, then the card is filled for exactly that amount and you may submit. A refusal or a decline is final.' : "",
+    vl ? '{"type":"login_with","entry":"<id or label>","user_id":N,"pass_id":N,"totp_id":N}   fill a saved vPassword login on the CURRENT page. N = element numbers from the last browse. Leave out ids you do not need (for example only totp_id on a 2FA page). Then click sign-in with browse. {"type":"fill_card","entry":"<id or label>","amount":"499.00","note":"what is being bought","fields":{"number":N,"exp":N,"cvc":N,"name":N,"zip":N}}   amount = the TOTAL the page shows. pitch = ONE short friendly sentence in the language the user writes in, shown in the chat above the order card: what you found, why it fits what they asked, the price and the usual price if the page shows one, and a question, for example "Found a travel stroller for Luca, perfect for your trip. The Glide Pro is $80 (usually $320). Shall I order it?". product (optional, the page is read automatically) = {"name":"..","variant":"Navy","price":80,"was":320,"currency":"USD","rating":4.8,"reviews":128,"qty":1}. Never invent a price, a rating or a discount: leave it out if the page does not show it. The USER sees the order card in the chat and approves it, the system checks the budget and limits, then the card is filled for exactly that amount and you may submit. A refusal or a decline is final.' : "",
     'Screen actions (when the GUI is really needed): {"type":"click","x":N,"y":N} {"type":"double_click","x":N,"y":N} {"type":"right_click","x":N,"y":N} {"type":"type","text":"..."} {"type":"key","keys":"Return"} {"type":"scroll","x":N,"y":N,"direction":"down","amount":3} {"type":"wait","seconds":2} {"type":"open_url","url":"https://..."} {"type":"launch","app":"chrome|firefox|terminal|code|files"}',
     'Asking the user: {"type":"need_login","site":"Gmail"} {"type":"ask_user","question":"...","options":["A","B"]}',
     'Finishing: {"type":"done","summary":"the REAL results: findings, data, versions, paths, links"}',
