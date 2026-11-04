@@ -16,13 +16,15 @@ export async function POST(req: Request) {
     const form = await req.formData();
     const secrets = await getResolvedVoiceSecrets(claims.uid);
     if (!secrets.twilioToken || !verifyTwilioSignature(req, secrets.twilioToken, form)) return new Response("Forbidden", { status: 403 });
-    const callSid = String(form.get("CallSid") || "").slice(0, 80);
+    const callSid = String(form.get("CallSid") || "").slice(0, 120);
     const status = String(form.get("CallStatus") || "unknown").slice(0, 40);
     const duration = Math.max(0, Number(form.get("CallDuration") || 0));
     const ref = getAdminDb().collection("users").doc(claims.uid).collection("voiceCalls").doc(claims.callId);
     const snap = await ref.get();
-    if (!snap.exists || (snap.data()?.providerCallId && callSid && snap.data()?.providerCallId !== callSid)) return new Response("Not found", { status: 404 });
-    await ref.set({ status, durationSeconds: duration, updatedAt: Date.now(), ...(status === "completed" ? { completedAt: Date.now() } : {}) }, { merge: true });
+    const known = String(snap.data()?.providerCallId ?? "");
+    // "pending" = the phone company did not give the call id when the call was created (Telnyx): the first callback tells it
+    if (!snap.exists || (known && known !== "pending" && callSid && known !== callSid)) return new Response("Not found", { status: 404 });
+    await ref.set({ status, durationSeconds: duration, updatedAt: Date.now(), ...(status === "completed" ? { completedAt: Date.now() } : {}), ...(known === "pending" && callSid ? { providerCallId: callSid } : {}) }, { merge: true });
     if (DONE.includes(status)) {
       await audit(claims.uid, { kind: "voice_call_status", text: `Call ${claims.callId}: ${status}, ${duration}s` });
       await finalizeCall(claims.uid, claims.callId);               // summary + follow-ups go into the chat
