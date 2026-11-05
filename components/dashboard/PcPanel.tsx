@@ -248,24 +248,39 @@ export default function PcPanel({
   }
 
   const busy = status === "creating" || status === "loading";
+
+  // Wide screens (laptop, iPad Pro landscape): the panel sits beside the chat, and the chat always keeps at least
+  // 460px, so the message box can never be squeezed out. Smaller screens (iPad, phone): the panel slides over the chat
+  // like a drawer, and the chat underneath stays untouched.
+  const sideWidth = wide ? "min(62%, calc(100% - 460px))" : "min(46%, calc(100% - 460px))";
   const rootClass = fullscreen
-    ? "fixed inset-0 z-[60] flex flex-col bg-panel"
-    : `flex h-full ${wide ? "w-[62%]" : "w-[46%]"} min-w-[340px] shrink-0 flex-col border-l border-line bg-panel`;
+    ? "fixed inset-0 z-[60] flex flex-col bg-panel pb-[env(safe-area-inset-bottom)]"
+    : "flex shrink-0 flex-col border-l border-line bg-panel " +
+      "max-lg:fixed max-lg:inset-y-0 max-lg:right-0 max-lg:z-[55] max-lg:w-[min(100vw,540px)] max-lg:shadow-2xl max-lg:pb-[env(safe-area-inset-bottom)] " +
+      "lg:h-full lg:w-[var(--pc-w)] lg:min-w-[340px]";
 
   return (
-    <aside className={rootClass}>
-      <div className="flex items-center justify-between border-b border-line px-4 py-3">
-        <div className="flex items-center gap-2 text-sm font-medium text-ink">
-          <Monitor size={15} />
-          Your team&rsquo;s computer
+    <>
+    {!fullscreen && (
+      <div
+        className="fixed inset-0 z-[54] bg-black/50 backdrop-blur-[1px] lg:hidden"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+    )}
+    <aside className={rootClass} style={{ "--pc-w": sideWidth } as React.CSSProperties}>
+      <div className="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-ink">
+          <Monitor size={15} className="shrink-0" />
+          <span className="truncate">Your team&rsquo;s computer</span>
           <span
-            className={`h-1.5 w-1.5 rounded-full ${
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
               status === "ready" ? "bg-avatar-teal" : busy ? "bg-gold" : "bg-faint"
             }`}
           />
-          {status === "paused" && <span className="text-[11px] text-muted">off · saved</span>}
+          {status === "paused" && <span className="shrink-0 text-[11px] text-muted">off · saved</span>}
         </div>
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
           {status === "ready" && (
             <>
               <button
@@ -472,5 +487,6 @@ export default function PcPanel({
         </div>
       )}
     </aside>
+    </>
   );
 }
