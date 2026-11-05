@@ -3,170 +3,145 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import BotAvatar from "@/components/BotAvatar";
+import { Menu, X } from "lucide-react";
 import Logo from "@/components/Logo";
-import LandingChatDemo from "@/components/LandingChatDemo";
 import AuthModal from "@/components/AuthModal";
 import { useAuth } from "@/lib/auth-context";
-import { PRESET_AGENTS } from "@/lib/bots";
+import "@/components/landing/landing.css";
+import { useBrandColor } from "@/components/landing/useBrandColor";
+import HeroWordmark from "@/components/landing/HeroWordmark";
+import WorkspaceDemo from "@/components/landing/WorkspaceDemo";
+import ComputerShowcase from "@/components/landing/ComputerShowcase";
+import FeatureCards from "@/components/landing/FeatureCards";
+import RolesShowcase from "@/components/landing/RolesShowcase";
+import Steps from "@/components/landing/Steps";
 
 export default function LandingPage() {
   const [authOpen, setAuthOpen] = useState(false);
   const [authTab, setAuthTab] = useState<"signin" | "signup">("signup");
+  const [menuOpen, setMenuOpen] = useState(false);
   const { user } = useAuth();
   const router = useRouter();
+  const brand = useBrandColor();
 
   function openAuth(tab: "signin" | "signup") {
     setAuthTab(tab);
     setAuthOpen(true);
+    setMenuOpen(false);
+  }
+
+  function primary() {
+    if (user) router.push("/dashboard");
+    else openAuth("signup");
   }
 
   return (
-    <main className="min-h-screen bg-bg">
+    <main
+      className="min-h-screen overflow-x-hidden bg-bg"
+      style={{ "--brand": brand } as React.CSSProperties}
+    >
       {/* nav */}
-      <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
-        <Logo />
-        <div className="flex items-center gap-2">
-          <Link href="/docs" className="rounded-full px-4 py-2 text-sm text-muted hover:text-ink">
-            Docs
-          </Link>
-          {user ? (
-            <button
-              onClick={() => router.push("/dashboard")}
-              className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
-            >
-              Dashboard
-            </button>
-          ) : (
-            <>
+      <header className="sticky top-0 z-40 border-b border-line bg-bg/80 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+          <Logo />
+          <div className="flex items-center gap-2">
+            <Link href="/docs" className="hidden rounded-full px-4 py-2 text-sm text-muted hover:text-ink sm:block">
+              Docs
+            </Link>
+            {!user && (
               <button
                 onClick={() => openAuth("signin")}
-                className="rounded-full px-4 py-2 text-sm text-muted hover:text-ink"
+                className="hidden rounded-full px-4 py-2 text-sm text-muted hover:text-ink sm:block"
               >
                 Sign in
               </button>
-              <button
-                onClick={() => openAuth("signup")}
-                className="rounded-full bg-white px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
-              >
-                Sign up
-              </button>
-            </>
-          )}
+            )}
+            <button
+              onClick={primary}
+              className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90"
+            >
+              {user ? "Dashboard" : "Get your team"}
+            </button>
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              aria-label="Menu"
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-line text-ink sm:hidden"
+            >
+              {menuOpen ? <X size={18} /> : <Menu size={18} />}
+            </button>
+          </div>
         </div>
+        {menuOpen && (
+          <div className="mx-auto flex max-w-6xl flex-col gap-1 border-t border-line px-6 py-3 sm:hidden">
+            <Link href="/docs" className="rounded-lg px-3 py-2 text-sm text-ink hover:bg-panel">
+              Docs
+            </Link>
+            {!user && (
+              <button
+                onClick={() => openAuth("signin")}
+                className="rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-panel"
+              >
+                Sign in
+              </button>
+            )}
+          </div>
+        )}
       </header>
 
       {/* hero */}
-      <section className="mx-auto grid max-w-6xl gap-12 px-6 pb-24 pt-10 md:grid-cols-2 md:items-center md:pt-16">
-        <div>
-          <h1 className="max-w-md text-[2.75rem] font-semibold leading-[1.08] tracking-tight text-ink md:text-5xl">
-            Hand your work to a team that never logs off.
+      <section className="lv-glow relative">
+        <HeroWordmark />
+
+        <div className="relative z-10 px-6 pb-14 pt-8 text-center">
+          <h1 className="text-4xl font-semibold tracking-tight text-ink md:text-7xl">
+            Your <span className="lv-brand">business</span> on autopilot
           </h1>
-          <p className="mt-5 max-w-sm text-[15px] leading-relaxed text-muted">
-            AgenticVenus teammates get their own computer, sign into the
-            tools you already use, and come back only when a decision needs
-            you.
-          </p>
-          <div className="mt-8 flex flex-wrap items-center gap-3">
+          <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
             <button
-              onClick={() =>
-                user ? router.push("/dashboard") : openAuth("signup")
-              }
-              className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90"
+              onClick={primary}
+              className="rounded-full bg-white px-8 py-4 text-base font-medium text-bg hover:opacity-90"
             >
               {user ? "Go to your dashboard" : "Get your first teammate"}
             </button>
             <Link
               href="/docs"
-              className="rounded-full border border-line px-5 py-2.5 text-sm text-ink hover:bg-panel"
+              className="rounded-full border border-line px-8 py-4 text-base text-ink hover:bg-panel"
             >
               Read the docs
             </Link>
-            <a
-              href="#team"
-              className="rounded-full px-3 py-2.5 text-sm text-muted hover:text-ink"
-            >
-              See the roster
-            </a>
           </div>
+          <p className="mx-auto mt-6 max-w-2xl text-sm text-muted">
+            AI teammates with their own computer. Bring your AI account or API key. Provider fees
+            and limits apply.
+          </p>
         </div>
 
-        <div className="relative">
-          <div className="pointer-events-none absolute -inset-10 rounded-full bg-gold/[0.06] blur-3xl" />
-          <div className="relative">
-            <LandingChatDemo />
-          </div>
+        <div className="pb-6">
+          <WorkspaceDemo />
         </div>
       </section>
 
-      {/* roster — every bot has its own identity */}
-      <section id="team" className="mx-auto max-w-6xl px-6 py-16">
-        <h2 className="text-2xl font-semibold tracking-tight text-ink">
-          Every teammate has an identity of their own
-        </h2>
-        <p className="mt-2 max-w-lg text-[15px] leading-relaxed text-muted">
-          A name, a role, a memory of how you like things done. Message one
-          directly, or let them coordinate with each other.
-        </p>
+      <ComputerShowcase />
+      <FeatureCards />
+      <RolesShowcase />
+      <Steps />
 
-        <div className="mt-8 divide-y divide-line rounded-xl2 border border-line">
-          {PRESET_AGENTS.map((agent) => (
-            <div key={agent.id} className="flex items-center gap-4 px-5 py-4">
-              <BotAvatar color={agent.color} size={38} />
-              <div className="min-w-0 flex-1">
-                <span className="font-medium text-ink">{agent.name}</span>
-                <p className="truncate text-sm text-muted">{agent.role}</p>
-              </div>
-            </div>
-          ))}
+      {/* closing cta */}
+      <section className="mx-auto max-w-6xl px-6 pb-24">
+        <div className="lv-glow rounded-xl2 border border-line bg-panel/50 px-6 py-16 text-center">
+          <h2 className="text-4xl font-semibold tracking-tight text-ink md:text-5xl">
+            Hand your work to a team that never logs off.
+          </h2>
+          <p className="mx-auto mt-4 max-w-xl text-muted">
+            They sign into the tools you already use and come back only when a decision needs you.
+          </p>
+          <button
+            onClick={primary}
+            className="mt-8 rounded-full bg-white px-8 py-4 text-base font-medium text-bg hover:opacity-90"
+          >
+            {user ? "Go to your dashboard" : "Get your first teammate"}
+          </button>
         </div>
-      </section>
-
-      {/* feature rows — grounded in the real product moments, not generic icon cards */}
-      <section className="mx-auto max-w-6xl space-y-14 px-6 py-16">
-        <FeatureRow
-          title="A computer of its own"
-          body="Bots sign into Salesforce, your inbox, LinkedIn, anything with a login — even tools with no clean API. Work keeps running after you close the laptop."
-        >
-          <div className="space-y-2 rounded-xl border border-line bg-panel p-4 text-sm">
-            {[
-              ["Salesforce", "list pulled · 52 accounts"],
-              ["LinkedIn", "4 profiles skipped · recently contacted"],
-              ["Sequencer", "36 drafts queued · 0 sent"],
-            ].map(([label, detail]) => (
-              <div key={label} className="flex items-center gap-2 text-ink">
-                <span className="text-avatar-teal">✓</span>
-                <span className="font-medium">{label}</span>
-                <span className="text-muted">→ {detail}</span>
-              </div>
-            ))}
-          </div>
-        </FeatureRow>
-
-        <FeatureRow
-          title="Show it once, it remembers"
-          body="Walk through a workflow together the first time. Your teammate saves it as a routine and runs it on its own from then on — corrections included."
-          reverse
-        >
-          <div className="rounded-xl border border-line bg-panel p-4">
-            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-panel2 px-3 py-1.5 text-xs text-muted">
-              <span className="h-1.5 w-1.5 rounded-full bg-gold" />
-              Created routine · Overnight outbound
-            </span>
-          </div>
-        </FeatureRow>
-
-        <FeatureRow
-          title="A small team, not one more agent"
-          body="Run several at once — one on outbound, one on the inbox, one on expenses — and let a lead teammate route work between them."
-        >
-          <div className="flex -space-x-3">
-            <BotAvatar color="teal" size={44} />
-            <BotAvatar color="amber" size={44} />
-            <BotAvatar color="violet" size={44} />
-            <BotAvatar color="sky" size={44} />
-          </div>
-        </FeatureRow>
       </section>
 
       {/* footer */}
@@ -176,43 +151,11 @@ export default function LandingPage() {
           <Link href="/docs" className="text-xs text-muted hover:text-ink">
             Docs
           </Link>
-          <p className="text-xs text-faint">
-            © {new Date().getFullYear()} AgenticVenus
-          </p>
+          <p className="text-xs text-faint">© {new Date().getFullYear()} AgenticVenus</p>
         </div>
       </footer>
 
       <AuthModal open={authOpen} initialTab={authTab} onClose={() => setAuthOpen(false)} />
     </main>
-  );
-}
-
-function FeatureRow({
-  title,
-  body,
-  children,
-  reverse,
-}: {
-  title: string;
-  body: string;
-  children: React.ReactNode;
-  reverse?: boolean;
-}) {
-  return (
-    <div
-      className={`grid items-center gap-8 md:grid-cols-2 ${
-        reverse ? "md:[&>*:first-child]:order-2" : ""
-      }`}
-    >
-      <div>
-        <h3 className="text-xl font-semibold tracking-tight text-ink">
-          {title}
-        </h3>
-        <p className="mt-2 max-w-sm text-[15px] leading-relaxed text-muted">
-          {body}
-        </p>
-      </div>
-      <div>{children}</div>
-    </div>
   );
 }
