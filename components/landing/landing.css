@@ -1,0 +1,196 @@
+/* ---------- brand colour (changes every 5 min via --brand) ---------- */
+.lv-brand {
+  color: var(--brand, #3fc9ae);
+  transition: color 2.4s ease;
+}
+.lv-glow {
+  background: radial-gradient(
+    60% 55% at 50% 0%,
+    color-mix(in srgb, var(--brand, #3fc9ae) 16%, transparent),
+    transparent 70%
+  );
+  transition: background 2.4s ease;
+}
+
+/* ---------- big wordmark ---------- */
+.lv-word {
+  position: relative;
+  font-weight: 800;
+  letter-spacing: -0.065em;
+  line-height: 0.9;
+  font-size: clamp(2.6rem, 11.2vw, 10rem);
+  white-space: nowrap;
+}
+.lv-letter {
+  display: inline-block;
+  color: var(--brand, #3fc9ae);
+  transition: color 2.4s ease;
+  animation: lv-letter-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) backwards,
+    lv-wave 5s ease-in-out infinite;
+}
+.lv-ghost {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: transparent;
+  -webkit-text-stroke: 1px color-mix(in srgb, var(--brand, #3fc9ae) 24%, transparent);
+  pointer-events: none;
+  user-select: none;
+  animation: lv-ghost-drift 9s ease-in-out infinite;
+}
+.lv-ghost-top {
+  top: -0.78em;
+  -webkit-mask-image: linear-gradient(to top, #000, transparent 85%);
+  mask-image: linear-gradient(to top, #000, transparent 85%);
+}
+.lv-ghost-bottom {
+  bottom: -0.78em;
+  animation-delay: -4s;
+  -webkit-mask-image: linear-gradient(to bottom, #000, transparent 85%);
+  mask-image: linear-gradient(to bottom, #000, transparent 85%);
+}
+
+/* ---------- roaming buddies ---------- */
+.lv-roam {
+  animation: lv-roam var(--dur, 14s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+.lv-ring {
+  position: absolute;
+  inset: -10px;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  border-top-color: #a98bf0;
+  border-right-color: #5fa6f0;
+  animation: lv-spin 3s linear infinite;
+}
+
+/* ---------- misc ---------- */
+.lv-msg {
+  animation: lv-rise 0.55s ease both;
+}
+.lv-dot-live {
+  animation: lv-pulse 1.6s ease-in-out infinite;
+}
+.lv-caret {
+  animation: lv-caret 1s steps(1) infinite;
+}
+.lv-cursor {
+  animation: lv-cursor 5s ease-in-out infinite;
+}
+.lv-noscroll {
+  scrollbar-width: none;
+}
+.lv-noscroll::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes lv-letter-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.45em) scale(0.96);
+    filter: blur(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+@keyframes lv-wave {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.035em);
+  }
+}
+@keyframes lv-ghost-drift {
+  0%,
+  100% {
+    transform: translateX(-1.5%);
+  }
+  50% {
+    transform: translateX(1.5%);
+  }
+}
+@keyframes lv-roam {
+  0% {
+    transform: translate(0, 0) rotate(var(--r0, -8deg));
+  }
+  25% {
+    transform: translate(var(--ax, 24px), calc(var(--ay, 16px) * -1)) rotate(var(--r1, 8deg));
+  }
+  50% {
+    transform: translate(calc(var(--ax, 24px) * 0.4), var(--ay, 16px)) rotate(var(--r0, -8deg));
+  }
+  75% {
+    transform: translate(calc(var(--ax, 24px) * -0.9), calc(var(--ay, 16px) * -0.4)) rotate(var(--r1, 8deg));
+  }
+  100% {
+    transform: translate(0, 0) rotate(var(--r0, -8deg));
+  }
+}
+@keyframes lv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes lv-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes lv-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes lv-bar {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+@keyframes lv-caret {
+  50% {
+    opacity: 0;
+  }
+}
+@keyframes lv-cursor {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(16px, 8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lv-letter,
+  .lv-ghost,
+  .lv-roam,
+  .lv-ring,
+  .lv-msg,
+  .lv-dot-live,
+  .lv-caret,
+  .lv-cursor,
+  .lv-bar {
+    animation: none !important;
+  }
+}
