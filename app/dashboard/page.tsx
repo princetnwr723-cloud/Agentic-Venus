@@ -151,6 +151,10 @@ export default function DashboardPage() {
   const recentVideoRef = useRef<Record<string, { id: string; name: string; at: number }>>({});
   // how the owner wants the attached video edited, as the model understood the message (any language); used by startVenus
   const editVerdictRef = useRef<Record<string, EditPolicy>>({});
+  // the video stays "the video of this chat" for a while after it was edited, so a follow-up like "now add motion graphics" edits the SAME video again
+  // (it used to be forgotten after the first edit, so the follow-up went to the chat agent, which did nothing); the length asked for is remembered with it
+  const lastEditRef = useRef<Record<string, { length: EditPolicy["length"]; seconds?: number }>>({});
+  const RECENT_VIDEO_MS = 3 * 3600_000;
   const codeBusyRef = useRef<Set<string>>(new Set());
   const teamBusyRef = useRef<Set<string>>(new Set());
   const brains = useRef<Record<string, Brain>>({});
@@ -1146,13 +1150,13 @@ export default function DashboardPage() {
     try {
       // 1) a video attached in this chat is EDITED (the same video), unless the owner asks for a brand-new one from scratch
       const att = recentVideoRef.current[chat.id];
-      const editing = Boolean(att && Date.now() - att.at < 30 * 60_000 && !NEW_FROM_SCRATCH.test(briefIn));
+      const editing = Boolean(att && Date.now() - att.at < RECENT_VIDEO_MS && !NEW_FROM_SCRATCH.test(briefIn));
       let source: SourceRef | undefined;
       if (editing && att) {
         const links = await attachmentLinks(chat.id, [att.id]);
         if (!links.length) return out("The attached video could not be opened. Attach it again and ask once more.");
         source = { kind: "url", url: links[0].url, name: att.name };
-        delete recentVideoRef.current[chat.id];
+        recentVideoRef.current[chat.id] = { ...att, at: Date.now() }; // kept: the next message may ask for more edits on the same video
       }
       // 2) a saved template (a marker, its name, or "a launch video") is cloned: same look, pace and structure, new content
       const tpl = editing ? null : await templateFor(briefIn);
@@ -1163,6 +1167,7 @@ export default function DashboardPage() {
       // how the owner wants the video edited: nothing is shortened unless they ask for it (the length shown here is only a placeholder)
       const editPolicy = editing ? editVerdictRef.current[chat.id] ?? editPolicyOf(brief) : undefined;
       delete editVerdictRef.current[chat.id];
+      if (editing && editPolicy) lastEditRef.current[chat.id] = { length: editPolicy.length, ...(editPolicy.seconds ? { seconds: editPolicy.seconds } : {}) };
       const seconds = editing ? editPolicy?.seconds ?? 60 : tpl && !asked ? Math.min(3600, Math.max(15, Math.round(tpl.seconds))) : opt.seconds;
       const aspect = tpl && !wantsShape ? tpl.aspect : opt.aspect;
       setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
@@ -1515,7 +1520,7 @@ export default function DashboardPage() {
     // the word lists (English + Hinglish) are the fallback when the model cannot be asked. It never depends on the chat agent's guess.
     {
       const recent = recentVideoRef.current[chat.id];
-      const hasRecent = Boolean(recent && Date.now() - recent.at < 30 * 60_000);
+      const hasRecent = Boolean(recent && Date.now() - recent.at < RECENT_VIDEO_MS);
       const att = vidAtt ?? (hasRecent ? recent : undefined);
       if (!video && att && text.length <= 800) {
         const verdict = await classifyVideoRequest({ uid: user.uid, token: () => user.getIdToken(), e2bKey: e2bKey ?? "", apiKeys, pexels: false }, { provider: chat.provider, model: chat.model }, text, att.name);
@@ -1524,7 +1529,23 @@ export default function DashboardPage() {
             : wantsVideoEdit(text) && (vidAtt || /\b(video|clip|footage|reel|ise|isko|is video)\b/i.test(text)) ? "edit" : "other");
         if (action === "template") { void analyzeTemplateFor(chat, att, text + extra); return; }
         if (action === "edit") {
-          if (verdict) editVerdictRef.current[chat.id] = { length: verdict.length, ...(verdict.seconds ? { seconds: verdict.seconds } : {}), creative: verdict.creative, graphics: verdict.graphics };
+          {
+            // the model's reading is the main one, but the word lists (English + Hinglish) can only ADD to it: a model that misses "motion graphics",
+            // "apne hisab se" or "4 min se 1 min" must not turn the request into plain cuts
+            const fast = editPolicyOf(text);
+            const prev = lastEditRef.current[chat.id];
+            const wantsWhole = /\b(full|whole|entire|keep all|poora|pura|saara|sara)\b/i.test(text);
+            let length: EditPolicy["length"] = verdict?.length ?? fast.length;
+            let seconds: number | undefined = verdict?.seconds ?? fast.seconds;
+            if (length === "keep" && fast.length !== "keep") { length = fast.length; seconds = fast.seconds; }
+            // a follow-up that only adds something ("now with motion graphics") keeps the length that was asked before
+            if (length === "keep" && prev && prev.length !== "keep" && !wantsWhole) { length = prev.length; seconds = prev.seconds; }
+            editVerdictRef.current[chat.id] = {
+              length, ...(length === "target" && seconds ? { seconds } : {}),
+              creative: Boolean(verdict?.creative) || fast.creative,
+              graphics: Boolean(verdict?.graphics) || fast.graphics || Boolean(verdict?.creative) || fast.creative,
+            };
+          }
           void startVenus(chat, text + extra);
           return;
         }
