@@ -124,14 +124,69 @@ export function wantsTemplateFromVideo(text: string): boolean {
 }
 
 // ---------------- an attached video that the owner wants EDITED ----------------
-const EDIT_WORDS = /\b(?:edit(?:ing)?|re-?edit|cut|trim|shorten|crop|enhance|polish|clean(?: it)? up|speed(?:ing)? (?:it )?up|slow(?: it)? down|stitch|merge|jump[- ]?cuts?|colou?r[- ]?grade|highlights?|resize|reel|shorts?|remove (?:the )?(?:silences?|pauses?|filler(?: words)?|ums|uhs|background noise|watermark|dead air)|add (?:the )?(?:captions?|subtitles?|music|text|titles?|logo|intro|outro|transitions?|b-?roll|effects?|zoom)|(?:with|burn(?:ed)?(?: in)?) (?:captions?|subtitles?))\b|edit\s*kar|kaat\s*(?:do|de|kar)|chh?ota\s*kar|subtitle|caption\s*laga|music\s*laga|ise\s*edit|isko\s*edit|सुधार|एडिट|काट/i;
+const EDIT_WORDS = /\b(?:edit(?:ing)?|re-?edit|tighten|condense|punchy|snappy|polish|engaging|improve|teaser|trailer|montage|stabili[sz]e|jump[- ]?cuts?|make (?:it|this(?: video)?) (?:look )?(?:better|great|amazing|awesome|professional|polished|pop)|turn (?:this|it) into|\d+[- ]?(?:second|minute|min|sec)s? (?:version|cut|edit|video|clip|reel|long)|remove (?:all )?(?:the )?(?:ums?|filler|pauses?|silences?|dead air|mistakes)|fix (?:the )?(?:audio|sound|lighting|colou?rs?)|cut|trim|shorten|crop|enhance|polish|clean(?: it)? up|speed(?:ing)? (?:it )?up|slow(?: it)? down|stitch|merge|jump[- ]?cuts?|colou?r[- ]?grade|highlights?|resize|reel|shorts?|remove (?:the )?(?:silences?|pauses?|filler(?: words)?|ums|uhs|background noise|watermark|dead air)|add (?:the )?(?:captions?|subtitles?|music|text|titles?|logo|intro|outro|transitions?|b-?roll|effects?|zoom)|(?:with|burn(?:ed)?(?: in)?) (?:captions?|subtitles?))\b|edit\s*kar|kaat\s*(?:do|de|kar)|chh?ota\s*kar|subtitle|caption\s*laga|music\s*laga|ise\s*edit|isko\s*edit|सुधार|एडिट|काट/i;
 // posting / describing / writing about a video is NOT editing it
 const NOT_EDIT = /\b(?:post|upload|publish|share|schedule)\b[\s\S]{0,80}\b(?:youtube|instagram|insta|twitter|linkedin|tiktok|facebook|reddit|pinterest|threads)\b|\b(?:transcribe|transcript|summari[sz]e|describe|what(?:'s| is) (?:in|happening)|kya (?:hai|hota)|write|draft|suggest|give me)\b[\s\S]{0,40}\b(?:captions?|hashtags?|title|description|summary|script)\b/i;
 
 /** The owner wants the attached video edited (cut, trimmed, captioned, enhanced ...): Venus Pro edits THAT video. */
 export function wantsVideoEdit(text: string): boolean {
   const t = String(text ?? "");
-  return EDIT_WORDS.test(t) && !NOT_EDIT.test(t);
+  return (EDIT_WORDS.test(t) || CREATIVE.test(t)) && !NOT_EDIT.test(t);
+}
+
+// ---------------- HOW the owner wants the video edited: length, who decides, how much is added ----------------
+/**
+ * length: keep = the whole video stays (nothing is cut away that was not asked for); tighten = only dead air, filler and boring stretches go;
+ * target = a length was asked for; shorter = "make it shorter" without a number.
+ * creative: the owner gave the editor free hands ("do what you think is best", "best edit"): the model decides like a senior editor.
+ * graphics: the owner wants motion graphics / "all edits": the full toolbox is used.
+ * The word lists below are the FAST path for English and Hinglish; in every other language the model reads the message (see videoIntentPrompt).
+ */
+export type EditPolicy = { length: "keep" | "tighten" | "target" | "shorter"; seconds?: number; creative: boolean; graphics: boolean };
+
+const NUM_WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, ninety: 90, ek: 1, do: 2, teen: 3, char: 4, paanch: 5, panch: 5, das: 10, half: 0.5 };
+const NUM = "(\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|fifty|sixty|ninety|ek|do|teen|char|paanch|panch|das|half)";
+const NUM1 = "(\\d+(?:\\.\\d+)?|a|an|one|two|three|four|five|ten|fifteen|twenty|thirty|forty|fifty|sixty|ek|do|teen|char|paanch|das|half)"; // "a minute teaser"
+const UNIT = "(hours?|hrs?|ghante|ghanta|minutes?|mins?|min|minat|seconds?|secs?|sec|s)";
+// numbers that are NOT a wanted length: positions ("the first 10 seconds", "at 30 seconds") and things to remove ("remove 5 seconds", "trim 10 seconds from the start")
+const POSITION = new RegExp(`\\b(?:first|last|initial|final|opening|closing|beginning|start(?:ing)?|end|ending|after|before|at|from|until|till|between|mark|timestamp|pehle|pehla|aakhri|akhri)\\s+(?:of\\s+)?(?:the\\s+)?(?:first\\s+|last\\s+)?${NUM}\\s*${UNIT}\\b`, "gi");
+const REMOVAL = new RegExp(`\\b(?:remove|delete|cut\\s+out|cut\\s+off|skip|drop|trim\\s+off|get\\s+rid\\s+of|hata(?:o|do)?|kaat)\\b[^.\\n]{0,24}?${NUM}\\s*${UNIT}\\b`, "gi");
+const OFFPART = new RegExp(`${NUM}\\s*${UNIT}\\s+(?:from|off|of)\\s+(?:the\\s+)?(?:start|end|beginning|front|back|intro|outro|video|clip)`, "gi");
+// a LENGTH that is asked for: "to 60 seconds", "a 60-second version", "45 seconds long", "make it 2 minutes", "keep it under 3 minutes", "60 second ka video"
+const TARGETS = [
+  new RegExp(`\\b(?:to|into|under|within|upto|up\\s+to|around|about|approx(?:imately)?|max(?:imum)?|only|total(?:\\s+of)?|length(?:\\s+of)?|duration(?:\\s+of)?|roughly)\\s*(?:a\\s+)?${NUM}[\\s-]*${UNIT}\\b`, "gi"),
+  new RegExp(`\\b${NUM1}[\\s-]*${UNIT}[\\s-]*(?:long|version|cut|edit|video|clip|reel|short|shorts|teaser|trailer|highlights?|summary|recap|overview|montage|film|ka|ki|ke|me|mein|tak|max|maximum|only)\\b`, "gi"),
+  new RegExp(`\\b(?:make|turn|get|bring|cut|trim|shorten|reduce|condense|compress|want|need|give\\s+me|create|edit|keep)\\b[^.\\n]{0,40}?\\b${NUM1}[\\s-]*${UNIT}\\b`, "gi"),
+];
+const SHORTER = /\b(?:shorter|shorten|trim (?:it )?down|cut (?:it )?down|make it short|chhota kar|chota kar|chhoti kar|short kar|short version|quick version|short and sweet|boil it down|condense|highlights?|best (?:parts|moments|bits)|key (?:points|moments)|teaser|trailer|recap|summary|summari[sz]e|overview|montage|snippet|reels?|shorts)\b/i;
+const TIGHTEN = /\b(?:tighten|tighter|punchy|snappy|fast[- ]paced|faster pace|trim the fat|cut the (?:fluff|boring|dull|slow|dead|empty|useless)|remove (?:all )?(?:the )?(?:ums?|uhs?|filler(?: words)?|pauses?|silences?|dead air|mistakes|bloopers|retakes|repetitions?|stutters?|boring (?:parts|bits|sections))|get rid of (?:the )?(?:ums|pauses|silences|dead air|boring)|clean(?:ed)?[- ]?up|jump[- ]?cuts?|cut out (?:the )?(?:boring|dull|slow|dead)|no (?:dead air|silences?))\b/i;
+const CREATIVE = /\b(?:apne hisa?ab se|apne mann se|apni marzi(?: se)?|jaisa tum chaho|jaise tum chaho|jo tumhe (?:sahi|accha|acha|best) lage|tum decide karo|tum khud|as you (?:see fit|think best|like|want|feel|wish)|whatever you (?:think|like|want|feel|see)|use your (?:best )?(?:judg(?:e)?ment|taste|creativity|imagination)|your (?:call|choice)|your own (?:way|style|taste|judg(?:e)?ment|creativity)|surprise me|wow me|do your (?:thing|magic|best)|best you can|creative (?:freedom|control|liberty)|full (?:freedom|control)|free hand|you decide|up to you|go wild|best edit|best possible|make (?:it|this(?: video)?) (?:look )?(?:more )?(?:amazing|awesome|great|stunning|beautiful|professional|polished|engaging|exciting|special|viral|epic|cinematic|pop|better)|improve (?:it|this)|polish(?: it| this)?|pro(?:fessional)?(?:ly)? edit|cinematic|sab kuch kar do|jo chaho)\b/i;
+const GRAPHICS = /\b(?:motion graphics?|graphics?|animations?|animated|titles?|lower[- ]?thirds?|intro|outro|effects?|transitions?|vfx|kinetic|callouts?|all edits|sab edits?|saare edits?|every edit|best edit|pro(?:fessional)? edit|cinematic|sound design|overlays?)\b/i;
+const FILLER = /\b(?:edit|this|the|my|is|isse|ise|isko|video|clip|please|pls|karo|kar|do|dena|de|it|ko|ka|ki|ke|hai|a|an|bhai|yaar|ab|abhi|can|you|could|would|for|me)\b/gi;
+
+const toSeconds = (n: string, unit: string): number => {
+  const v = /^[\d.]+$/.test(n) ? Number(n) : NUM_WORDS[n.toLowerCase()] ?? NaN;
+  const u = unit.toLowerCase();
+  return v * (u.startsWith("h") || u.startsWith("g") ? 3600 : u.startsWith("m") ? 60 : 1);
+};
+
+/** Reads HOW the video must be edited from the owner's words (nothing is shortened unless the owner asked for it). */
+export function editPolicyOf(brief: string): EditPolicy {
+  const text = String(brief ?? "");
+  const masked = text.replace(POSITION, " ").replace(REMOVAL, " ").replace(OFFPART, " ");
+  let seconds: number | undefined;
+  let at = -1;
+  for (const re of TARGETS) {
+    for (const m of masked.matchAll(re)) {
+      const v = toSeconds(m[1], m[2]);
+      if (Number.isFinite(v) && v >= 5 && v <= 7200 && (m.index ?? 0) >= at) { seconds = v; at = m.index ?? 0; } // the LAST length that is named wins
+    }
+  }
+  const length: EditPolicy["length"] = seconds ? "target" : SHORTER.test(text) ? "shorter" : TIGHTEN.test(text) ? "tighten" : "keep";
+  const words = text.replace(/\[template:[^\]]*\]/gi, "").replace(FILLER, " ").split(/\s+/).filter((w) => /\p{L}/u.test(w));
+  // free hands: the owner said so, or gave no instruction at all ("edit this video"). A named length or a named job is an instruction.
+  const creative = CREATIVE.test(text) || (words.length < 3 && length === "keep");
+  return { length, ...(seconds ? { seconds: Math.round(seconds) } : {}), creative, graphics: creative || GRAPHICS.test(text) };
 }
 
 export const stripTemplateMarker = (brief: string): string => String(brief ?? "").replace(/\[\s*template\s*:\s*[\w-]+\s*\]/gi, "").replace(/\s+\n/g, "\n").trim();
