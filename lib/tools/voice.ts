@@ -15,7 +15,7 @@ const reqOf = (ctx?: ToolCtx) => (ctx?.baseUrl ? new Request(ctx.baseUrl) : unde
 
 const VOICES = ["local", "twilio", "openai", "gemini", "elevenlabs", "deepgram"] as const;
 const KEY_FIELD: Record<string, keyof VoiceSettings> = { openai: "openaiKey", gemini: "geminiKey", elevenlabs: "elevenLabsKey", deepgram: "deepgramKey" };
-const VOICE_LABEL: Record<string, string> = { twilio: "free built-in voice", local: "local voice model (aapke cloud PC pe, free)", openai: "OpenAI voice", gemini: "Gemini voice", elevenlabs: "ElevenLabs voice", deepgram: "Deepgram voice" };
+const VOICE_LABEL: Record<string, string> = { twilio: "free built-in voice", local: "local voice model (runs on your cloud PC, free)", openai: "OpenAI voice", gemini: "Gemini voice", elevenlabs: "ElevenLabs voice", deepgram: "Deepgram voice" };
 
 async function haveKey(uid: string, vp: string): Promise<boolean> {
   if (vp === "openai") return Boolean(await getExistingOpenAIKey(uid));
@@ -39,18 +39,18 @@ async function statusText(uid: string): Promise<string> {
   const sec = await getResolvedVoiceSecrets(uid);
   const lines: string[] = [];
   if (sec.twilioSid && sec.twilioToken) {
-    try { lines.push(await describeAccount(uid)); } catch (e) { lines.push(`⚠️ Account details nahi mile: ${e instanceof Error ? e.message : "error"}`); }
-  } else lines.push("📞 Calling abhi connect nahi hai.");
-  lines.push(`Owner number: ${st.ownerNumber || "(abhi nahi diya)"}`);
-  lines.push(`Voice: ${st.voiceChosen ? VOICE_LABEL[st.ttsProvider ?? "twilio"] ?? st.ttsProvider : "(abhi chuna nahi)"} · language: ${st.language ?? "en-US"}`);
-  lines.push(`Phone se aane wali call par caller-ID bharosa: ${st.trustCallerId ? "ON" : "OFF (safe)"}`);
+    try { lines.push(await describeAccount(uid)); } catch (e) { lines.push(`⚠️ Could not read the account details: ${e instanceof Error ? e.message : "error"}`); }
+  } else lines.push("📞 Calling is not connected yet.");
+  lines.push(`Owner number: ${st.ownerNumber || "(not given yet)"}`);
+  lines.push(`Voice: ${st.voiceChosen ? VOICE_LABEL[st.ttsProvider ?? "twilio"] ?? st.ttsProvider : "(not chosen yet)"} · language: ${st.language ?? "en-US"}`);
+  lines.push(`Trust caller ID on incoming calls: ${st.trustCallerId ? "ON" : "OFF (safe)"}`);
   lines.push(await nextStep(uid));
   return lines.join("\n");
 }
 
 async function ownerNumber(uid: string): Promise<string> {
   const n = (await getTele(uid)).ownerNumber;
-  if (!n) throw new Error("Owner ka number abhi saved nahi hai. Owner se uska number maango aur voice.settings (owner_number) se save karo.");
+  if (!n) throw new Error("The owner's number is not saved yet. Ask the owner for their number and save it with voice.settings (owner_number).");
   return n;
 }
 
@@ -70,8 +70,8 @@ const CALL_TOOLS: Def[] = [
       if (!ctx) throw new Error("Calls can only be set up from a chat.");
       const r = await connectProvider(ctx.uid, { provider: s(a.provider, 20).toLowerCase(), sid: s(a.sid, 200), token: s(a.token, 400), space: s(a.space, 80), apiBase: s(a.api_base, 300) }, reqOf(ctx));
       const head = r.number
-        ? `✅ Connected. Number: ${r.number}.${r.webhook ? " Incoming calls ka webhook automatically set ho gaya." : " (Incoming webhook set nahi hua: provider dashboard me number ka Voice webhook khud set karna padega.)"}`
-        : "✅ Connected, par is account me koi phone number nahi hai.";
+        ? `✅ Connected. Number: ${r.number}.${r.webhook ? " The webhook for incoming calls was set automatically." : " (The incoming webhook could not be set: set the number's Voice webhook yourself in the provider dashboard.)"}`
+        : "✅ Connected, but this account has no phone number.";
       return `${head}\nTell the owner their credentials are now stored encrypted and they can delete the message that contained them.\n\n${await statusText(ctx.uid)}`;
     },
   },
@@ -88,17 +88,17 @@ const CALL_TOOLS: Def[] = [
 
       if (a.owner_number !== undefined) {
         const n = normalizePhone(s(a.owner_number, 30), callingCodeOf(cur.fromNumber) || "91");
-        if (!/^\+[1-9]\d{5,14}$/.test(n)) throw new Error("Owner number galat hai. Country code ke saath do, jaise +919876543210.");
+        if (!/^\+[1-9]\d{5,14}$/.test(n)) throw new Error("The owner number looks wrong. Give it with the country code, for example +919876543210.");
         patch.ownerNumber = n; done.push(`owner number ${n}`);
       }
       let vp = s(a.voice_provider, 20).toLowerCase();
       if (vp === "builtin" || vp === "free") vp = "twilio";
       if (vp) {
-        if (!(VOICES as readonly string[]).includes(vp)) throw new Error(`Voice provider ye hona chahiye: local, builtin, ${VOICES.slice(2).join(", ")}.`);
+        if (!(VOICES as readonly string[]).includes(vp)) throw new Error(`The voice provider must be one of: local, builtin, ${VOICES.slice(2).join(", ")}.`);
         const key = s(a.voice_key, 4096);
         if (KEY_FIELD[vp]) {
           if (key) patch[KEY_FIELD[vp] as string] = key;
-          else if (!(await haveKey(uid, vp))) throw new Error(`${vp} ke liye voice key chahiye. Owner se key maango.`);
+          else if (!(await haveKey(uid, vp))) throw new Error(`${vp} needs a voice key. Ask the owner for the key.`);
         }
         patch.ttsProvider = vp as VoiceSettings["ttsProvider"];
         // a voice name of another provider would break this one
@@ -110,7 +110,7 @@ const CALL_TOOLS: Def[] = [
       }
       if (a.language !== undefined) {
         const l = s(a.language, 12);
-        if (!/^(?:auto|[a-z]{2,3}(?:-[A-Z]{2})?)$/.test(l)) throw new Error("Language tag galat hai (jaise en-IN, hi-IN ya auto).");
+        if (!/^(?:auto|[a-z]{2,3}(?:-[A-Z]{2})?)$/.test(l)) throw new Error("The language tag looks wrong (for example en-US, hi-IN or auto).");
         patch.language = l; done.push(`language ${l}`);
       }
       if (a.daily_limit !== undefined) {
@@ -118,11 +118,11 @@ const CALL_TOOLS: Def[] = [
         if (!Number.isInteger(n) || n < 1 || n > 500) throw new Error("Daily limit 1 se 500 ke beech rakho.");
         patch.dailyLimit = n; done.push(`daily limit ${n}`);
       }
-      if (!done.length && a.trust_caller_id === undefined && a.voice_name === undefined && a.voice_model === undefined) throw new Error("Kuch badalne ko nahi diya.");
+      if (!done.length && a.trust_caller_id === undefined && a.voice_name === undefined && a.voice_model === undefined) throw new Error("Nothing to change was given.");
       if (Object.keys(patch).length) await saveVoiceSettings(uid, patch);
       const extra: { voiceChosen?: boolean; trustCallerId?: boolean } = {};
       if (vp) extra.voiceChosen = true;
-      if (typeof a.trust_caller_id === "boolean") { extra.trustCallerId = a.trust_caller_id; done.push(`caller-ID bharosa ${a.trust_caller_id ? "ON" : "OFF"}`); }
+      if (typeof a.trust_caller_id === "boolean") { extra.trustCallerId = a.trust_caller_id; done.push(`trust caller ID ${a.trust_caller_id ? "ON" : "OFF"}`); }
       if (Object.keys(extra).length) await patchTele(uid, extra);
       await audit(uid, { kind: "voice_settings_saved", chatId: ctx.chatId, text: done.join("; ").slice(0, 200) });
 
@@ -130,7 +130,7 @@ const CALL_TOOLS: Def[] = [
       if (vp === "local") {
         const lang = resolveLanguage(patch.language ?? cur.language, "");
         const st = await warmLocalVoice(uid, ctx.chatId, lang, 25_000);
-        local = st.state === "ready" ? "\n✅ Local voice taiyaar hai." : `\nℹ️ Local voice: ${st.detail} Tab tak built-in voice chalegi.`;
+        local = st.state === "ready" ? "\n✅ The local voice is ready." : `\nℹ️ Local voice: ${st.detail} Until it is ready the built-in voice is used.`;
       }
       return `✅ Saved: ${done.join(", ")}.${local}\n\n${await nextStep(uid)}`;
     },
@@ -141,7 +141,7 @@ const CALL_TOOLS: Def[] = [
     run: async (_a, _cred, ctx) => {
       if (!ctx) throw new Error("Not available here.");
       const list = await listNumbers(ctx.uid);
-      return list.length ? list.map((n) => `${n.number}${n.agent ? ` → ${n.agent}` : " (free)"}`).join("\n") : "Account me koi number nahi hai.";
+      return list.length ? list.map((n) => `${n.number}${n.agent ? ` → ${n.agent}` : " (free)"}`).join("\n") : "This account has no numbers.";
     },
   },
   {
@@ -150,7 +150,7 @@ const CALL_TOOLS: Def[] = [
     run: async (a, _cred, ctx) => {
       if (!ctx) throw new Error("Not available here.");
       const n = await assignNumber(ctx.uid, ctx.chatId, s(a.number, 30), reqOf(ctx));
-      return n ? `Ab ye agent ${n} se call karega aur isi number par aane wali calls yahi uthayega.` : "Is agent ka alag number hata diya: ab default number use hoga.";
+      return n ? `This agent now phones from ${n} and answers the calls that come in on this number.` : "This agent's own number was removed: the default number is used now.";
     },
   },
   {
@@ -162,7 +162,7 @@ const CALL_TOOLS: Def[] = [
       if (a.assign === true) await assignNumber(ctx.uid, ctx.chatId, n, reqOf(ctx));
       const cur = await getTele(ctx.uid);
       if (!cur.fromNumber) await saveVoiceSettings(ctx.uid, { fromNumber: n });
-      return `✅ Naya number mil gaya: ${n}${a.assign === true ? " (is agent ko de diya)" : ""}.`;
+      return `✅ New number ready: ${n}${a.assign === true ? " (given to this agent)" : ""}.`;
     },
   },
   {
@@ -170,14 +170,14 @@ const CALL_TOOLS: Def[] = [
     description: "Make a real PHONE CALL with your own voice to a person (client, lead, vendor), from this agent's number. The user approves every call first. You talk to them live; when the call ends, a summary and the follow-up tasks are posted in this chat.",
     run: async (a, _cred, ctx) => {
       if (!ctx) throw new Error("Calls can only be started from a chat.");
-      const to = /^(|me|my number|myself|owner|mujhe|mera number|mere number pe)$/i.test(s(a.to, 40)) ? await ownerNumber(ctx.uid) : s(a.to, 20);
+      const to = /^(|me|my number|myself|owner|my phone|mujhe|mera number|mere number pe)$/i.test(s(a.to, 40)) ? await ownerNumber(ctx.uid) : s(a.to, 20);
       const r = await placeOutboundCall(ctx.uid, { to, goal: s(a.goal), context: s(a.context, 3000), chatId: ctx.chatId, approved: true });
       return `Call started to ${r.to} (id ${r.id}, status ${r.status}). The conversation happens live; the summary will be posted in this chat when it ends.`;
     },
   },
   {
     name: "voice.call_me", risk: "read", params: "goal:string (exactly what to tell the owner: the result of the work, with the key facts), context?:string (details the owner may ask about)",
-    description: "PHONE THE OWNER on their saved number and tell them something by voice. Use it whenever the owner says \"call me when it is done\", \"kaam ke baad call karna\", \"mujhe call karke batao\". Finish the work FIRST, then call with the real result in goal. No approval needed: it only rings the owner's own number. On that call the owner can ask follow-up questions and give new orders. For a long BACKGROUND job use mission.start with max_calls:1 and write in its goal to phone the owner at the end (voice.status shows the owner number). If the owner number is missing, ask for it and save it with voice.settings.",
+    description: "PHONE THE OWNER on their saved number and tell them something by voice. Use it whenever the owner says \"call me when it is done\", \"phone me when you are done\", \"give me a call with the result\", or the same in any language (for example \"kaam ke baad call karna\"). Finish the work FIRST, then call with the real result in goal. No approval needed: it only rings the owner's own number. On that call the owner can ask follow-up questions and give new orders. For a long BACKGROUND job use mission.start with max_calls:1 and write in its goal to phone the owner at the end (voice.status shows the owner number). If the owner number is missing, ask for it and save it with voice.settings.",
     run: async (a, _cred, ctx) => {
       if (!ctx) throw new Error("Calls can only be started from a chat.");
       const to = await ownerNumber(ctx.uid);
