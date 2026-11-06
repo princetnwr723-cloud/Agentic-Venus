@@ -2,6 +2,7 @@ import { collection, deleteDoc, doc, getDoc, getDocs, setDoc } from "firebase/fi
 import { db } from "@/lib/firebase";
 import type { Aspect, SourceInfo } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
+import type { EditPolicy } from "@/lib/venus-clone";
 
 export type Stage = "studio" | "ingest" | "script" | "design" | "assets" | "voice" | "preview" | "review" | "final" | "done";
 
@@ -20,6 +21,8 @@ export type VenusProject = {
   codeChunks?: number;
   /** A saved video template that is cloned for this video (the JSON of a VideoTemplate: look, pace, structure, sound). */
   templateJson?: string; templateName?: string;
+  /** Edit mode: how the owner wants the video edited (length, creative freedom, motion graphics). */
+  editPolicy?: EditPolicy;
 };
 
 const CHUNK_BYTES = 600_000;
