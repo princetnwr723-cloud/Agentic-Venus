@@ -573,23 +573,69 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const srcAspect = an.height > an.width ? "9:16" : an.width === an.height ? "1:1" : "16:9";
         const aspect = run.p.matchSource ? srcAspect : run.p.aspect;
         if (aspect !== run.p.aspect) await upd(run, { aspect: aspect as VenusProject["aspect"] });
+        // HOW to edit. The length stays unless the owner asked for another one (a 4-minute video never becomes 60 seconds by itself).
+        // Studio+ sets no policy: its own form (length / "keep everything") is used as before.
+        const policy = run.p.editPolicy;
+        let keepAll = Boolean(run.p.keepAll);
+        let target = run.p.seconds;
+        if (policy) {
+          keepAll = true;
+          target = Math.round(an.duration);
+          if (policy.length === "target" && policy.seconds) {
+            if (policy.seconds < an.duration * 0.9) { keepAll = false; target = Math.max(8, Math.round(policy.seconds)); }
+          } else if (policy.length === "shorter") { keepAll = false; target = Math.max(15, Math.round(an.duration * 0.45)); }
+          else if (policy.length === "tighten") { keepAll = false; target = Math.max(15, Math.round(an.duration * 0.8)); }
+          const fmtLen = (n: number) => `${Math.floor(n / 60)}:${String(Math.round(n % 60)).padStart(2, "0")}`;
+          say(keepAll ? `📏 Keeping the whole video (${fmtLen(an.duration)}): nothing is cut away that you did not ask for.` : policy.length === "tighten" ? `📏 Tightening: dead air, filler and boring stretches go (about ${fmtLen(target)} out of ${fmtLen(an.duration)}).` : `📏 Making it about ${fmtLen(target)} out of ${fmtLen(an.duration)}, as you asked.`);
+          say(policy.creative ? "🎨 You gave the agent creative control: it plans the edit itself, like a senior editor." : "📝 Following your instructions exactly.");
+          if (policy.graphics) say("✨ Full treatment: cuts, motion graphics, titles, transitions, colour grade and sound.");
+          if (keepAll !== Boolean(run.p.keepAll) || target !== run.p.seconds) await upd(run, { keepAll, seconds: target });
+        }
         const body = {
-          kind: "edit-plan", brief: run.p.brief, seconds: run.p.seconds, keepAll: Boolean(run.p.keepAll), aspect, theme: run.p.theme,
+          kind: "edit-plan", brief: run.p.brief, seconds: target, keepAll, policy, notes: undefined as string | undefined, aspect, theme: run.p.theme,
           captions: run.p.captions && an.transcript.length > 0, music: run.p.music === true,
           facts: { duration: an.duration, width: an.width, height: an.height, fps: 30, hasAudio: an.hasAudio, cuts: an.cuts, silences: an.silences, transcript: an.transcript, tiles: an.tiles },
           source: ing.source, image: { mediaType: ing.mediaType, data: ing.image },
           context: memory + `\n\nA visual style for anything you ADD to this video (titles, graphics): ${style[0]} — ${style[1]}. ${twist}`,
         };
-        let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
-        if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
-        if (!r.storyboard) throw new Error(r.error || "Could not plan the edit.");
-        const sbNew = r.storyboard as Storyboard;
-        sbNew.seed = rndSeed();
-        sbNew.source = ing.source;
-        if (body.captions && an.transcript.length) sbNew.transcript = an.transcript;
-        sbNew.scenes = sbNew.scenes.map((x) => (x.type === "clip" || x.useSource === true ? { ...x, video: ing.source.path } : x));
-        const clean = sanitizeStoryboard(sbNew, { aspect: aspect as VenusProject["aspect"], theme: run.p.theme, captions: Boolean(body.captions), keepFiles: true });
-        const len = Math.round(totalFramesOf(clean) / 30);
+        // free hands or the full treatment: the agent first studies the whole video and writes its editor's notes (a better model writes better notes)
+        if (policy && (policy.creative || policy.graphics) && an.duration >= 20) {
+          say("🧠 The agent is studying the whole video and writing its editor's notes first…");
+          hooks.progress({ label: "Editor's notes", value: null });
+          const nr = await aiCall(env, run.p, { ...body, kind: "edit-notes" }).catch(() => null);
+          if (nr?.notes) body.notes = String(nr.notes);
+          hooks.progress({ label: "Planning the edit", value: null });
+        }
+        const planOnce = async (extra: string) => {
+          const b = extra ? { ...body, brief: body.brief + "\n\n" + extra } : body;
+          let r = await aiCall(env, run.p, b).catch((e) => ({ error: (e as Error).message }));
+          if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, b); }
+          if (!r.storyboard) throw new Error(r.error || "Could not plan the edit.");
+          const sbNew = r.storyboard as Storyboard;
+          sbNew.seed = rndSeed();
+          sbNew.source = ing.source;
+          if (body.captions && an.transcript.length) sbNew.transcript = an.transcript;
+          sbNew.scenes = sbNew.scenes.map((x) => (x.type === "clip" || x.useSource === true ? { ...x, video: ing.source.path } : x));
+          const c = sanitizeStoryboard(sbNew, { aspect: aspect as VenusProject["aspect"], theme: run.p.theme, captions: Boolean(body.captions), keepFiles: true });
+          return { clean: c, len: Math.round(totalFramesOf(c) / 30) };
+        };
+        let planned = await planOnce("");
+        // the owner's length rule is ENFORCED here, not only asked of the model
+        if (policy) {
+          const tooShort = keepAll && planned.len < an.duration * 0.75;
+          const offTarget = !keepAll && Math.abs(planned.len - target) > target * 0.35;
+          if (tooShort || offTarget) {
+            say(tooShort
+              ? `⚠️ The plan is only ${planned.len}s but your video is ${Math.round(an.duration)}s and you did not ask to shorten it: asking the agent to restore the missing parts…`
+              : `⚠️ The plan is ${planned.len}s but you asked for about ${target}s: asking the agent to fix the length…`);
+            const again = await planOnce(tooShort
+              ? `CORRECTION: your previous plan was only ${planned.len}s. The edit must keep the whole video: about ${Math.round(an.duration)}s. Restore every section you removed; cut only dead air that the user asked to remove.`
+              : `CORRECTION: your previous plan was ${planned.len}s. The user asked for about ${target}s (+-10%). Fix the length.`).catch(() => null);
+            if (again && (tooShort ? again.len > planned.len : Math.abs(again.len - target) < Math.abs(planned.len - target))) planned = again;
+          }
+        }
+        const clean = planned.clean;
+        const len = planned.len;
         await upd(run, { storyboardJson: JSON.stringify(clean), title: clean.title || run.p.title, sourceInfo: ing.source, seconds: len });
         const nClips = clean.scenes.filter((x) => x.type === "clip").length;
         say(`📋 Edit planned: ${nClips} clips + ${clean.scenes.length - nClips} designed scenes, about ${len}s.`);
@@ -844,6 +890,16 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
   return run.p;
 }
 
+
+/** What does the user want with the attached video? The model reads the message in ANY language; null = it could not (the word lists are the fallback). */
+export type VideoVerdict = { action: "edit" | "template" | "other"; length: "keep" | "tighten" | "target" | "shorter"; seconds?: number; creative: boolean; graphics: boolean };
+export async function classifyVideoRequest(env: PipelineEnv, who: { provider: ProviderId; model: string }, text: string, fileName: string): Promise<VideoVerdict | null> {
+  try {
+    const p = { provider: who.provider, model: who.model } as VenusProject;
+    const r = await aiCall(env, p, { kind: "video-intent", text, fileName });
+    return r?.verdict ? (r.verdict as VideoVerdict) : null;
+  } catch { return null; }
+}
 
 /**
  * Studies a real video and saves it as a reusable TEMPLATE (look, pace, structure, sound), then returns it.
