@@ -41,10 +41,14 @@ test('caller ID is not trusted for inbound calls unless the owner switched it on
   assert.match(read('lib/voice-calls.ts'), /trustCallerId/);
 });
 
-test('the composer has a call button next to attach', () => {
+test('the composer has a call button beside the message box, and attach lives inside the box', () => {
   const c = read('components/dashboard/ChatComposer.tsx');
-  assert.match(c, /<CallButton/);
-  assert.ok(c.indexOf('Paperclip size') < c.indexOf('<CallButton'));
+  const call = c.indexOf('<CallButton');
+  const box = c.indexOf('rounded-[26px]'); // the message box itself
+  const attach = c.indexOf('<Paperclip size');
+  assert.ok(call > -1 && box > -1 && attach > -1);
+  assert.ok(call < box, 'call button sits beside the box, not inside it');
+  assert.ok(box < attach, 'attach button is inside the message box');
 });
 
 test('phone-call reasoning uses the chat agent (its model, memory and tools)', () => {
