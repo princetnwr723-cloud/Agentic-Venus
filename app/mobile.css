@@ -1,0 +1,211 @@
+/* Liquid-glass look + phone layout. Desktop (768px and wider) is not touched. */
+
+:root {
+  /* safe areas: the notch / status bar on top and the gesture bar at the bottom */
+  --sat: max(env(safe-area-inset-top, 0px), var(--safe-area-inset-top, 0px));
+  --sab: max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px));
+}
+
+/* ------------------------------------------------------------------ */
+/* Glass                                                               */
+/* ------------------------------------------------------------------ */
+.glass {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+  backdrop-filter: blur(22px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    0 12px 40px rgba(0, 0, 0, 0.45);
+}
+.glass-strong {
+  background: linear-gradient(150deg, rgba(38, 38, 46, 0.88), rgba(17, 17, 22, 0.84));
+  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  backdrop-filter: blur(34px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 -10px 50px rgba(0, 0, 0, 0.5);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { background: rgba(32, 32, 38, 0.92); }
+  .glass-strong { background: rgba(22, 22, 27, 0.97); }
+}
+
+/* press feedback on every tappable thing */
+.press {
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.2s, opacity 0.2s;
+}
+.press:active {
+  transform: scale(0.94);
+}
+
+/* ------------------------------------------------------------------ */
+/* Animations                                                          */
+/* ------------------------------------------------------------------ */
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes gs-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes gs-down { from { transform: translateY(0); } to { transform: translateY(100%); } }
+@keyframes tile-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.94); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes list-in {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes float-y {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+@keyframes shine {
+  0%, 60% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+@keyframes ambient-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(4%, 3%, 0) scale(1.12); }
+}
+@keyframes blob-a { to { transform: translate(70px, 90px) scale(1.18); } }
+@keyframes blob-b { to { transform: translate(-80px, 60px) scale(1.12); } }
+@keyframes blob-c { to { transform: translate(60px, -70px) scale(1.2); } }
+
+.gs-fade-in { animation: fade-in 0.3s ease both; }
+.gs-fade-out { animation: fade-out 0.24s ease forwards; }
+.gs-up { animation: gs-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.gs-down { animation: gs-down 0.24s cubic-bezier(0.4, 0, 1, 1) forwards; }
+.tile-in { animation: tile-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.list-in { animation: list-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.rise { animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.float-y { animation: float-y 5s ease-in-out infinite; }
+
+.shine { position: relative; overflow: hidden; }
+.shine::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.35) 50%, transparent 70%);
+  transform: translateX(-120%);
+  animation: shine 3.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* login-screen glow blobs */
+.blob { position: absolute; border-radius: 9999px; filter: blur(60px); opacity: 0.5; will-change: transform; pointer-events: none; }
+.blob-a { width: 340px; height: 340px; left: -90px; top: -60px; background: #e7b24d; animation: blob-a 18s ease-in-out infinite alternate; }
+.blob-b { width: 300px; height: 300px; right: -100px; top: 30%; background: #a98bf0; animation: blob-b 22s ease-in-out infinite alternate; }
+.blob-c { width: 340px; height: 340px; left: 10%; bottom: -120px; background: #3fc9ae; animation: blob-c 20s ease-in-out infinite alternate; }
+
+/* ------------------------------------------------------------------ */
+/* Phone only (below 768px)                                            */
+/* ------------------------------------------------------------------ */
+@media (max-width: 767px) {
+  html {
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior-y: none;
+  }
+  body {
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+  button, a, [role="button"], select { touch-action: manipulation; }
+
+  /* the keyboard no longer hides the message box */
+  html .h-screen { height: 100dvh; }
+  html .min-h-screen { min-height: 100dvh; }
+
+  /* the same glass, but only on phones (on desktop these elements keep their normal look) */
+  .glass-m {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
+    -webkit-backdrop-filter: blur(22px) saturate(170%);
+    backdrop-filter: blur(22px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+      0 12px 40px rgba(0, 0, 0, 0.4);
+  }
+
+  /* ---- dashboard ---- */
+  html[data-dash] body { background: #07070a; }
+  html[data-dash] .h-screen.bg-bg { background: transparent; }
+
+  /* slow ambient glow behind everything, so the glass has something to blur */
+  html[data-dash] body::before {
+    content: "";
+    position: fixed;
+    inset: -25%;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(40% 35% at 20% 25%, rgba(231, 178, 77, 0.22), transparent 70%),
+      radial-gradient(38% 34% at 80% 20%, rgba(169, 139, 240, 0.2), transparent 70%),
+      radial-gradient(45% 40% at 70% 85%, rgba(63, 201, 174, 0.16), transparent 70%);
+    will-change: transform;
+    animation: ambient-drift 26s ease-in-out infinite alternate;
+  }
+
+  html[data-dash] .px-6 { padding-left: 1rem; padding-right: 1rem; }
+  html[data-dash] .overflow-y-auto.py-6 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+  html[data-dash] .overflow-y-auto { overscroll-behavior: contain; scroll-behavior: smooth; }
+
+  /* Computer panel and Team panel: full screen on a phone instead of squeezing the chat */
+  html[data-dash] aside.w-\[46\%\],
+  html[data-dash] aside.w-\[62\%\] {
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    padding-top: var(--sat);
+    border-left: 0;
+    background: rgba(14, 14, 18, 0.84);
+    -webkit-backdrop-filter: blur(30px) saturate(160%);
+    backdrop-filter: blur(30px) saturate(160%);
+    animation: panel-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* messages slide in, bubbles get a glass / soft-light look */
+  html[data-dash] [data-msg] { animation: msg-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  html[data-dash] [data-msg] .bg-panel2.rounded-xl {
+    background: rgba(255, 255, 255, 0.06);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+    border-color: rgba(255, 255, 255, 0.1);
+    border-radius: 20px 20px 20px 6px;
+  }
+  html[data-dash] [data-msg] .bg-ink.rounded-xl {
+    background: linear-gradient(135deg, #f7f4ec, #e2dccd);
+    border-radius: 20px 20px 6px 20px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+
+  /* working bar + model picker */
+  html[data-dash] .wb-card {
+    background: rgba(255, 255, 255, 0.06);
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  html[data-dash] select {
+    background-color: rgba(255, 255, 255, 0.07);
+    border-color: rgba(255, 255, 255, 0.13);
+    border-radius: 9999px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gs-up, .gs-down, .tile-in, .list-in, .rise, .float-y, .shine::after, .blob,
+  html[data-dash] body::before, html[data-dash] [data-msg],
+  html[data-dash] aside.w-\[46\%\], html[data-dash] aside.w-\[62\%\] {
+    animation: none !important;
+  }
+}
