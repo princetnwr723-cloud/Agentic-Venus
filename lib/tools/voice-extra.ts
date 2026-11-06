@@ -21,9 +21,9 @@ export const VOICE_EXTRA_TOOLS: Def[] = [
       if (!ctx) throw new Error("Calls can only be set up from a chat.");
       const r = await connectProvider(ctx.uid, { provider: "telnyx", sid: s(a.application_id, 120), token: s(a.api_key, 300) }, reqOf(ctx));
       const head = r.number
-        ? `✅ Telnyx connected. Number: ${r.number}.${r.webhook ? " Incoming calls ka address TeXML Application me set ho gaya." : " (Incoming address set nahi hua: Telnyx portal me TeXML Application ka Voice URL khud set karna padega.)"}`
-        : "✅ Telnyx connected, par is account me koi number nahi mila: portal me ek number kharid kar TeXML Application se jodo.";
-      return `${head}\nTelnyx beta me hai: pehli call ke baad batao kaisi gayi.\n\n${await describeAccount(ctx.uid)}`;
+        ? `✅ Telnyx connected. Number: ${r.number}.${r.webhook ? " The address for incoming calls was set on the TeXML Application." : " (The incoming address could not be set: set the Voice URL of the TeXML Application yourself in the Telnyx portal.)"}`
+        : "✅ Telnyx connected, but no number was found: buy a number in the portal and attach it to the TeXML Application.";
+      return `${head}\nTelnyx is in beta: after the first call, tell me how it went.\n\n${await describeAccount(ctx.uid)}`;
     },
   },
   {
@@ -35,12 +35,12 @@ export const VOICE_EXTRA_TOOLS: Def[] = [
       if (a.enabled === false) {
         await patchTele(uid, { realtime: false });
         await audit(uid, { kind: "voice_settings_saved", chatId: ctx.chatId, text: "realtime off" });
-        return "Real-time mode band kar diya. Calls ab normal mode me chalengi.";
+        return "Real-time mode is off. Calls run in the normal mode now.";
       }
       const k = await getResolvedVoiceSecrets(uid);
-      if (!(k.openaiKey || (await getExistingOpenAIKey(uid)))) throw new Error("Real-time ke liye OpenAI API key chahiye (API keys me add karo, ya mujhe do).");
+      if (!(k.openaiKey || (await getExistingOpenAIKey(uid)))) throw new Error("Real-time mode needs an OpenAI API key (add it under API keys, or give it to me).");
       const voice = s(a.voice, 20).toLowerCase();
-      if (voice && !VOICES.includes(voice)) throw new Error(`Voice ye hona chahiye: ${VOICES.join(", ")}.`);
+      if (voice && !VOICES.includes(voice)) throw new Error(`The voice must be one of: ${VOICES.join(", ")}.`);
       await patchTele(uid, { realtime: true, rtModel: s(a.model, 60) || RT_DEFAULT_MODEL, ...(voice ? { rtVoice: voice } : {}) });
       await saveVoiceSettings(uid, { inboundEnabled: true });
       await audit(uid, { kind: "voice_settings_saved", chatId: ctx.chatId, text: "realtime on" });
@@ -49,8 +49,8 @@ export const VOICE_EXTRA_TOOLS: Def[] = [
       const url = await ensureBridge(uid, ctx.chatId, base || (process.env.NEXT_PUBLIC_APP_URL ?? ""), 40_000);
       const cur = await getTele(uid);
       return url
-        ? `✅ Real-time mode ON (beta). Cloud PC par bridge taiyaar hai. Model: ${cur.rtModel}. Ab calls me beech me tok sakte ho.`
-        : "✅ Real-time mode ON, par cloud PC par bridge abhi taiyaar nahi hua (PC so raha ho ya pehli install chal rahi ho). Jab tak taiyaar nahi, calls normal mode me chalengi. 1-2 minute baad dobara \"real-time check karo\" bolo.";
+        ? `✅ Real-time mode ON (beta). The bridge is ready on the cloud PC. Model: ${cur.rtModel}. You can now interrupt the agent during calls.`
+        : "✅ Real-time mode ON, but the bridge is not ready on the cloud PC yet (the PC may be asleep or the first install is running). Until it is ready, calls run in the normal mode. Ask me to \"check real-time\" again in 1-2 minutes.";
     },
   },
 ];
