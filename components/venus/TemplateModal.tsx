@@ -73,7 +73,7 @@ export default function TemplateModal({ open, onClose, chatId, agentName, onMake
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error || `Request failed (HTTP ${res.status}).`);
     return data;
-  }, [user]);
+  }, [user, t.signIn]);
 
   const refresh = useCallback(async () => {
     setLoading(true); setErr("");
