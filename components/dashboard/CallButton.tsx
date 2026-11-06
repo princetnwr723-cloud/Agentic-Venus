@@ -10,15 +10,45 @@ type Line = { role: "user" | "assistant"; content: string; at: number };
 type Pending = { name: string; args: Record<string, unknown>; summary: string };
 type Phase = "thinking" | "listening" | "speaking";
 
-const YES = /\b(yes|yeah|yep|ok|okay|sure|go ahead|do it|confirm)\b|haan|han ji|kar do|bhej do|theek hai|ठीक|हाँ|हां|कर दो|भेज दो/i;
-const NO = /\b(no|nope|cancel|stop|don'?t)\b|nahi|nahin|mat karo|ruko|नहीं|मत|रुको/i;
+const YES = /\b(yes|yeah|yep|ok|okay|sure|go ahead|do it|confirm|si|sí|claro|vale|adelante|hazlo|oui|d'accord|vas-y|ja|mach es|sim|pode|faça|da|давай|haan|han ji|kar do|bhej do|theek hai)\b|نعم|أجل|はい|お願い|好的|是的|确认|ठीक|हाँ|हां|कर दो|भेज दो/i;
+const NO = /\b(no|nope|cancel|stop|don'?t|cancela|non|annule|nein|abbrechen|não|nao|нет|отмена|nahi|nahin|mat karo|ruko)\b|لا|إلغاء|いいえ|やめて|不要|取消|नहीं|मत|रुको/i;
 const LANGS = [{ id: "", label: "Auto" }, { id: "hi-IN", label: "हिन्दी" }, { id: "en-IN", label: "English" }];
 const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, "");
 // a silent, valid WAV: playing it inside the click is what lets the browser play the agent's audio later
+const STR = {
+  en: {
+    signIn: "Please sign in.", micDenied: "Microphone permission is needed (allow the mic in your browser).",
+    noSpeak: "This browser cannot speak. Choose a voice provider (OpenAI / ElevenLabs / local) so the agent speaks from the server.",
+    noVoice: "This device has no voice installed for this language. On iPhone / iPad: Settings → Accessibility → Spoken Content → Voices, download it, or choose a voice provider with a key.",
+    noSound: "No sound? Check the volume and the silent switch, then tap 🔊.",
+    yesLine: "✅ Yes, do it", noLine: "❌ No", thinking: "Thinking…", speaking: "Speaking…", muted: "Mic off", listening: "Listening…",
+    wants: "The agent wants to do this:", yes: "Yes", no: "No", hint: "You can also say “yes” or “no”.",
+    noRecog: "This browser has no voice recognition (use Chrome or Safari). You can type below.", typeHere: "Or type here…",
+    replay: "Speak again", replayTitle: "Speak the last answer again",
+  },
+  hi: {
+    signIn: "Sign in karo.", micDenied: "Microphone ki permission do (browser me mic allow karo).",
+    noSpeak: "Is browser me bolne ki suvidha nahi hai. Settings me voice provider (OpenAI/ElevenLabs/local) chuno.",
+    noVoice: "Is device me is bhasha ki voice installed nahi hai: iPad/iPhone me Settings → Accessibility → Spoken Content → Voices me download karo, ya key wala voice provider chuno.",
+    noSound: "Awaaz nahi aa rahi? Volume aur silent switch check karo, phir 🔊 dabao.",
+    yesLine: "✅ Haan, kar do", noLine: "❌ Nahi", thinking: "Soch raha hai…", speaking: "Bol raha hai…", muted: "Mic band", listening: "Sun raha hai…",
+    wants: "Agent ye karna chahta hai:", yes: "Haan", no: "Nahi", hint: "Bol bhi sakte ho: “haan” ya “nahi”.",
+    noRecog: "Is browser me voice recognition nahi hai (Chrome ya Safari use karo). Neeche type karke bhi baat kar sakte ho.", typeHere: "Ya yahin type karo…",
+    replay: "Dobara bolo", replayTitle: "Last jawab dobara bolo",
+  },
+} as const;
+/** English everywhere; Hindi (Roman) when the browser language is Hindi. */
+function useStrings() {
+  const [hi, setHi] = useState(false);
+  useEffect(() => { if (typeof navigator !== "undefined" && /^hi\b/i.test(navigator.language)) setHi(true); }, []);
+  return hi ? STR.hi : STR.en;
+}
+
 const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 
 export default function CallButton({ agentName, chatId }: { agentName: string; chatId?: string }) {
   const { user } = useAuth();
+  const t = useStrings();
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<Phase>("thinking");
   const [lines, setLines] = useState<Line[]>([]);
@@ -66,7 +96,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
   }, []);
 
   const call = useCallback(async (payload: Record<string, unknown>) => {
-    if (!user) throw new Error("Sign in karo.");
+    if (!user) throw new Error(t.signIn);
     const res = await fetch("/api/voice/web", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${await user.getIdToken()}` },
@@ -108,7 +138,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
       if (finalText.trim()) { recRef.current = null; try { rec.abort(); } catch { /* ignore */ } void handleText(finalText.trim()); }
     };
     rec.onerror = (e: any) => {
-      if (e?.error === "not-allowed" || e?.error === "service-not-allowed") { setErr("Microphone ki permission do (browser me mic allow karo)."); setCanListen(false); recRef.current = null; }
+      if (e?.error === "not-allowed" || e?.error === "service-not-allowed") { setErr(t.micDenied); setCanListen(false); recRef.current = null; }
     };
     rec.onend = () => {
       recRef.current = null;
@@ -130,15 +160,15 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
   /** The browser's own voice. Long text is spoken sentence by sentence (Chrome stops a long utterance after ~15 s). */
   const speakBrowser = useCallback((text: string, finish: () => void) => {
     const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-    if (!synth) { setErr("Is browser me bolne ki suvidha nahi hai. Settings me voice provider (OpenAI/ElevenLabs/local) chuno."); finish(); return; }
+    if (!synth) { setErr(t.noSpeak); finish(); return; }
     synth.cancel();
     const l = /[\u0900-\u097f]/.test(text) ? "hi-IN" : lang();
     const voices = synth.getVoices();
     const voice = voices.find((v) => v.lang.toLowerCase().replace("_", "-") === l.toLowerCase()) ?? voices.find((v) => v.lang.toLowerCase().startsWith(l.slice(0, 2).toLowerCase()));
-    if (l.startsWith("hi") && !voice) setErr("Is device me Hindi voice installed nahi hai: iPad/iPhone me Settings → Accessibility → Spoken Content → Voices → Hindi download karo, ya voice provider key wali chuno.");
+    if (!voice && !l.toLowerCase().startsWith("en")) setErr(t.noVoice);
     const parts = text.match(/[^.!?।]+[.!?।]*/g)?.map((x) => x.trim()).filter(Boolean) ?? [text];
     let started = false;
-    const warn = setTimeout(() => { if (!started) setErr((cur) => cur || "Awaaz nahi aa rahi? Volume aur silent switch check karo, phir 🔊 dabao."); }, 2500);
+    const warn = setTimeout(() => { if (!started) setErr((cur) => cur || t.noSound); }, 2500);
     parts.forEach((p, i) => {
       const u = new SpeechSynthesisUtterance(p);
       u.lang = l; u.volume = 1; u.rate = 1;
@@ -210,14 +240,14 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
     const p = pendingRef.current;
     if (!p) return;
     pendingRef.current = null; setPending(null);
-    setLines((cur) => [...cur, { role: "user" as const, content: "✅ Haan, kar do", at: Date.now() }].slice(-8));
+    setLines((cur) => [...cur, { role: "user" as const, content: t.yesLine, at: Date.now() }].slice(-8));
     void turn({ approve: { name: p.name, args: p.args } });
   }
   function deny() {
     const p = pendingRef.current;
     if (!p) return;
     pendingRef.current = null; setPending(null);
-    setLines((cur) => [...cur, { role: "user" as const, content: "❌ Nahi", at: Date.now() }].slice(-8));
+    setLines((cur) => [...cur, { role: "user" as const, content: t.noLine, at: Date.now() }].slice(-8));
     void turn({ deny: p.name });
   }
 
@@ -275,7 +305,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
     return () => { openRef.current = false; stopListening(); stopSpeaking(); };
   }, [stopListening, stopSpeaking]);
 
-  const label = phase === "thinking" ? "Soch raha hai…" : phase === "speaking" ? "Bol raha hai…" : muted ? "Mic band" : "Sun raha hai…";
+  const label = phase === "thinking" ? t.thinking : phase === "speaking" ? t.speaking : muted ? t.muted : t.listening;
 
   return (
     <>
@@ -302,22 +332,22 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
 
           {pending && (
             <div className="mt-3 w-full max-w-md rounded-xl border border-gold/50 bg-panel p-3">
-              <p className="text-xs text-muted">Agent ye karna chahta hai:</p>
+              <p className="text-xs text-muted">{t.wants}</p>
               <p className="mt-1 text-sm text-ink">{pending.summary}</p>
               <div className="mt-3 flex gap-2">
-                <button type="button" onClick={approve} className="flex flex-1 items-center justify-center gap-1.5 rounded-full bg-gold px-3 py-2 text-sm font-medium text-bg"><Check size={15} /> Haan</button>
-                <button type="button" onClick={deny} className="flex flex-1 items-center justify-center gap-1.5 rounded-full border border-line px-3 py-2 text-sm text-ink"><X size={15} /> Nahi</button>
+                <button type="button" onClick={approve} className="flex flex-1 items-center justify-center gap-1.5 rounded-full bg-gold px-3 py-2 text-sm font-medium text-bg"><Check size={15} /> {t.yes}</button>
+                <button type="button" onClick={deny} className="flex flex-1 items-center justify-center gap-1.5 rounded-full border border-line px-3 py-2 text-sm text-ink"><X size={15} /> {t.no}</button>
               </div>
-              <p className="mt-2 text-[11px] text-faint">Bol bhi sakte ho: &ldquo;haan&rdquo; ya &ldquo;nahi&rdquo;.</p>
+              <p className="mt-2 text-[11px] text-faint">{t.hint}</p>
             </div>
           )}
 
-          {!canListen && <p className="mt-3 text-xs text-muted">Is browser me voice recognition nahi hai (Chrome ya Safari use karo). Neeche type karke bhi baat kar sakte ho.</p>}
+          {!canListen && <p className="mt-3 text-xs text-muted">{t.noRecog}</p>}
           <input
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && typed.trim() && phaseRef.current !== "thinking") { e.preventDefault(); e.stopPropagation(); const t = typed.trim(); setTyped(""); stopSpeaking(); void handleText(t); } }}
-            placeholder="Ya yahin type karo…"
+            placeholder={t.typeHere}
             className="mt-3 w-full max-w-md rounded-full border border-line bg-panel px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:border-gold focus:outline-none"
           />
 
@@ -325,7 +355,7 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
             <button type="button" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"} className="rounded-full bg-panel2 p-4 text-ink">{muted ? <MicOff size={20} /> : <Mic size={20} />}</button>
             {phase === "speaking"
               ? <button type="button" onClick={interrupt} aria-label="Interrupt" className="rounded-full bg-panel2 p-4 text-ink"><Square size={20} /></button>
-              : <button type="button" onClick={replay} aria-label="Dobara bolo" title="Last jawab dobara bolo" className="rounded-full bg-panel2 p-4 text-ink"><Volume2 size={20} /></button>}
+              : <button type="button" onClick={replay} aria-label={t.replay} title={t.replayTitle} className="rounded-full bg-panel2 p-4 text-ink"><Volume2 size={20} /></button>}
             <button type="button" onClick={cycleLang} className="rounded-full bg-panel2 px-4 py-3 text-sm text-ink">{LANGS[langIdx].label}</button>
             <button type="button" onClick={() => void endCall()} aria-label="End call" className="rounded-full bg-red-600 p-4 text-white"><PhoneOff size={20} /></button>
           </div>
