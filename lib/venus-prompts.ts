@@ -232,23 +232,54 @@ export type EditFacts = {
 };
 
 /** The editor: the user supplied a real video; the agent decides cuts, pacing, framing, effects, titles and motion graphics. */
+export type EditPolicyInfo = { length: "keep" | "tighten" | "target" | "shorter"; seconds?: number; creative: boolean; graphics: boolean };
+
+/** The three rules that decide HOW the video is edited: how long it stays, who decides, and how much is added. */
+function editRules(policy: EditPolicyInfo | undefined, sourceSeconds: number, keepAll: boolean, seconds: number): { length: string; mode: string; graphics: string } {
+  const src = Math.round(sourceSeconds);
+  const length = !policy
+    ? `target length ${keepAll ? "about the same as the source (keep the whole story, tighten only dead air)" : "about " + seconds + " seconds (+-10%)"}`
+    : policy.length === "keep"
+      ? `LENGTH: the edit KEEPS THE WHOLE VIDEO. Output about ${src}s: the same as the source, minus only what the user's instructions remove (for example silences). NEVER cut away sections, topics, answers or scenes that the user did not ask to remove, and never turn it into a highlight reel`
+      : policy.length === "tighten"
+        ? `LENGTH: TIGHTEN. Remove only dead air, filler words, repeats, mistakes and boring stretches: the result is typically 10-30% shorter (about ${seconds}s out of ${src}s). Keep every topic, answer and key moment`
+      : policy.length === "target"
+        ? `LENGTH: the user asked for about ${seconds} seconds out of ${src}s: the output must be ${seconds}s (+-10%): choose the best moments to fit it`
+        : `LENGTH: the user wants a clearly SHORTER version: about ${seconds}s (+-15%) out of ${src}s: keep the best moments and the whole story line`;
+  const mode = !policy ? "" : policy.creative
+    ? `WHO DECIDES: THE USER GAVE YOU CREATIVE CONTROL. Edit like a senior editor with your own taste: decide the story, the pacing, what to tighten, the framing, the grade, the graphics and the sound yourself, and think hard before you decide. Still obey the LENGTH rule and never destroy the content: the viewer must still get everything important.`
+    : `WHO DECIDES: THE USER'S WORDS ARE THE LAW. Do exactly what they asked, in the form they asked, and nothing destructive they did not ask for: do not shorten, do not drop sections, do not remove what they did not name. Your taste only fills the gaps.`;
+  const graphics = !policy ? "" : policy.graphics
+    ? `TOOLBOX: the user wants the FULL TREATMENT (motion graphics and all kinds of edits). Use it all: a hook at the start, chapter / title cards as custom scenes, lower-thirds and callout overlays on the clips, kinetic text for key phrases, animated numbers or charts when figures are spoken, picture-in-picture or device-frame scenes that show the footage (useSource), zooms and reframes, speed changes where they help, varied transitions, a colour grade, captions, sound and an outro. Plan about one designed scene per 30-45 seconds of output (at least 3) and overlays on at least a third of the clips. Every graphic must explain or emphasise, never decorate, and never cover the speaker's face.`
+    : `TOOLBOX: add only what the user asked for (cuts, speed, captions, effects, graphics that they named). Do not add motion-graphics scenes or titles that they did not ask for.`;
+  return { length, mode, graphics };
+}
+
 export function editPlanPrompt(o: {
   brief: string; seconds: number; keepAll: boolean; aspect: Aspect; captions: boolean; music: boolean; facts: EditFacts; context?: string;
+  policy?: EditPolicyInfo; notes?: string;
 }): string {
   const a = ASPECTS[o.aspect];
   const f = o.facts;
-  const tr = f.transcript.map((x) => `[${x.s.toFixed(1)}-${x.e.toFixed(1)}] ${x.t}`).join("\n").slice(0, 7000);
+  const rules = editRules(o.policy, f.duration, o.keepAll, o.seconds);
+  const tr = f.transcript.map((x) => `[${x.s.toFixed(1)}-${x.e.toFixed(1)}] ${x.t}`).join("\n").slice(0, 16000);
   return `You are the video editor, motion designer and sound designer of "Venus Pro". The user supplied a REAL VIDEO and wants it edited. Decide every cut, the pacing, the framing, the effects, the titles and any motion graphics. Reply with ONE JSON object only, no prose, no markdown fences.
 
-THE USER ASKED: ${o.brief}
+THE USER ASKED: ${o.brief}${o.policy ? `
+
+${rules.mode}
+${rules.graphics}` : ""}
 
 SOURCE VIDEO: ${f.duration.toFixed(1)}s, ${f.width}x${f.height}, ${f.hasAudio ? "has audio" : "NO audio"}.
-OUTPUT: ${a.width}x${a.height} (${o.aspect}); target length ${o.keepAll ? "about the same as the source (keep the whole story, tighten only dead air)" : "about " + o.seconds + " seconds (+-10%)"}. Music ${o.music ? "will be added under the video (quiet, ducked under speech)" : "will NOT be added (the original sound is the soundtrack)"}. Captions ${o.captions ? "are generated automatically from the transcript for every clip: do NOT write the spoken words as text yourself" : "are off"}.
+OUTPUT: ${a.width}x${a.height} (${o.aspect}); ${rules.length}. Music ${o.music ? "will be added under the video (quiet, ducked under speech)" : "will NOT be added (the original sound is the soundtrack)"}. Captions ${o.captions ? "are generated automatically from the transcript for every clip: do NOT write the spoken words as text yourself" : "are off"}.
 SHOT CHANGES at (s): ${f.cuts.length ? f.cuts.map((x) => x.toFixed(1)).join(", ") : "none detected (one continuous shot)"}
 SILENCES (start-end s): ${f.silences.length ? f.silences.map((x) => x[0].toFixed(1) + "-" + x[1].toFixed(1)).join(", ") : "none"}
 TRANSCRIPT:
 ${tr || "(no transcript available: cut on shot changes and silences, and judge the content from the frames)"}
-CONTACT SHEET: the image holds ${f.tiles.length} frames, left to right and top to bottom, taken at (s): ${f.tiles.map((x) => x.toFixed(1)).join(", ")}. Look at it to understand the people, places, framing and where the good moments are.
+CONTACT SHEET: the image holds ${f.tiles.length} frames, left to right and top to bottom, taken at (s): ${f.tiles.map((x) => x.toFixed(1)).join(", ")}. Look at it to understand the people, places, framing and where the good moments are.${o.notes ? `
+
+YOUR OWN EDITOR'S NOTES FROM A FIRST PASS (they carry your best thinking: follow them, and correct anything that the real times contradict):
+${o.notes}` : ""}
 
 STEP 0: THINK FIRST. The FIRST key must be "thinking" (max ~170 words): {"goal":"...","story":"what the final edit tells, in order","keep":"the best moments (source seconds)","cut":"what you remove and why","hook":"what is SEEN and HEARD in the first 2 seconds","style":"look and pace"}.
 
@@ -263,9 +294,63 @@ B) motion-graphics scenes made by the agent: "custom" (the agent designs and cod
 Give graphics a purpose: they must explain, emphasise or transition, not decorate. Never invent facts, numbers or quotes that are not in the transcript, the brief or the images.
 If the user asked for no graphics, use only "clip" scenes. If the user asked for something specific (remove silences, add captions, make a reel, add an intro), do exactly that first.
 
-Scene count: as many clips as the story needs (often 6-30 for a 60s edit). Total playing time = sum of (clip lengths) + graphic scenes, about the target above.${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
+Scene count: as many clips as the story needs: about one clip per 5-12 seconds of output (a 60s edit often has 6-30 clips, a 4-minute edit 20-45). Total playing time = sum of (clip lengths) + graphic scenes, about the target above.${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}
 
 OUTPUT FORMAT: {"thinking":{...},"title":"...","concept":"...","palette":{...},"fonts":{...},"grade":"none","scenes":[ {...}, ... ]}`;
+}
+
+
+/** Reads ONE message about a video, in ANY language, and says what the user wants (the word lists in venus-clone.ts only cover English and Hinglish). */
+export function videoIntentPrompt(text: string, sourceName: string): string {
+  return `You read ONE message that a user wrote about a VIDEO file (the file is "${sourceName.slice(0, 80)}"), in ANY language. Decide what they want. Reply with ONE JSON object only, no prose:
+{"action":"edit|template|other","length":"keep|tighten|target|shorter","seconds":null,"creative":false,"graphics":false}
+
+action:
+- edit: they want THIS video edited in any way: cut, trim, shorten, tighten, remove parts or silences or filler, captions or subtitles, effects, colour, speed, music, motion graphics, titles, a reel / teaser / trailer / highlights / short version, "make it better / professional / engaging", or they only ask to edit it without details.
+- template: they want the STYLE of this video studied, saved or cloned as a template or skill for making future videos.
+- other: anything else (post or upload it somewhere, describe / summarise / transcribe it, questions, unrelated chat).
+length (only for edit): keep = nothing is removed unless they ask (the default); tighten = remove dead air, filler, repeats and boring parts but keep all content; target = they named a length (put it in "seconds": "a minute" = 60; ignore numbers that are positions like "the first 10 seconds" or parts to remove); shorter = clearly shorter without a number (highlights, teaser, "make it short").
+creative: true when they give the editor free hands ("you decide", "as you like", "best edit", "surprise me") or give no instruction at all.
+graphics: true when they ask for motion graphics, animations, titles, lower thirds, effects, transitions or "all edits", or when creative is true.
+
+Examples:
+"cut the first 10 seconds" -> {"action":"edit","length":"keep","seconds":null,"creative":false,"graphics":false}
+"hazlo de 1 minuto" -> {"action":"edit","length":"target","seconds":60,"creative":false,"graphics":false}
+"ise 2 minute ka bana do, motion graphics ke saath" -> {"action":"edit","length":"target","seconds":120,"creative":false,"graphics":true}
+"اجعله أكثر احترافية" -> {"action":"edit","length":"keep","seconds":null,"creative":true,"graphics":true}
+"save this style as a template" -> {"action":"template","length":"keep","seconds":null,"creative":false,"graphics":false}
+"post this on youtube" -> {"action":"other","length":"keep","seconds":null,"creative":false,"graphics":false}
+
+MESSAGE: ${text.slice(0, 800)}`;
+}
+
+/** The FIRST pass of a free or full-treatment edit: the model studies the whole video and writes its editor's notes before it writes the plan. */
+export function editNotesPrompt(o: { brief: string; seconds: number; keepAll: boolean; aspect: Aspect; music: boolean; facts: EditFacts; policy?: EditPolicyInfo }): string {
+  const f = o.facts;
+  const rules = editRules(o.policy, f.duration, o.keepAll, o.seconds);
+  const tr = f.transcript.map((x) => `[${x.s.toFixed(1)}-${x.e.toFixed(1)}] ${x.t}`).join("\n").slice(0, 16000);
+  return `You are a senior film editor and motion designer. Study this REAL VIDEO and write your EDITOR'S NOTES for the edit. A second step will turn your notes into the exact edit plan, so be concrete and use SOURCE seconds.
+
+THE USER ASKED: ${o.brief}
+${rules.mode}
+${rules.graphics}
+${rules.length}.
+
+SOURCE VIDEO: ${f.duration.toFixed(1)}s, ${f.width}x${f.height}, ${f.hasAudio ? "has audio" : "NO audio"}. Output ratio ${o.aspect}. Music ${o.music ? "will be added" : "will not be added"}.
+SHOT CHANGES at (s): ${f.cuts.length ? f.cuts.map((x) => x.toFixed(1)).join(", ") : "none detected"}
+SILENCES (start-end s): ${f.silences.length ? f.silences.map((x) => x[0].toFixed(1) + "-" + x[1].toFixed(1)).join(", ") : "none"}
+TRANSCRIPT:
+${tr || "(no transcript: judge from the frames)"}
+CONTACT SHEET: the image holds ${f.tiles.length} frames, left to right and top to bottom, taken at (s): ${f.tiles.map((x) => x.toFixed(1)).join(", ")}.
+
+Write plain text (no JSON, max 650 words) with these parts:
+1. WHAT IT IS: the kind of video, who watches it, what they must take away.
+2. STORY: the chapters or beats in order, each with its SOURCE time range.
+3. HOOK: what is seen and heard in the first 2-3 seconds of the edit.
+4. KEEP / CUT: what must stay and what to tighten or remove, with exact source ranges (obey the LENGTH rule; never decide that something is boring when the user asked to keep everything).
+5. GRAPHICS: where motion graphics, titles, lower-thirds, callouts or animated data help: for each one the source time, what appears, and the exact text (only words and numbers that are in the transcript or the user's brief).
+6. CRAFT: zooms and reframes, speed changes, transitions, colour grade, sound or music mood, captions.
+7. RISKS: anything that could go wrong (mid-sentence cuts, faces covered, missing audio).`;
 }
 
 
