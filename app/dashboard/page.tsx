@@ -21,7 +21,6 @@ import { acquire, releaseNow } from "@/lib/computers";
 import { hydrateProject, listProjects, type SourceRef, type VenusProject } from "@/lib/venus";
 import { analyzeVideoTemplate, classifyVideoRequest, lastBeat, runPipeline, signedUrl, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
 import { categoryOf, NEW_FROM_SCRATCH, pickTemplate, editPolicyOf, stripTemplateMarker, wantsTemplateFromVideo, wantsVideoEdit, type EditPolicy, type TemplateListItem, type VideoTemplate } from "@/lib/venus-clone";
-import TemplateModal from "@/components/venus/TemplateModal";
 import { personaOf, type Member } from "@/lib/team-catalog";
 import { assembleTeam, runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
 import { pickModel, fallbackChain, type Role } from "@/lib/router";
@@ -123,7 +122,6 @@ export default function DashboardPage() {
   const [computerMode, setComputerMode] = useState(false);
   const [cfg, setCfg] = useState<{ supabase: boolean; pexels: boolean } | null>(null);
   const [venusRun, setVenusRun] = useState<{ title: string; label: string; value: number | null } | null>(null);
-  const [tplOpen, setTplOpen] = useState(false);
   const [codeRun, setCodeRun] = useState<{ title: string; label: string } | null>(null);
   const [teamRun, setTeamRun] = useState<string | null>(null);
   const [pcOpen, setPcOpen] = useState(false);
@@ -1230,7 +1228,7 @@ export default function DashboardPage() {
       });
       if (r.template) {
         const t = r.template;
-        const msg = `✅ Template saved: **${t.name}** (${t.category}, ${t.seconds}s, ${t.aspect}, ${t.pace} pace)\n\n${t.summary}\n\n**Structure:** ${t.structure.map((b) => `${b.role} ${b.seconds}s`).join(" → ")}\n\nNow say, for example: “make a ${t.category} video for <your product>: tagline, features, call to action”, or tap the clapperboard button next to the message box. Venus Pro clones this style.${r.skill ? `\n\nIt is also saved as a video skill in this chat: ${r.skill}.` : ""}`;
+        const msg = `✅ Template saved: **${t.name}** (${t.category}, ${t.seconds}s, ${t.aspect}, ${t.pace} pace)\n\n${t.summary}\n\n**Structure:** ${t.structure.map((b) => `${b.role} ${b.seconds}s`).join(" → ")}\n\nNow say, for example: “make a ${t.category} video for <your product>: tagline, features, call to action”. Venus Pro clones this style.${r.skill ? `\n\nIt is also saved as a video skill in this chat: ${r.skill}.` : ""}`;
         await sayNext(chat, msg, [`Make a ${t.category} video like this template`, "Show my saved video templates"]);
         return msg;
       }
@@ -1457,7 +1455,6 @@ export default function DashboardPage() {
   /** Used by the composer AND by the two suggestion buttons under every reply. */
   async function submitText(text: string) {
     if (!text || !user || !activeChat || sending) return;
-    if (/^\/templates?\s*$/i.test(text)) { setDraft(""); setTplOpen(true); return; }
     const chat = activeChat;
     const reply = replyTo; // the agent reply this message is about (null when the owner did not use the reply icon)
     const video = /^\/video\s+([\s\S]+)/i.exec(text);
@@ -1521,7 +1518,7 @@ export default function DashboardPage() {
       const hasRecent = Boolean(recent && Date.now() - recent.at < 30 * 60_000);
       const att = vidAtt ?? (hasRecent ? recent : undefined);
       if (!video && att && text.length <= 800) {
-        const verdict = await classifyVideoRequest({ uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: false }, { provider: chat.provider, model: chat.model }, text, att.name);
+        const verdict = await classifyVideoRequest({ uid: user.uid, token: () => user.getIdToken(), e2bKey: e2bKey ?? "", apiKeys, pexels: false }, { provider: chat.provider, model: chat.model }, text, att.name);
         const action: "edit" | "template" | "other" = verdict?.action
           ?? (vidAtt && wantsTemplateFromVideo(text) ? "template"
             : wantsVideoEdit(text) && (vidAtt || /\b(video|clip|footage|reel|ise|isko|is video)\b/i.test(text)) ? "edit" : "other");
@@ -1796,7 +1793,7 @@ export default function DashboardPage() {
                 attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
                 mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
                 replyTo={replyTo} onClearReply={() => setReplyTo(null)}
-                chatId={activeChat.id} onTemplates={() => setTplOpen(true)}
+                chatId={activeChat.id}
               />
             </>
           )}
@@ -1835,13 +1832,6 @@ export default function DashboardPage() {
 
       <NewChatModal open={newChatOpen} onClose={() => setNewChatOpen(false)} customAgents={customAgents} onPick={handlePickAgent} onCreateAgent={handleCreateAgent} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      {activeChat && (
-        <TemplateModal
-          open={tplOpen} onClose={() => setTplOpen(false)} chatId={activeChat.id} agentName={activeChat.agentName}
-          onMake={(b) => void startVenus(activeChat, b)}
-          onAnalyze={(a, m) => void analyzeTemplateFor(activeChat, a, m.hint ?? "", { name: m.name, category: m.category })}
-        />
-      )}
       {activeChat && (
         <RoutinesPanel open={routinesOpen} onClose={() => { setRoutinesOpen(false); setRoutinePrefill(null); }} chatName={activeChat.agentName} routines={routines} prefillInstructions={routinePrefill} busyId={runningRoutineId} onCreate={handleCreateRoutine} onToggle={handleToggleRoutine} onDelete={handleDeleteRoutine} onRunNow={handleRunRoutineNow} />
       )}
