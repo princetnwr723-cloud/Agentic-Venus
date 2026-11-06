@@ -6,12 +6,17 @@ module.exports = {
   appId: "com.agenticvenus.app",
   appName: "Agentic Venus",
   webDir: "www",
+  backgroundColor: "#0a0a0b",
   server: {
     url: url + "/app-login",
     androidScheme: "https",
     allowNavigation: [new URL(url).hostname],
   },
-  android: { allowMixedContent: false },
+  android: {
+    allowMixedContent: false,
+    // Android 15+ draws apps edge-to-edge: keep the page clear of the status bar and the gesture bar
+    adjustMarginsForEdgeToEdge: "force",
+  },
   plugins: {
     PushNotifications: { presentationOptions: ["badge", "sound", "alert"] },
   },
