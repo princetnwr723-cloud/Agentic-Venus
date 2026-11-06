@@ -1,10 +1,11 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import { AuthProvider } from "@/lib/auth-context";
 import { KeysProvider } from "@/lib/keys-context";
 import LimitModal from "@/components/LimitModal";
 import NativeBridge from "@/components/NativeBridge";
 import "./globals.css";
+import "./mobile.css";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -16,6 +17,13 @@ export const metadata: Metadata = {
   title: "AgenticVenus — AI teammates that finish the work",
   description:
     "Give real work to AI teammates with their own computer. They sign into your tools, work while you're away, and only come back when something needs you.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0a0a0b",
 };
 
 export default function RootLayout({
