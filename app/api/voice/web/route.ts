@@ -42,7 +42,7 @@ export async function POST(req: Request) {
     const first = body.first === true;
     const approve = body.approve && typeof body.approve === "object" ? (body.approve as { name?: unknown; args?: unknown }) : null;
     const deny = typeof body.deny === "string" ? body.deny.slice(0, 80) : "";
-    if (!text && !first && !approve && !deny) return NextResponse.json({ error: "Kuch bolo." }, { status: 400 });
+    if (!text && !first && !approve && !deny) return NextResponse.json({ error: "Say something first." }, { status: 400 });
 
     const agent = await loadAgent(uid, chatId || undefined);
     const st = await getVoiceSettings(uid);
@@ -70,7 +70,7 @@ export async function POST(req: Request) {
     let tail: ChatMsg[];
     if (approve) {
       const name = String(approve.name || "");
-      if (!specs.some((x) => x.name === name)) return NextResponse.json({ error: "Ye tool is call me allowed nahi hai." }, { status: 400 });
+      if (!specs.some((x) => x.name === name)) return NextResponse.json({ error: "This tool is not allowed on a call." }, { status: 400 });
       const args = approve.args && typeof approve.args === "object" && !Array.isArray(approve.args) ? (approve.args as Record<string, unknown>) : {};
       const r = await runOne(name, args, true);
       tail = [{ role: "user", content: `TOOL RESULTS:\n${fmt(name, r)}\n\nNow tell the owner the result in 1-3 short spoken sentences.` }];
