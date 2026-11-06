@@ -1523,7 +1523,8 @@ export default function DashboardPage() {
       const hasRecent = Boolean(recent && Date.now() - recent.at < RECENT_VIDEO_MS);
       const att = vidAtt ?? (hasRecent ? recent : undefined);
       if (!video && att && text.length <= 800) {
-        const verdict = await classifyVideoRequest({ uid: user.uid, token: () => user.getIdToken(), e2bKey: e2bKey ?? "", apiKeys, pexels: false }, { provider: chat.provider, model: chat.model }, text, att.name);
+        const vEnv: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey: String(e2bKey ?? ""), apiKeys, pexels: false };
+        const verdict = await classifyVideoRequest(vEnv, { provider: chat.provider, model: chat.model }, text, att.name);
         const action: "edit" | "template" | "other" = verdict?.action
           ?? (vidAtt && wantsTemplateFromVideo(text) ? "template"
             : wantsVideoEdit(text) && (vidAtt || /\b(video|clip|footage|reel|ise|isko|is video)\b/i.test(text)) ? "edit" : "other");
