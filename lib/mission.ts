@@ -43,8 +43,8 @@ export function kickMission(uid: string, id: string) {
   try { waitUntil(p); } catch { /* not on Vercel */ }
 }
 
-/** "call me when it is done", "phone me with the result", "mujhe call karna": the mission ends with a phone call to the owner. */
-export const CALL_ME_RE = /\b(?:call|phone|ring|dial)\s+(?:me|the\s+owner|my\s+(?:phone|number))\b|\b(?:mujhe|mere\s+(?:number|phone)\s+(?:pe|par))\s+(?:call|phone|fone)|\bcall\s+kar(?:na|o|ke|dena|dijiye)\b|\bphone\s+kar(?:na|o|ke|dena)\b|कॉल\s*कर/i;
+/** "call me when it is done", "phone me with the result", "mujhe call karna" (any language is fine: the agent also sets call_me itself): the mission ends with a phone call to the owner. */
+export const CALL_ME_RE = /\b(?:call|phone|ring|dial)\s+(?:me|the\s+owner|my\s+(?:phone|number))\b|\bgive\s+me\s+a\s+(?:call|ring)\b|\b(?:call|ring|phone)\s+me\s+(?:up|back)\b|\b(?:let\s+me\s+know|tell\s+me|update\s+me|notify\s+me|report\s+to\s+me)\s+(?:by|via|over|on)\s+(?:the\s+)?(?:phone|call)\b|\b(?:mujhe|mere\s+(?:number|phone)\s+(?:pe|par))\s+(?:call|phone|fone)|\bcall\s+kar(?:na|o|ke|dena|dijiye)\b|\bphone\s+kar(?:na|o|ke|dena)\b|कॉल\s*कर/i;
 
 export async function startMission(uid: string, p: { chatId: string; goal: string; maxCalls?: number; allowWrites?: boolean; notify?: string[]; maxSteps?: number; callOwner?: boolean; routine?: { id: string; runId: string } }) {
   const goal = String(p.goal || "").trim().slice(0, 4000);
@@ -97,7 +97,7 @@ function systemPrompt(m: Mission, agent: Agent, specs: ToolSpec[], bt: { role: s
 async function callOwnerAboutMission(uid: string, m: Mission, status: "done" | "error", text: string) {
   try {
     const to = (await getTele(uid)).ownerNumber;
-    if (!to) throw new Error("Owner ka number saved nahi hai (chat me bolo: mera number ye hai, +91...).");
+    if (!to) throw new Error("The owner's number is not saved (tell the agent in chat: my number is +1..., with the country code).");
     const goal = status === "done"
       ? `Report to your owner: the mission is finished. MISSION: ${clip(m.goal, 300)}. RESULT: ${clip(text, 1000)}`
       : `Tell your owner: the mission stopped with a problem. MISSION: ${clip(m.goal, 300)}. PROBLEM: ${clip(text, 700)}`;
@@ -105,7 +105,7 @@ async function callOwnerAboutMission(uid: string, m: Mission, status: "done" | "
     m.log.push({ t: Date.now(), text: `Called the owner (${r.to})` });
   } catch (e) {
     const why = e instanceof Error ? e.message : "unknown error";
-    await postToChat(uid, m.chatId, `📞 Mission khatam hui, par owner ko call nahi lag payi: ${why}`).catch(() => {});
+    await postToChat(uid, m.chatId, `📞 The mission is finished, but the call to the owner could not be placed: ${why}`).catch(() => {});
   }
 }
 
