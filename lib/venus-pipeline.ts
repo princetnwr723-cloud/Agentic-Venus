@@ -6,6 +6,7 @@ import { db } from "@/lib/firebase";
 import { hydrateProject, saveProject, type SourceRef, type Stage, type VenusProject } from "@/lib/venus";
 import { templateContext, type VideoTemplate } from "@/lib/venus-clone";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
+import { addMotionGraphics, graphicsMissing, graphicsNeeds, graphicsReport } from "@/lib/venus-graphics";
 import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
 import { findSeconds } from "@/lib/dashboard/helpers";
 import { detectScript, enforceScript, scriptSeconds, splitScript, voiceModeOf, wordsOf, type ScriptInfo } from "@/lib/venus-script";
@@ -632,6 +633,33 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
               ? `CORRECTION: your previous plan was only ${planned.len}s. The edit must keep the whole video: about ${Math.round(an.duration)}s. Restore every section you removed; cut only dead air that the user asked to remove.`
               : `CORRECTION: your previous plan was ${planned.len}s. The user asked for about ${target}s (+-10%). Fix the length.`).catch(() => null);
             if (again && (tooShort ? again.len > planned.len : Math.abs(again.len - target) < Math.abs(planned.len - target))) planned = again;
+          }
+        }
+        // the owner's MOTION-GRAPHICS rule is enforced too (it used to be only a sentence in the prompt, so a plan of plain cuts went through):
+        // measure the plan, ask the agent again when it is short, and add whatever is still missing by code (titles, chapter cards, call-outs, end card)
+        if (policy?.graphics) {
+          const need0 = graphicsNeeds(planned.len, graphicsReport(planned.clean).clips);
+          const rep0 = graphicsReport(planned.clean);
+          if (graphicsMissing(rep0, need0)) {
+            say(`⚠️ The plan has only ${rep0.designed} motion-graphics scenes and ${rep0.overlayClips} titled clips, but you asked for motion graphics (needs ${need0.designed} and ${need0.overlayClips}): asking the agent to design them…`);
+            const lengthOk = (n: number) => (keepAll ? n >= an.duration * 0.75 : Math.abs(n - target) <= target * 0.35);
+            const again = await planOnce(
+              `CORRECTION: your previous plan had only ${rep0.designed} designed scenes and ${rep0.overlayClips} clips with titles. The user asked for MOTION GRAPHICS, so a plan of plain cuts is rejected. ` +
+              `Write the SAME edit again with at least ${need0.designed} designed scenes (a hook / title card first, chapter cards as "custom" or "kinetic" scenes between the clips, an end card, an animated number or chart wherever a figure is spoken) ` +
+              `and "overlays" (lower-third, callout, chip, stamp or title) on at least ${need0.overlayClips} clips. Use only words and numbers that are in the transcript or the brief. Keep the length rule.`
+            ).catch(() => null);
+            if (again && lengthOk(again.len)) {
+              const r1 = graphicsReport(again.clean);
+              if (r1.designed + r1.overlayClips > rep0.designed + rep0.overlayClips) planned = again;
+            }
+          }
+          const need1 = graphicsNeeds(planned.len, graphicsReport(planned.clean).clips);
+          if (graphicsMissing(graphicsReport(planned.clean), need1)) {
+            const g = addMotionGraphics(planned.clean, { transcript: an.transcript, creative: policy.creative });
+            if (g.addedScenes || g.addedOverlays) {
+              planned = { clean: g.sb, len: Math.round(totalFramesOf(g.sb) / 30) };
+              say(`✨ Added motion graphics to the plan: ${g.addedScenes} title / chapter / end cards and ${g.addedOverlays} on-screen titles${g.gradeSet ? ", plus a colour grade" : ""}.`);
+            }
           }
         }
         const clean = planned.clean;
