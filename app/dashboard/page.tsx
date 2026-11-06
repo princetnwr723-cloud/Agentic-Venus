@@ -45,8 +45,8 @@ import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
 import ChatComposer, { type Mentionable } from "@/components/dashboard/ChatComposer";
+import RunBar from "@/components/dashboard/RunBar";
 import RunBars from "@/components/dashboard/RunBars";
-import WorkingBar from "@/components/dashboard/WorkingBar";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
 import ModelPicker from "@/components/dashboard/ModelPicker";
 import { fountBegin } from "@/lib/fount/client";
@@ -1804,10 +1804,12 @@ export default function DashboardPage() {
                     onRetry={(t) => void submitText(t)}
                     replyingAt={replyTo?.at ?? null}
                   />
+                  {/* the one run bar: a short generic line + timer, right under the last message (video / code / team runs and normal work all use it) */}
+                  {(activeWork || venusRun || codeRun || teamRun) && <RunBar key={activeChat.id} work={activeWork ?? null} venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />}
                 </div>
               </div>
-              {activeWork && <WorkingBar key={`${activeChat.id}:${activeWork.startedAt}`} label={activeWork.label} startedAt={activeWork.startedAt} steps={activeWork.steps} />}
-              <RunBars venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
+              {/* only the dock slot of the Progress panel stays above the message box (no run cards there any more) */}
+              <RunBars venusRun={null} codeRun={null} teamRun={null} />
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
               <ChatComposer
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
