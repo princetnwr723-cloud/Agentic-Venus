@@ -44,11 +44,11 @@ export async function resolveApiBase(provider: Provider, space?: string, apiBase
   if (provider === "telnyx") return TELNYX_BASE;
   if (provider === "signalwire") {
     const host = String(space || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
-    if (!/^[a-z0-9-]+(\.signalwire\.com)?$/i.test(host)) throw new Error("SignalWire ka Space name do, jaise myspace ya myspace.signalwire.com.");
+    if (!/^[a-z0-9-]+(\.signalwire\.com)?$/i.test(host)) throw new Error("Give the SignalWire Space name, for example myspace or myspace.signalwire.com.");
     return `https://${host.includes(".") ? host : host + ".signalwire.com"}/api/laml/2010-04-01`;
   }
   const u = assertPublicUrl(String(apiBase || "").trim());
-  if (u.protocol !== "https:") throw new Error("API base HTTPS honi chahiye.");
+  if (u.protocol !== "https:") throw new Error("The API base must use HTTPS.");
   await assertPublicHost(u.hostname);
   return u.origin + u.pathname.replace(/\/+$/, "");
 }
@@ -57,7 +57,7 @@ export async function resolveApiBase(provider: Provider, space?: string, apiBase
 type Creds = { sid: string; token: string; telnyx: boolean };
 async function creds(uid: string): Promise<Creds> {
   const s = await getResolvedVoiceSecrets(uid);
-  if (!s.twilioSid || !s.twilioToken) throw new Error("Calling abhi connect nahi hai. Chat me bolo: \"calling setup karo\".");
+  if (!s.twilioSid || !s.twilioToken) throw new Error("Calling is not connected yet. Tell the agent in chat: \"set up calling\".");
   const telnyx = s.twilioToken.startsWith(TELNYX_MARK);
   return { sid: s.twilioSid, token: telnyx ? s.twilioToken.slice(TELNYX_MARK.length) : s.twilioToken, telnyx };
 }
@@ -169,17 +169,17 @@ export async function connectProvider(
 ): Promise<{ webhook: boolean; number: string | null }> {
   const provider = (PROVIDER_IDS.includes(p.provider as Provider) ? p.provider : "twilio") as Provider;
   const sid = p.sid.trim(), token = p.token.trim();
-  if (!sid || !token) throw new Error(provider === "telnyx" ? "Telnyx API key aur TeXML Application ID dono chahiye." : "Account SID aur Auth Token dono chahiye.");
-  if (provider === "twilio" && !/^AC[a-f0-9]{32}$/i.test(sid)) throw new Error("Twilio Account SID 'AC' se shuru hoti hai (34 characters).");
+  if (!sid || !token) throw new Error(provider === "telnyx" ? "Both the Telnyx API key and the TeXML Application ID are needed." : "Both the Account SID and the Auth Token are needed.");
+  if (provider === "twilio" && !/^AC[a-f0-9]{32}$/i.test(sid)) throw new Error("A Twilio Account SID starts with 'AC' (34 characters).");
   const apiBase = await resolveApiBase(provider, p.space, p.apiBase);
   const c: Creds = { sid, token, telnyx: provider === "telnyx" };
 
   if (c.telnyx) {
     const app = await telnyxRest(c, `/texml_applications/${encodeURIComponent(sid)}`);
-    if (!app.ok) throw new Error(app.status === 401 || app.status === 403 ? "Telnyx ne ye API key reject kiya. Portal se v2 API key dubara copy karo." : app.status === 404 ? "Ye TeXML Application ID nahi mili. Telnyx portal → Voice → TeXML Applications me ID dekho." : app.message || `Telnyx error (HTTP ${app.status}).`);
+    if (!app.ok) throw new Error(app.status === 401 || app.status === 403 ? "Telnyx rejected this API key. Copy the v2 API key from the portal again." : app.status === 404 ? "This TeXML Application ID was not found. Check the ID under Telnyx portal → Voice → TeXML Applications." : app.message || `Telnyx error (HTTP ${app.status}).`);
   } else {
     const acct = await rest(apiBase, c, ".json");
-    if (!acct.ok) throw new Error(acct.status === 401 ? "Provider ne ye SID/token reject kiya. Dubara copy karo." : String(acct.j?.message || `Provider error (HTTP ${acct.status}).`));
+    if (!acct.ok) throw new Error(acct.status === 401 ? "The provider rejected this SID/token. Copy them again." : String(acct.j?.message || `Provider error (HTTP ${acct.status}).`));
   }
 
   await saveVoiceSettings(uid, { twilioSid: sid, twilioToken: c.telnyx ? TELNYX_MARK + token : token, inboundEnabled: true, outboundEnabled: true, approvalRequired: false });
@@ -265,14 +265,14 @@ export async function describeAccount(uid: string): Promise<string> {
   const lines = [
     `📞 Provider: ${a.provider}${a.provider === "telnyx" ? " (beta)" : ""}${a.name ? ` · ${a.name}` : ""}`,
     `Account: ${a.type || "?"}${a.status ? ` · ${a.status}` : ""}`,
-    a.balance ? `Balance: ${a.balance} ${a.currency}`.trim() : "Balance: provider se nahi mila (provider ke dashboard me dekho)",
-    a.provider === "telnyx" ? "Provider ke hisab se aaj ki calls: Telnyx ye number nahi deta" : `Provider ke hisab se aaj ki calls: ${a.callsToday}${a.spendToday ? ` · kharcha ${a.spendToday}` : ""}`,
-    `Venus daily outbound limit: ${used}/${limit} (aaj)`,
-    `Numbers: ${owns.length ? owns.join(", ") : "koi nahi (chat me bolo: ek number kharido)"}`,
-    `Real-time (beech me tok sakne wali) call: ${s.realtime === true ? "ON (beta)" : "OFF"}`,
+    a.balance ? `Balance: ${a.balance} ${a.currency}`.trim() : "Balance: not available from the provider (check the provider's dashboard)",
+    a.provider === "telnyx" ? "Calls today (per provider): Telnyx does not report this" : `Calls today (per provider): ${a.callsToday}${a.spendToday ? ` · spent ${a.spendToday}` : ""}`,
+    `Venus daily outbound limit: ${used}/${limit} (today)`,
+    `Numbers: ${owns.length ? owns.join(", ") : "none (tell the agent in chat: buy a number)"}`,
+    `Real-time (interruptible) call: ${s.realtime === true ? "ON (beta)" : "OFF"}`,
   ];
   if (a.type.toLowerCase() === "trial") {
-    lines.push(`⚠️ Trial account: sirf verified numbers pe call jaati hai${a.verified.length ? ` (${a.verified.join(", ")})` : ""}, aur call ke shuru me trial message bajta hai. Upgrade karne par ye limits hat jaati hain.`);
+    lines.push(`⚠️ Trial account: calls can only go to verified numbers${a.verified.length ? ` (${a.verified.join(", ")})` : ""}, and a trial message plays at the start of each call. These limits go away after you upgrade.`);
   }
   return lines.join("\n");
 }
@@ -290,7 +290,7 @@ export async function listNumbers(uid: string): Promise<Array<{ number: string; 
 
 /** Gives a number you already own to ONE agent (a chat). "default" takes the agent's own number away again. */
 export async function assignNumber(uid: string, chatId: string, number: string, req?: Request): Promise<string | null> {
-  if (!/^[A-Za-z0-9_-]{1,160}$/.test(chatId)) throw new Error("Chat nahi mili.");
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(chatId)) throw new Error("Chat not found.");
   if (!number || number.toLowerCase() === "default") {
     await userRef(uid).update({ [`voiceSettings.agentNumbers.${chatId}`]: FieldValue.delete() });
     return null;
@@ -298,9 +298,9 @@ export async function assignNumber(uid: string, chatId: string, number: string, 
   const [s, c] = await Promise.all([getTele(uid), creds(uid)]);
   const base = baseOf(s);
   const hit = (await numbersOf(c, base)).find((n) => digits(n.phone_number) === digits(number));
-  if (!hit) throw new Error("Ye number tumhare provider account me nahi hai. Pehle \"mere numbers dikhao\" bolo.");
+  if (!hit) throw new Error("This number is not in your provider account. Ask first: \"show my numbers\".");
   const taken = Object.entries(s.agentNumbers ?? {}).find(([id, n]) => id !== chatId && digits(n) === digits(hit.phone_number));
-  if (taken) throw new Error("Ye number kisi aur agent ko diya hua hai. Ek number ek hi agent ka ho sakta hai.");
+  if (taken) throw new Error("This number already belongs to another agent. One number can belong to only one agent.");
   await hookNumber(uid, base, c, hit.sid, providerOf(s), req).catch(() => false);
   await patchTele(uid, { agentNumbers: { [chatId]: hit.phone_number } });
   return hit.phone_number;
@@ -309,10 +309,10 @@ export async function assignNumber(uid: string, chatId: string, number: string, 
 /** Buys a new number from the provider (this spends money from the provider balance). */
 export async function buyNumber(uid: string, o: { country: string; areaCode?: string }, req?: Request): Promise<string> {
   const [s, c] = await Promise.all([getTele(uid), creds(uid)]);
-  if (c.telnyx) throw new Error("Telnyx par number Telnyx portal se kharido (Numbers → Buy), phir use TeXML Application se jodo. Uske baad yahan \"mere numbers dikhao\" bolo.");
+  if (c.telnyx) throw new Error("On Telnyx, buy numbers in the Telnyx portal (Numbers → Buy) and attach them to the TeXML Application. Then ask here: \"show my numbers\".");
   const base = baseOf(s);
   const country = o.country.trim().toUpperCase().slice(0, 2);
-  if (!/^[A-Z]{2}$/.test(country)) throw new Error("Country ka 2 letter code do, jaise IN, US, GB.");
+  if (!/^[A-Z]{2}$/.test(country)) throw new Error("Give the 2-letter country code, for example IN, US, GB.");
   for (const kind of ["Local", "Mobile"]) {
     const qs = new URLSearchParams({ VoiceEnabled: "true", PageSize: "1" });
     if (o.areaCode) qs.set("AreaCode", o.areaCode.replace(/\D/g, "").slice(0, 6));
@@ -321,9 +321,9 @@ export async function buyNumber(uid: string, o: { country: string; areaCode?: st
     if (!cand) continue;
     const form = new URLSearchParams({ PhoneNumber: cand, VoiceUrl: inboundUrl(uid, req), VoiceMethod: "POST" });
     const bought = await rest(base, c, "/IncomingPhoneNumbers.json", { form });
-    if (!bought.ok) throw new Error(String(bought.j?.message || `Number kharidna fail hua (HTTP ${bought.status}). Kuch deshon me regulatory documents chahiye.`));
+    if (!bought.ok) throw new Error(String(bought.j?.message || `Buying the number failed (HTTP ${bought.status}). Some countries need regulatory documents.`));
     await audit(uid, { kind: "voice_number_bought", text: `${bought.j.phone_number}` });
     return String(bought.j.phone_number);
   }
-  throw new Error("Is desh/area me abhi koi number available nahi mila.");
+  throw new Error("No number is available in this country/area right now.");
 }
