@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
-import { directorPrompt, editPlanPrompt, editPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, templateExtractPrompt, type EditFacts } from "@/lib/venus-prompts";
+import { directorPrompt, editNotesPrompt, editPlanPrompt, editPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, templateExtractPrompt, videoIntentPrompt, type EditFacts } from "@/lib/venus-prompts";
 import { checkCode, sanitizeScene, sanitizeSource, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
 
@@ -34,8 +34,10 @@ export async function POST(req: Request) {
     const uid = String(body.uid);
     await assertTokens(uid); // plan limit (HTTP 402 when used up)
 
-    const ask = async (content: string, image?: { mediaType: string; data: string }) => {
-      const out = await callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }] });
+    const ask = async (content: string, image?: { mediaType: string; data: string }, maxTokens?: number) => {
+      // a long edit plan is a long JSON: it gets more room, and falls back to the normal size when the model does not allow it
+      const run = (max?: number) => callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }], ...(max ? { maxTokens: max } : {}) });
+      const out = maxTokens ? await run(maxTokens).catch(() => run()) : await run();
       await addTokens(uid, estTokens(content.length + out.length));
       return out;
     };
@@ -105,14 +107,45 @@ export async function POST(req: Request) {
       if (!facts || !source) return NextResponse.json({ error: "The analysis of the video is missing." }, { status: 400 });
       const aspect = aspectOf(body.aspect);
       const seconds = Math.min(1200, Math.max(10, Number(body.seconds) || 60));
-      const prompt = editPlanPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, keepAll: Boolean(body.keepAll), aspect, captions: Boolean(body.captions), music: Boolean(body.music), facts, context });
-      const reply = await ask(prompt, img?.data ? { mediaType: img.mediaType || "image/jpeg", data: img.data } : undefined);
+      const pol = body.policy && typeof body.policy === "object" ? (body.policy as Record<string, unknown>) : null;
+      const policy = pol ? { length: (["keep", "tighten", "target", "shorter"].includes(String(pol.length)) ? String(pol.length) : "keep") as "keep" | "tighten" | "target" | "shorter", seconds: Number(pol.seconds) || undefined, creative: pol.creative === true, graphics: pol.graphics === true } : undefined;
+      const notes = typeof body.notes === "string" && body.notes.trim() ? body.notes.slice(0, 6000) : undefined;
+      const prompt = editPlanPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, keepAll: Boolean(body.keepAll), aspect, captions: Boolean(body.captions), music: Boolean(body.music), facts, context, policy, notes });
+      const reply = await ask(prompt, img?.data ? { mediaType: img.mediaType || "image/jpeg", data: img.data } : undefined, 16000);
       const raw = extractJson(reply);
       if (!raw) return NextResponse.json({ error: "The model did not return an edit plan: " + reply.slice(0, 160) }, { status: 422 });
       raw.source = source;
       const storyboard = sanitizeStoryboard(raw, { aspect, theme: String(body.theme || "midnight"), captions: Boolean(body.captions), maxSeconds: body.keepAll ? Math.min(1200, source.duration + 120) : Math.min(1200, seconds * 1.15 + 6), keepFiles: false });
       if (!storyboard.scenes.some((s) => s.type === "clip")) return NextResponse.json({ error: "The edit plan has no clips of your video. Try again or describe the edit more clearly." }, { status: 422 });
       return NextResponse.json({ storyboard });
+    }
+
+    // ---- what does the user want with the attached video? (ANY language) ----
+    if (body.kind === "video-intent") {
+      const reply = await ask(videoIntentPrompt(String(body.text || ""), String(body.fileName || "")), undefined, 300);
+      const j = extractJson(reply) as Record<string, unknown> | null;
+      if (!j) return NextResponse.json({ error: "No verdict." }, { status: 422 });
+      const action = ["edit", "template", "other"].includes(String(j.action)) ? String(j.action) : "other";
+      const length = ["keep", "tighten", "target", "shorter"].includes(String(j.length)) ? String(j.length) : "keep";
+      const seconds = Number(j.seconds);
+      return NextResponse.json({
+        verdict: { action, length: length === "target" && !(seconds >= 5) ? "keep" : length, ...(length === "target" && seconds >= 5 && seconds <= 7200 ? { seconds: Math.round(seconds) } : {}), creative: j.creative === true, graphics: j.graphics === true || j.creative === true },
+      });
+    }
+
+    // ---- the first pass of a free / full-treatment edit: the editor's notes ----
+    if (body.kind === "edit-notes") {
+      const facts = body.facts as EditFacts | undefined;
+      const img = body.image as { mediaType?: string; data?: string } | undefined;
+      if (!facts || !Array.isArray(facts.tiles)) return NextResponse.json({ error: "The analysis of the video is missing." }, { status: 400 });
+      const pol = body.policy && typeof body.policy === "object" ? (body.policy as Record<string, unknown>) : null;
+      const policy = pol ? { length: (["keep", "tighten", "target", "shorter"].includes(String(pol.length)) ? String(pol.length) : "keep") as "keep" | "tighten" | "target" | "shorter", seconds: Number(pol.seconds) || undefined, creative: pol.creative === true, graphics: pol.graphics === true } : undefined;
+      const prompt = editNotesPrompt({
+        brief: String(body.brief || "").slice(0, 4000), seconds: Math.min(1200, Math.max(10, Number(body.seconds) || facts.duration)), keepAll: Boolean(body.keepAll),
+        aspect: aspectOf(body.aspect), music: Boolean(body.music), facts, policy,
+      });
+      const reply = await ask(prompt, img?.data ? { mediaType: img.mediaType || "image/jpeg", data: img.data } : undefined, 4000);
+      return NextResponse.json({ notes: reply.trim().slice(0, 6000) });
     }
 
     // ---- reverse-engineering a real video into a reusable template ----
