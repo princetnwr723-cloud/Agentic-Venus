@@ -43,3 +43,36 @@ test('Venus Pro: edits an attached video on request and continues work that was 
   assert.match(read('lib/venus-pipeline.ts'), /export async function lastBeat/);
   assert.match(read('lib/venus-pipeline.ts'), /beat\(run\);/);
 });
+
+test('Venus Pro edit: the length stays unless the owner asks, and the owner chooses who decides', () => {
+  const clone = read('lib/venus-clone.ts');
+  assert.match(clone, /export function editPolicyOf/);
+  const dash = read('app/dashboard/page.tsx');
+  assert.match(dash, /editPolicyOf\(brief\)/);
+  assert.doesNotMatch(dash, /asked \?\? 60/);
+  const pipe = read('lib/venus-pipeline.ts');
+  assert.match(pipe, /Keeping the whole video/);
+  assert.match(pipe, /kind: "edit-notes"/);
+  assert.match(pipe, /restore the missing parts/);
+  const prompts = read('lib/venus-prompts.ts');
+  assert.match(prompts, /KEEPS THE WHOLE VIDEO/);
+  assert.match(prompts, /THE USER'S WORDS ARE THE LAW/);
+  assert.match(prompts, /CREATIVE CONTROL/);
+  assert.match(prompts, /export function editNotesPrompt/);
+  assert.match(read('app/api/venus/ai/route.ts'), /body\.kind === "edit-notes"/);
+});
+
+test('worldwide: English everywhere, the model reads the video request in any language, the UI follows the browser language', () => {
+  const hinglish = /\b(nahi|abhi|chahiye|bolo|karo\b|taiyaar|kharid|batao)\b/;
+  for (const f of ['lib/telephony.ts', 'lib/tools/voice.ts', 'lib/tools/voice-extra.ts', 'lib/voice-calls.ts']) {
+    const lines = read(f).split('\n').filter((l) => hinglish.test(l) && !l.trim().startsWith('//') && !/Namaste|kaam ke baad|mujhe/.test(l));
+    assert.deepEqual(lines, [], `${f} still has Hinglish messages`);
+  }
+  assert.match(read('lib/venus-prompts.ts'), /export function videoIntentPrompt/);
+  assert.match(read('app/api/venus/ai/route.ts'), /body\.kind === "video-intent"/);
+  assert.match(read('lib/venus-pipeline.ts'), /export async function classifyVideoRequest/);
+  assert.match(read('app/dashboard/page.tsx'), /classifyVideoRequest\(/);
+  assert.match(read('lib/tools/prompt.ts'), /17\. LANGUAGE/);
+  assert.match(read('components/dashboard/CallButton.tsx'), /function useStrings/);
+  assert.match(read('components/venus/TemplateModal.tsx'), /const t = hi \? STR\.hi : STR\.en/);
+});
