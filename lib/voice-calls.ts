@@ -39,7 +39,7 @@ export async function loadAgent(uid: string, chatId?: string): Promise<Agent> {
   let provider = chat.provider, model = chat.model;
   if (!keys[provider]) {
     const alt = PROVIDERS.find((p) => keys[p.id]);
-    if (!alt) throw new VoiceError("Koi AI provider key saved nahi hai (API keys me add karo).");
+    if (!alt) throw new VoiceError("No AI provider key is saved (add one under API keys).");
     provider = alt.id; model = alt.models[0];
   }
   const apiKey = await resolveValue(uid, keys[provider] as string);
@@ -271,20 +271,20 @@ export function normalizePhone(raw: string, defaultCode = "91"): string {
 export async function placeOutboundCall(uid: string, p: { to: string; goal?: string; context?: string; chatId?: string; approved: boolean; req?: Request }) {
   const sec = await getResolvedVoiceSecrets(uid);
   const st = sec.settings as TeleSettings;
-  if (!st.outboundEnabled) throw new VoiceError("Outgoing calls band hain. Chat me bolo: \"calling setup karo\".");
-  if (st.approvalRequired !== false && !p.approved) throw new VoiceError("Call se pehle confirm karo.", 403);
-  if (!sec.twilioSid || !sec.twilioToken) throw new VoiceError("Pehle calling connect karo. Chat me bolo: \"calling setup karo\".");
+  if (!st.outboundEnabled) throw new VoiceError("Outgoing calls are off. Tell the agent in chat: \"set up calling\".");
+  if (st.approvalRequired !== false && !p.approved) throw new VoiceError("Confirm the call first.", 403);
+  if (!sec.twilioSid || !sec.twilioToken) throw new VoiceError("Connect calling first. Tell the agent in chat: \"set up calling\".");
   const agent = await loadAgent(uid, p.chatId); // checks that a chat and a model key exist
   // Every agent can have its own number; without one the account's default number is used.
   const from = fromNumberFor(st, agent.chatId);
-  if (!from) throw new VoiceError("Koi calling number nahi hai. Chat me bolo: \"ek number kharido\" ya \"mere numbers dikhao\".");
+  if (!from) throw new VoiceError("There is no calling number. Tell the agent in chat: \"buy a number\" or \"show my numbers\".");
   // Numbers without a + get the country code of YOUR number (a US number gets +1, an Indian one +91). A number with + works in every country.
   const to = normalizePhone(String(p.to || ""), callingCodeOf(from) || "91");
   if (!/^\+[1-9]\d{5,14}$/.test(to)) throw new VoiceError("That number looks wrong. Write it with the country code, e.g. +919876543210 or +14155550123.");
   const base = appBaseUrl(p.req);
   const calls = userRef(uid).collection("voiceCalls");
   const limit = st.dailyLimit ?? 50;
-  if ((await outboundToday(uid)) >= limit) throw new VoiceError(`Daily outbound limit (${limit}) pura ho gaya.`, 429);
+  if ((await outboundToday(uid)) >= limit) throw new VoiceError(`The daily outbound limit (${limit}) is reached.`, 429);
 
   // While the phone rings, the cloud PC wakes up and the local voice loads, so the first sentence is fast.
   if (st.ttsProvider === "local") {
@@ -309,7 +309,7 @@ export async function placeOutboundCall(uid: string, p: { to: string; goal?: str
   const data = r.j as { sid?: string; status?: string; message?: string };
   if (!r.ok || !data.sid) {
     await calls.doc(callId).set({ status: "failed", failure: String(data.message || `HTTP ${r.status}`).slice(0, 240), updatedAt: Date.now() }, { merge: true });
-    throw new VoiceError(String(data.message || `Provider call start nahi kar paya (HTTP ${r.status}).`), r.status === 401 ? 400 : 502);
+    throw new VoiceError(String(data.message || `The provider could not start the call (HTTP ${r.status}).`), r.status === 401 ? 400 : 502);
   }
   await calls.doc(callId).set({ providerCallId: data.sid, status: data.status || "queued", updatedAt: Date.now() }, { merge: true });
   await audit(uid, { kind: "voice_call_started", chatId: agent.chatId, text: `Outbound call ${to} from ${from}; goal: ${String(p.goal || "").slice(0, 120)}` });
@@ -326,10 +326,10 @@ async function callUpdate(uid: string, providerCallId: string, params: Record<st
 /** "Tell them the meeting is booked": the agent hears it at once (the provider is told to run the next turn now) and says it in its own words. */
 export async function sendOwnerNote(uid: string, callId: string, text: string, req?: Request): Promise<{ live: boolean }> {
   const clean = String(text || "").trim().slice(0, 600);
-  if (!clean) throw new VoiceError("Kuch likho ya bolo.");
+  if (!clean) throw new VoiceError("Write or say something first.");
   const ref = userRef(uid).collection("voiceCalls").doc(callId);
   const snap = await ref.get();
-  if (!snap.exists) throw new VoiceError("Call nahi mili.", 404);
+  if (!snap.exists) throw new VoiceError("Call not found.", 404);
   const d = snap.data() as CallDoc;
   if (d.status && CALL_DONE.includes(d.status)) throw new VoiceError("Ye call khatam ho chuki hai.", 409);
   await ref.set({ ownerNotes: FieldValue.arrayUnion({ id: randomUUID().replace(/-/g, "").slice(0, 12), text: clean, at: Date.now() }), updatedAt: Date.now() }, { merge: true });
@@ -346,7 +346,7 @@ export async function sendOwnerNote(uid: string, callId: string, text: string, r
 export async function endLiveCall(uid: string, callId: string): Promise<void> {
   const snap = await userRef(uid).collection("voiceCalls").doc(callId).get();
   const d = (snap.data() ?? {}) as CallDoc;
-  if (!snap.exists || !d.providerCallId) throw new VoiceError("Call nahi mili.", 404);
+  if (!snap.exists || !d.providerCallId) throw new VoiceError("Call not found.", 404);
   if (d.status && CALL_DONE.includes(d.status)) return;
   await callUpdate(uid, d.providerCallId, { Status: "completed" });
 }
