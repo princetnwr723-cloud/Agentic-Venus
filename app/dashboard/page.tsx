@@ -19,8 +19,8 @@ import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
 import { acquire, releaseNow } from "@/lib/computers";
 import { hydrateProject, listProjects, type SourceRef, type VenusProject } from "@/lib/venus";
-import { analyzeVideoTemplate, lastBeat, runPipeline, signedUrl, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
-import { categoryOf, NEW_FROM_SCRATCH, pickTemplate, stripTemplateMarker, wantsTemplateFromVideo, wantsVideoEdit, type TemplateListItem, type VideoTemplate } from "@/lib/venus-clone";
+import { analyzeVideoTemplate, classifyVideoRequest, lastBeat, runPipeline, signedUrl, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
+import { categoryOf, NEW_FROM_SCRATCH, pickTemplate, editPolicyOf, stripTemplateMarker, wantsTemplateFromVideo, wantsVideoEdit, type EditPolicy, type TemplateListItem, type VideoTemplate } from "@/lib/venus-clone";
 import TemplateModal from "@/components/venus/TemplateModal";
 import { personaOf, type Member } from "@/lib/team-catalog";
 import { assembleTeam, runTeamGoal, type TeamHost, type TMsg } from "@/lib/team";
@@ -46,7 +46,8 @@ import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
 import ChatComposer, { type Mentionable } from "@/components/dashboard/ChatComposer";
-import RunBar from "@/components/dashboard/RunBar";
+import RunBars from "@/components/dashboard/RunBars";
+import WorkingBar from "@/components/dashboard/WorkingBar";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
 import ModelPicker from "@/components/dashboard/ModelPicker";
 import { fountBegin } from "@/lib/fount/client";
@@ -71,7 +72,7 @@ To save a durable fact about the user for THIS chat, end your reply with [[MEMOR
 If a connected tool can answer or do the request, call the tool instead of guessing.`;
 
 const INTENT_LABEL: Record<string, string> = {
-  chat: "jawab dena", set_role: "role save karna", assemble: "team banana", pc: "computer ka kaam", code: "coding project",
+  chat: "answering", set_role: "saving the role", assemble: "building a team", pc: "computer work", code: "coding project",
   video: "video banana", team: "team ka kaam", remember: "yaad rakhna", forget: "bhoolna", clarify: "ek sawaal puchna",
 };
 
@@ -150,6 +151,8 @@ export default function DashboardPage() {
   const venusBusyRef = useRef<Set<string>>(new Set());
   // the last video attached in each chat: Venus Pro edits it (or studies it for a template) when the owner asks for a video
   const recentVideoRef = useRef<Record<string, { id: string; name: string; at: number }>>({});
+  // how the owner wants the attached video edited, as the model understood the message (any language); used by startVenus
+  const editVerdictRef = useRef<Record<string, EditPolicy>>({});
   const codeBusyRef = useRef<Set<string>>(new Set());
   const teamBusyRef = useRef<Set<string>>(new Set());
   const brains = useRef<Record<string, Brain>>({});
@@ -1070,7 +1073,7 @@ export default function DashboardPage() {
     if (!user || !e2bKey) return;
     venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
-    workStart(chat.id, "Venus Pro video ko aage badha raha hai…", "venus");
+    workStart(chat.id, "Venus Pro is continuing the video…", "venus");
     setVenusRun({ title: p0.title.slice(0, 48), label: "Continuing…", value: null });
     const releaseAwake = await keepAwake();
     try {
@@ -1139,7 +1142,7 @@ export default function DashboardPage() {
     venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
-    if (showWork) workStart(chat.id, "Venus Pro shuru ho raha hai…", "venus");
+    if (showWork) workStart(chat.id, "Venus Pro is starting…", "venus");
     setVenusRun({ title: briefIn.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
     const releaseAwake = await keepAwake();
     try {
@@ -1159,15 +1162,18 @@ export default function DashboardPage() {
       const opt = guessVenusOptions(brief);
       const asked = findSeconds(brief);
       const wantsShape = /9:16|1:1|16:9|reel|shorts?|tiktok|vertical|square|story/i.test(brief);
-      const seconds = editing ? asked ?? 60 : tpl && !asked ? Math.min(3600, Math.max(15, Math.round(tpl.seconds))) : opt.seconds;
+      // how the owner wants the video edited: nothing is shortened unless they ask for it (the length shown here is only a placeholder)
+      const editPolicy = editing ? editVerdictRef.current[chat.id] ?? editPolicyOf(brief) : undefined;
+      delete editVerdictRef.current[chat.id];
+      const seconds = editing ? editPolicy?.seconds ?? 60 : tpl && !asked ? Math.min(3600, Math.max(15, Math.round(tpl.seconds))) : opt.seconds;
       const aspect = tpl && !wantsShape ? tpl.aspect : opt.aspect;
       setVenusRun({ title: brief.replace(/\s+/g, " ").slice(0, 48), label: "Starting…", value: null });
       if (!opts.silent) {
         say(chat.id, editing
-          ? `✂️ Venus Pro is editing YOUR video “${att?.name}” (about ${seconds}s) on its own computer. Progress shows right here in the chat. Keep this tab open.`
+          ? `✂️ Venus Pro is editing YOUR video “${att?.name}” on its own computer (${editPolicy?.length === "keep" ? "the whole video stays" : editPolicy?.length === "target" ? `about ${editPolicy.seconds}s as you asked` : editPolicy?.length === "tighten" ? "tightened: only dead air and filler go" : "shorter, as you asked"}${editPolicy?.creative ? "; the agent decides the edit itself" : "; following your instructions exactly"}). Progress shows above the message box. Keep this tab open.`
           : tpl
-            ? `🧬 Venus Pro is making your video (${seconds}s, ${aspect}) as a clone of the template “${tpl.name}”, on its own computer. Progress shows right here in the chat. Keep this tab open.`
-            : `🎬 Venus Pro is making your video (${seconds}s, ${aspect}) on its own computer. Progress shows right here in the chat. The first video can take 15-30 minutes — keep this tab open.`);
+            ? `🧬 Venus Pro is making your video (${seconds}s, ${aspect}) as a clone of the template “${tpl.name}”, on its own computer. Progress shows above the message box. Keep this tab open.`
+            : `🎬 Venus Pro is making your video (${seconds}s, ${aspect}) on its own computer. Progress shows above the message box. The first video can take 15-30 minutes — keep this tab open.`);
       }
 
       const project: VenusProject = {
@@ -1176,7 +1182,7 @@ export default function DashboardPage() {
         captions: true, quality: "720p", review: true, design: "ai", music: editing ? /\bmusic\b/i.test(brief) : true, origin: "chat", chatId: chat.id,
         provider: chat.provider, model: chat.model, stage: "studio", status: "idle", createdAt: Date.now(), updatedAt: Date.now(),
         ...(editing
-          ? { mode: "edit" as const, source, keepAll: /\b(full|whole|entire|keep all|poora|pura)\b/i.test(brief), matchSource: !wantsShape }
+          ? { mode: "edit" as const, source, editPolicy, keepAll: editPolicy?.length === "keep" || /\b(full|whole|entire|keep all|poora|pura)\b/i.test(brief), matchSource: !wantsShape }
           : { mode: "make" as const }),
         ...(tpl ? { templateJson: JSON.stringify(tpl), templateName: tpl.name } : {}),
       };
@@ -1210,13 +1216,13 @@ export default function DashboardPage() {
 
     venusBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
-    workStart(chat.id, "Venus Pro video ko padh raha hai…", "venus");
+    workStart(chat.id, "Venus Pro is studying the video…", "venus");
     setVenusRun({ title: `Template: ${att.name}`.slice(0, 48), label: "Starting…", value: null });
     const releaseAwake = await keepAwake();
     try {
       const links = await attachmentLinks(chat.id, [att.id]);
       if (!links.length) return out("The video could not be opened. Attach it again and ask once more.");
-      say(chat.id, "🧬 Venus Pro is studying your video to save it as a template (about 5-10 minutes, the first time a little more). Progress shows right here in the chat. Keep this tab open.");
+      say(chat.id, "🧬 Venus Pro is studying your video to save it as a template (about 5-10 minutes, the first time a little more). Progress shows above the message box. Keep this tab open.");
       const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels) };
       const r = await analyzeVideoTemplate(env, venusHooks(chat.id), {
         provider: chat.provider, model: chat.model, chatId: chat.id, source: { kind: "url", url: links[0].url, name: att.name },
@@ -1279,7 +1285,7 @@ export default function DashboardPage() {
     const out = (m: string) => { say(chat.id, m); return m; };
     if (!token) return out("Vercel is not connected for this chat. Open the **Connectors** button (plug icon), add your Vercel token, then ask again.");
     if (!e2bKey) return out("Deploy needs the computer (E2B key). Add it under API keys first.");
-    workStart(chat.id, "Deploy ke liye project wala computer chalu kar raha hoon…", "deploy");
+    workStart(chat.id, "Starting the project computer for the deploy…", "deploy");
     let sid: string | null = null;
     try {
       sid = await acquire({ uid: user.uid, e2bKey }, chat.id, "code"); // the project lives on Venus Code's computer
@@ -1491,7 +1497,7 @@ export default function DashboardPage() {
     let coopText = "";
     if (targets.length || coop) {
       setSending(true);
-      workStart(chat.id, targets.length ? `${targets.map((t) => "@" + t.agentName).join(", ")} ka kaam padh raha hoon…` : "Doosre agents ko dekh raha hoon…", "collab");
+      workStart(chat.id, targets.length ? `${targets.map((t) => "@" + t.agentName).join(", ")} — reading their work…` : "Looking at the other agents…", "collab");
       try {
         if (targets.length) collab = await collabBlock(chat, targets, text);
         if (coop) coopText = await coopPrompt(chat);
@@ -1508,14 +1514,23 @@ export default function DashboardPage() {
     const taskExtra = extra + fileLinks;
 
     // explicit commands: the user chose them, no guessing
-    if (vidAtt && !video && wantsTemplateFromVideo(text)) { void analyzeTemplateFor(chat, vidAtt, text + extra); return; }
-    // a video attached here (or just before) that the owner wants EDITED goes straight to Venus Pro: this must never depend on the model's guess
+    // A video attached here (or just before): what does the owner want with it? The model reads the message in ANY language;
+    // the word lists (English + Hinglish) are the fallback when the model cannot be asked. It never depends on the chat agent's guess.
     {
       const recent = recentVideoRef.current[chat.id];
-      const justBefore = Boolean(recent && Date.now() - recent.at < 30 * 60_000) && /\b(video|clip|footage|reel|ise|isko|is video)\b/i.test(text);
-      if (!video && wantsVideoEdit(text) && (vidAtt || justBefore)) {
-        void startVenus(chat, text + extra);
-        return;
+      const hasRecent = Boolean(recent && Date.now() - recent.at < 30 * 60_000);
+      const att = vidAtt ?? (hasRecent ? recent : undefined);
+      if (!video && att && text.length <= 800) {
+        const verdict = await classifyVideoRequest({ uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: false }, { provider: chat.provider, model: chat.model }, text, att.name);
+        const action: "edit" | "template" | "other" = verdict?.action
+          ?? (vidAtt && wantsTemplateFromVideo(text) ? "template"
+            : wantsVideoEdit(text) && (vidAtt || /\b(video|clip|footage|reel|ise|isko|is video)\b/i.test(text)) ? "edit" : "other");
+        if (action === "template") { void analyzeTemplateFor(chat, att, text + extra); return; }
+        if (action === "edit") {
+          if (verdict) editVerdictRef.current[chat.id] = { length: verdict.length, ...(verdict.seconds ? { seconds: verdict.seconds } : {}), creative: verdict.creative, graphics: verdict.graphics };
+          void startVenus(chat, text + extra);
+          return;
+        }
       }
     }
     if (recipe) { void runRecipeCmd(chat, recipe[1] ?? ""); return; }
@@ -1669,7 +1684,7 @@ export default function DashboardPage() {
       }
       if (planActive) {
         const st = await execTool(chat, "plan.status", {}, tainted);
-        if (/PLAN OPEN:\s*\d+/.test(st.text)) replyOut = `${extractToolCalls(replyOut).clean}\n\n⏸️ Kuch steps abhi bache hain. "continue" bolo, main wahin se aage badhunga.`;
+        if (/PLAN OPEN:\s*\d+/.test(st.text)) replyOut = `${extractToolCalls(replyOut).clean}\n\n⏸️ Some steps are still open. Say "continue" and I will pick up where I stopped.`;
       }
 
       const parsed = extractCommands(extractToolCalls(replyOut).clean);
@@ -1770,12 +1785,10 @@ export default function DashboardPage() {
                     onRetry={(t) => void submitText(t)}
                     replyingAt={replyTo?.at ?? null}
                   />
-                  {/* the run bar lives INSIDE the chat, right under the last message */}
-                  {(activeWork || venusRun || codeRun || teamRun) && (
-                    <RunBar work={activeWork ?? null} venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
-                  )}
                 </div>
               </div>
+              {activeWork && <WorkingBar key={`${activeChat.id}:${activeWork.startedAt}`} label={activeWork.label} startedAt={activeWork.startedAt} steps={activeWork.steps} />}
+              <RunBars venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
               <ChatComposer
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
