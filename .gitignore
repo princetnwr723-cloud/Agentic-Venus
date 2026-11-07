@@ -1,8 +1,15 @@
 node_modules
 .next
 out
-.env
-.env.local
 .vercel
 *.log
 .DS_Store
+
+# secrets: never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*service-account*.json
+firebase-adminsdk*.json
+serviceAccount*.json
