@@ -24,3 +24,9 @@ firestore.rules
 scripts/check-protected-paths.mjs
 scripts/tests/protected-paths.test.mjs
 scripts/tests/billing-enforcement.test.mjs
+.claude/**
+CLAUDE.*
+lib/local-relay.ts
+lib/local-relay-core.ts
+app/api/local/**
+app/desktop-login/**
