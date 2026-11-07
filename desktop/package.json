@@ -19,8 +19,13 @@
     "files": ["main.js", "preload.js", "config.json", "lib/**", "renderer/**", "vm-agent/**"],
     "protocols": [{ "name": "AgenticVenus", "schemes": ["agenticvenus"] }],
     "win": { "target": ["nsis"] },
-    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "category": "public.app-category.productivity"
+    },
     "linux": { "target": ["AppImage"], "category": "Utility" },
     "artifactName": "AgenticVenus-${version}-${os}-${arch}.${ext}"
-  }
+  },
+  "author": "AgenticVenus maintainers",
+  "homepage": "https://github.com/princetnwr723-cloud/AgenticVenus"
 }
