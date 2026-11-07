@@ -33,6 +33,14 @@ type UserDoc = {
   pcCredentials?: Record<string, SavedLogin>;
 };
 
+// Inside the desktop app (and only there) the computer key is this PC's own local key, so no E2B key is needed.
+// On the website nothing changes: it keeps using the E2B key the user saved.
+function desktopLocalKey(): string | null {
+  if (typeof window === "undefined") return null;
+  const k = (window as unknown as { venusDesktop?: { localKey?: string | null } }).venusDesktop?.localKey;
+  return typeof k === "string" && k.startsWith("venus-local:") ? k : null;
+}
+
 const isPh = (v: unknown) => typeof v === "string" && v.startsWith("vault:");
 const needsMigration = (d?: UserDoc) =>
   Boolean(d && (
@@ -74,7 +82,7 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
       }
       if (!alive) return;
       setApiKeys(d?.apiKeys ?? {});
-      setE2bKey(d?.e2bKey ?? null);
+      setE2bKey(desktopLocalKey() ?? d?.e2bKey ?? null);
       setPcSandboxId(d?.pcSandboxId ?? null);
       setPcCredentials(d?.pcCredentials ?? {});
       setLoading(false);
@@ -91,7 +99,7 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
   async function saveE2bKey(key: string) {
     if (!user) return;
     const d = await vault({ action: "set", name: "e2b", value: key });
-    setE2bKey(d.placeholder as string);
+    if (!desktopLocalKey()) setE2bKey(d.placeholder as string);
   }
 
   // Not a secret, and the only field the Firestore rules let the browser write on your user document.
