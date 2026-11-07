@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>AgenticVenus computer</title>
+<style>
+  body{font:14px system-ui,sans-serif;margin:0;padding:20px;background:#0f1115;color:#e8e8ea}
+  h1{font-size:16px;margin:0 0 4px} p{color:#a0a3ad;margin:6px 0}
+  .box{background:#171a21;border:1px solid #262a33;border-radius:10px;padding:14px;margin-top:12px}
+  button{background:#fff;color:#111;border:0;border-radius:8px;padding:8px 12px;margin:6px 6px 0 0;cursor:pointer;font-weight:600}
+  button.s{background:#262a33;color:#e8e8ea} button:disabled{opacity:.4;cursor:default}
+  .bad{color:#ff9b9b} .ok{color:#7be3b0}
+</style></head>
+<body>
+<h1>Your AgenticVenus computer</h1>
+<p id="who"></p>
+<div class="box"><div id="status">…</div><div id="problems" class="bad"></div>
+  <div id="buttons"></div></div>
+<p>This is a separate Linux computer that runs on your PC. It cannot see your own files. Plans, limits and payments are
+handled by the AgenticVenus servers, not by this app.</p>
+<script>
+const $=(i)=>document.getElementById(i);
+const B=(label,name,cls)=>{const b=document.createElement('button');b.textContent=label;if(cls)b.className=cls;b.onclick=()=>window.venusPanel.act(name);return b};
+function draw(s){
+  $('who').textContent=s.signedIn?'Signed in.':'Not signed in.';
+  $('status').innerHTML=(s.vm.state==='running'?'<span class="ok">● Running</span>':'● '+s.vm.state)+' '+(s.vm.detail||'');
+  $('problems').innerHTML=[...s.host.problems,...s.host.missing].map(p=>'<div>• '+p.replace(/</g,'&lt;')+'</div>').join('');
+  const b=$('buttons');b.innerHTML='';
+  if(!s.signedIn){b.append(B('Sign in with Google','login'));return}
+  if(s.host.ready&&!s.setUp)b.append(B('Set up my computer','start'));
+  if(s.setUp&&s.vm.state==='stopped')b.append(B('Start computer','start'));
+  if(s.vm.state==='running')b.append(B('Stop computer','stop','s'));
+  if(s.setUp)b.append(B('Reset computer (deletes its disk)','reset','s'));
+  b.append(B('Open AgenticVenus','open','s'),B('Sign out','logout','s'));
+}
+window.venusPanel.state().then(draw);window.venusPanel.onState(draw);
+</script></body></html>
