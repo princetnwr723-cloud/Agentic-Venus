@@ -1,0 +1,28 @@
+name: Protect billing and auth files
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  protected-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reject changes to plans, limits, payments, auth and secrets
+        env:
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The checker and the protected list are taken from the BASE branch, not from the pull request,
+          # so a pull request cannot weaken the rules that judge it.
+          mkdir -p /tmp/guard/scripts /tmp/guard/.github
+          git show "$BASE_SHA:scripts/check-protected-paths.mjs" > /tmp/guard/scripts/check-protected-paths.mjs
+          git show "$BASE_SHA:.github/protected-paths.txt" > /tmp/guard/.github/protected-paths.txt
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" | node /tmp/guard/scripts/check-protected-paths.mjs
