@@ -35,3 +35,10 @@ test("the plans page and the limit popup are maintainer-only too", () => {
   assert.equal(verdict(["components/LimitModal.tsx"], patterns, "CONTRIBUTOR").ok, false);
   assert.equal(verdict(["components/LimitModal.tsx"], patterns, "OWNER").ok, true);
 });
+
+test("Claude Code config can only be changed by maintainers", () => {
+  assert.equal(verdict([".claude/settings.json"], patterns, "CONTRIBUTOR").ok, false);
+  assert.equal(verdict([".claude/commands/x.md"], patterns, "CONTRIBUTOR").ok, false);
+  assert.equal(verdict(["CLAUDE.md"], patterns, "CONTRIBUTOR").ok, false);
+  assert.equal(verdict([".claude/settings.json"], patterns, "OWNER").ok, true);
+});
