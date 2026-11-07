@@ -35,3 +35,10 @@ test("plan state is only written by the server", () => {
     assert.doesNotMatch(src(f), /"billing"/, `${f} must not touch billing documents`);
   }
 });
+
+test("no protected file has been deleted", async () => {
+  const { existsSync } = await import("node:fs");
+  const list = readFileSync(new URL("../../.github/protected-paths.txt", import.meta.url), "utf8");
+  const files = list.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !l.includes("*"));
+  for (const f of files) assert.ok(existsSync(new URL("../../" + f, import.meta.url)), `protected file is missing: ${f}`);
+});
