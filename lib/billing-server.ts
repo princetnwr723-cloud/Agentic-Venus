@@ -46,7 +46,7 @@ export type PlanDoc = {
   updatedAt?: number;
 };
 type Open = { sandboxId: string; since: number; seen: number };
-type FeatDoc = { since?: number; count?: number; recent?: string[] };
+type FeatDoc = { since?: number; count?: number; recent?: string[]; reuse?: Record<string, number> };
 type UsageDoc = { windowStart?: number; tokens?: number; pcSeconds?: number; pcOpen?: Record<string, Open>; feat?: Record<string, FeatDoc> };
 type Norm = { windowStart: number; tokens: number; pcSeconds: number; pcOpen: Record<string, Open> };
 type Ctx = { plan: PlanDef; n: Norm; now: number; patch: Record<string, unknown>; doc: PlanDoc | undefined; dirty: boolean; feat: Record<string, FeatDoc> | undefined };
@@ -214,9 +214,13 @@ const featureLimitOf = (plan: PlanDef, kind: Feature) => (kind === "video" ? pla
 
 /**
  * Counts one video / website for today (a rolling 24 hours that starts with the first one).
- * The same key (a video project id, a code workspace id) is counted only once, so working on the same thing again is free.
+ * The same key (a video project id, a code workspace id) is counted only once, so finishing or fixing the same thing is free,
+ * BUT only for a few repeats: the key is chosen by the browser, so without a cap one id could be reused for unlimited videos.
+ * After FREE_REPEATS repeats of one key inside the window, the next one counts as a new video / website.
  * Throws a 402 limit error when today's allowance is used up.
  */
+const FREE_REPEATS = 3;
+
 export async function consumeFeature(uid: string, kind: Feature, key: string): Promise<void> {
   if (!uid || isUnlimitedTestUser(uid)) return;
   const id = String(key || "default").slice(0, 120);
@@ -230,7 +234,17 @@ export async function consumeFeature(uid: string, kind: Feature, key: string): P
       const since = live ? Number(stored?.since) : now;
       const count = live ? Number(stored?.count) || 0 : 0;
       const recent = live ? stored?.recent ?? [] : [];
-      if (recent.includes(id)) return;
+      const reuse: Record<string, number> = live ? { ...(stored?.reuse ?? {}) } : {};
+
+      // same thing again: free, but only FREE_REPEATS times per window
+      if (recent.includes(id)) {
+        const used = Number(reuse[id]) || 0;
+        if (used < FREE_REPEATS) {
+          t.set(usageRef(uid), { feat: { [kind]: { since, count, recent, reuse: { ...reuse, [id]: used + 1 } } } }, { merge: true });
+          return;
+        }
+      }
+
       const limit = featureLimitOf(plan, kind);
       if (count >= limit) {
         const nx = nextPlan(plan.id);
@@ -239,7 +253,11 @@ export async function consumeFeature(uid: string, kind: Feature, key: string): P
           402
         );
       }
-      t.set(usageRef(uid), { feat: { [kind]: { since, count: count + 1, recent: [...recent, id].slice(-50) } } }, { merge: true });
+      // counts as a new one: it gets a fresh repeat allowance
+      const nextRecent = [...recent.filter((r) => r !== id), id].slice(-50);
+      const nextReuse: Record<string, number> = { [id]: 0 };
+      for (const r of nextRecent) if (r !== id && reuse[r]) nextReuse[r] = reuse[r];
+      t.set(usageRef(uid), { feat: { [kind]: { since, count: count + 1, recent: nextRecent, reuse: nextReuse } } }, { merge: true });
     }),
     undefined
   );
