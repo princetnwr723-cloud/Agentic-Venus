@@ -42,3 +42,12 @@ test("no protected file has been deleted", async () => {
   const files = list.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !l.includes("*"));
   for (const f of files) assert.ok(existsSync(new URL("../../" + f, import.meta.url)), `protected file is missing: ${f}`);
 });
+
+test("local computers go through the server relay, never around it", () => {
+  const e2b = src("lib/e2b-server.ts");
+  assert.match(e2b, /isLocalSandboxId\(sandboxId\)\) return localSandbox/, "connect() must route local ids to the relay");
+  const route = src("app/api/local/route.ts");
+  assert.match(route, /verifyUser\(req\)/, "the relay route must verify the signed-in user");
+  const relay = src("lib/local-relay.ts");
+  assert.match(relay, /d\.uid !== uid/, "a device must belong to the caller");
+});
