@@ -30,9 +30,8 @@ jobs:
           npm install
           npx electron-builder --publish never
         env:
-          # Optional signing (without these the installers are unsigned and the OS shows a warning):
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # unsigned test builds (add real signing later)
+          DEBUG: electron-builder                # more detail in the log if a build fails
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.os }}
