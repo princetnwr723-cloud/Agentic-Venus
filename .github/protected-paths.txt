@@ -1,0 +1,26 @@
+# Files that decide plans, limits, payments, identity and secrets.
+# A pull request from anyone except the repository owners/members that touches one of these is rejected by CI,
+# and CODEOWNERS also requires an owner review. Patterns: "*" = within a folder, "**" = any depth, trailing "/" = whole folder.
+lib/billing-server.ts
+lib/plans.ts
+app/api/billing/**
+app/checkout/**
+components/dashboard/PlansPanel.tsx
+components/LimitModal.tsx
+lib/job-token.ts
+lib/server-auth.ts
+lib/request.ts
+lib/cron-auth.ts
+lib/firebase-admin.ts
+lib/vault.ts
+lib/vault-crypto.ts
+lib/pay-channel.ts
+lib/pay-client.ts
+lib/pay-product.ts
+app/api/vault/**
+app/api/channel-pay/**
+firestore.rules
+.github/**
+scripts/check-protected-paths.mjs
+scripts/tests/protected-paths.test.mjs
+scripts/tests/billing-enforcement.test.mjs
