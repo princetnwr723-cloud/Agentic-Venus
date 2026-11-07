@@ -1,0 +1,37 @@
+// If someone removes a plan/limit check from a route, this test fails (and so does CI).
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const src = (p) => readFileSync(new URL("../../" + p, import.meta.url), "utf8");
+
+const MUST_CALL = {
+  "app/api/chat/route.ts": ["assertTokens", "addTokens"],
+  "app/api/chat/stream/route.ts": ["assertTokens", "addTokens"],
+  "app/api/venus/ai/route.ts": ["assertTokens", "addTokens"],
+  "app/api/venus/studio/route.ts": ["consumeFeature", "addTokens"],
+  "app/api/code/ws/route.ts": ["consumeFeature"],
+  "app/api/runner/route.ts": ["assertPcAllowed", "openPcJob", "settlePcJob"],
+  "lib/pc-start-server.ts": ["assertPcAllowed", "openPcJob"],
+  "lib/pc-tick.ts": ["pcExhausted", "settlePcJob"],
+};
+
+for (const [file, names] of Object.entries(MUST_CALL)) {
+  test(`${file} still enforces the plan`, () => {
+    const code = src(file);
+    for (const n of names) assert.match(code, new RegExp("\\b" + n + "\\s*\\("), `${file} no longer calls ${n}()`);
+  });
+}
+
+test("the browser can never choose its own uid or plan", () => {
+  const req = src("lib/request.ts");
+  assert.match(req, /authFromRequest/, "readBody must verify the user");
+  const billing = src("app/api/billing/checkout/route.ts");
+  assert.match(billing, /authFromRequest\(req\)/, "checkout must use the verified uid");
+});
+
+test("plan state is only written by the server", () => {
+  for (const f of ["lib/chats.ts", "lib/keys-context.tsx", "lib/venus.ts", "lib/team.ts"]) {
+    assert.doesNotMatch(src(f), /"billing"/, `${f} must not touch billing documents`);
+  }
+});
