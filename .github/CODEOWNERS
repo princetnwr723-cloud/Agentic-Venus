@@ -1,0 +1,20 @@
+# Everything needs a maintainer review. Turn on "Require review from Code Owners" in
+# GitHub -> Settings -> Branches -> branch protection for main.
+*                              @princetnwr723-cloud
+
+# Plans, limits, payments, auth, secrets: maintainers only.
+/lib/billing-server.ts         @princetnwr723-cloud
+/lib/plans.ts                  @princetnwr723-cloud
+/app/api/billing/              @princetnwr723-cloud
+/app/checkout/                 @princetnwr723-cloud
+/components/dashboard/PlansPanel.tsx @princetnwr723-cloud
+/components/LimitModal.tsx     @princetnwr723-cloud
+/lib/job-token.ts              @princetnwr723-cloud
+/lib/server-auth.ts            @princetnwr723-cloud
+/lib/request.ts                @princetnwr723-cloud
+/lib/cron-auth.ts              @princetnwr723-cloud
+/lib/firebase-admin.ts         @princetnwr723-cloud
+/lib/vault.ts                  @princetnwr723-cloud
+/lib/vault-crypto.ts           @princetnwr723-cloud
+/firestore.rules               @princetnwr723-cloud
+/.github/                      @princetnwr723-cloud
