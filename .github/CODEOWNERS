@@ -18,3 +18,8 @@
 /lib/vault-crypto.ts           @princetnwr723-cloud
 /firestore.rules               @princetnwr723-cloud
 /.github/                      @princetnwr723-cloud
+/.claude/                     @princetnwr723-cloud
+/CLAUDE.*                    @princetnwr723-cloud
+/lib/local-relay.ts           @princetnwr723-cloud
+/lib/local-relay-core.ts      @princetnwr723-cloud
+/app/api/local/               @princetnwr723-cloud
