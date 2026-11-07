@@ -1,0 +1,26 @@
+{
+  "name": "agenticvenus-desktop",
+  "version": "0.1.0",
+  "description": "AgenticVenus desktop app",
+  "main": "main.js",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --publish never"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "app.agenticvenus.desktop",
+    "productName": "AgenticVenus",
+    "files": ["main.js", "preload.js", "config.json", "lib/**", "renderer/**", "vm-agent/**"],
+    "protocols": [{ "name": "AgenticVenus", "schemes": ["agenticvenus"] }],
+    "win": { "target": ["nsis"] },
+    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
+    "linux": { "target": ["AppImage"], "category": "Utility" },
+    "artifactName": "AgenticVenus-${version}-${os}-${arch}.${ext}"
+  }
+}
