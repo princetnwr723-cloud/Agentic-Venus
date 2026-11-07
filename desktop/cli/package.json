@@ -1,0 +1,10 @@
+{
+  "name": "agenticvenus",
+  "version": "0.1.0",
+  "description": "Installs the AgenticVenus desktop app: npx agenticvenus",
+  "type": "module",
+  "bin": { "agenticvenus": "agenticvenus.mjs" },
+  "license": "AGPL-3.0-only",
+  "engines": { "node": ">=20" },
+  "files": ["agenticvenus.mjs"]
+}
