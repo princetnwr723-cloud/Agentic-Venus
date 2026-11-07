@@ -1,6 +1,8 @@
 // Server-only. One E2B Desktop sandbox per chat.
 import type { Sandbox as SandboxClass } from "@e2b/desktop";
 import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server";
+import { assertDeviceOnline, localSandbox } from "@/lib/local-relay";
+import { deviceFromKey, isLocalKey, isLocalSandboxId, sandboxIdOf } from "@/lib/local-relay-core";
 
 const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -54,6 +56,8 @@ export const GONE_PREFIX = "SANDBOX_GONE";
 
 /** connect() also RESUMES a paused sandbox and pushes the expiry 1h forward. */
 export async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
+  // A computer on the user's own PC (through the desktop app): no E2B key is needed.
+  if (isLocalSandboxId(sandboxId)) return localSandbox(sandboxId) as unknown as DesktopSandbox;
   const { Sandbox } = await loadSdk();
   try {
     return (await Sandbox.connect(sandboxId, { apiKey: cleanKey(apiKey), timeoutMs: SANDBOX_TIMEOUT_MS } as never)) as unknown as DesktopSandbox;
@@ -177,6 +181,11 @@ export async function createSandbox(
   opts?: { provision?: boolean }
 ): Promise<{ sandboxId: string; persistence: PersistenceMode }> {
   const apiKey = cleanKey(apiKeyInput);
+  if (isLocalKey(apiKey)) {
+    const deviceId = deviceFromKey(apiKey);
+    await assertDeviceOnline(deviceId);
+    return { sandboxId: sandboxIdOf(deviceId), persistence: "lifecycle" };
+  }
   if (!apiKey) throw new Error("The E2B API key is empty after trimming — re-save it in Settings.");
 
   const { Sandbox } = await loadSdk();
@@ -206,6 +215,7 @@ export async function createSandbox(
 }
 
 export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Promise<void> {
+  if (isLocalSandboxId(sandboxId)) return; // the desktop app stops an idle local computer itself
   const apiKey = cleanKey(apiKeyInput);
   const { Sandbox } = await loadSdk();
   const S = Sandbox as unknown as {
@@ -228,6 +238,7 @@ export async function pauseSandbox(apiKeyInput: string, sandboxId: string): Prom
 }
 
 export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<void> {
+  if (isLocalSandboxId(sandboxId)) return; // never wipes the user's own disk; "Reset computer" lives in the desktop app
   try {
     const sandbox = await connect(apiKey, sandboxId);
     await (sandbox as unknown as { kill: () => Promise<void> }).kill();
@@ -238,6 +249,7 @@ export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<
 }
 
 export async function getScreenUrl(apiKey: string, sandboxId: string): Promise<string> {
+  if (isLocalSandboxId(sandboxId)) throw new Error("A local computer opens in its own window on your PC (the AgenticVenus desktop app).");
   const sandbox = await connect(apiKey, sandboxId);
   const stream = loose(sandbox).stream;
   let problem = "";
