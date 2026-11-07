@@ -1,10 +1,17 @@
 name: Desktop release
 on:
-  workflow_dispatch:          # lets you start a build with the "Run workflow" button (no tag needed)
+  workflow_dispatch:          # the "Run workflow" button
   push:
-    tags: ["desktop-v*"]
+    branches: [main]
+    paths:                    # any change to the desktop app (or this file) builds the installers by itself
+      - "desktop/**"
+      - ".github/workflows/desktop-release.yml"
+    tags: ["desktop-v*"]      # a tag like desktop-v0.1.0 also makes a public release
 permissions:
   contents: write
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true    # a newer commit stops the older build
 jobs:
   build:
     strategy:
@@ -29,13 +36,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.os }}
+          retention-days: 14
           path: |
             desktop/dist/*.exe
             desktop/dist/*.dmg
             desktop/dist/*.AppImage
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')   # only a tag makes a public release; the button just builds
+    if: startsWith(github.ref, 'refs/tags/')   # only a tag makes a public release; other builds just keep the files as downloads
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
