@@ -35,6 +35,7 @@ import { SUGGEST_PROMPT, splitSuggestions, withNext } from "@/lib/suggest";
 import { looksLikeSkillInstall } from "@/lib/skills-core";
 import { repoFileIntent, repoIntent, type RepoIntent } from "@/lib/repo-intent";
 import { connectIntent, type ConnectIntent } from "@/lib/connect-intent";
+import { SKIP_PREVIEW_RE, vercelNeeded, vercelTokenIntent } from "@/lib/code-kind";
 import type { ToolSpec } from "@/lib/tools/types";
 import { toolPrompt, extractToolCalls } from "@/lib/tools/prompt";
 import {
@@ -156,6 +157,9 @@ export default function DashboardPage() {
   const lastEditRef = useRef<Record<string, { length: EditPolicy["length"]; seconds?: number }>>({});
   const RECENT_VIDEO_MS = 3 * 3600_000;
   const codeBusyRef = useRef<Set<string>>(new Set());
+  // a web app in Python / PHP / Go / Ruby can only be previewed on Vercel: the agent asks for the token FIRST and keeps the request until it arrives
+  const pendingCodeRef = useRef<Record<string, string>>({});
+  const vercelAskedRef = useRef<Record<string, string>>({});
   const teamBusyRef = useRef<Set<string>>(new Set());
   const brains = useRef<Record<string, Brain>>({});
   const toolCache = useRef<Record<string, { sig: string; specs: ToolSpec[] }>>({});
@@ -748,6 +752,16 @@ export default function DashboardPage() {
     if (!e2bKey) return out("Venus Code needs an E2B key. Add it under API keys first.");
     if (!apiKeys[chat.provider]) return out("No API key is saved for this chat's model.");
     if (codeBusyRef.current.has(chat.id)) return out("Venus Code is already working on something in this chat. Wait for it to finish, then ask again.");
+    // Python / PHP / Go / Ruby web apps are previewed on Vercel: ask for the token BEFORE building (once per request)
+    if (!opts.silent) {
+      const lang = vercelNeeded(instruction);
+      const liveChat = chatsRef.current.find((c) => c.id === chat.id) ?? chat;
+      if (lang && !liveChat.connectors?.vercel && vercelAskedRef.current[chat.id] !== instruction) {
+        vercelAskedRef.current[chat.id] = instruction;
+        pendingCodeRef.current[chat.id] = instruction;
+        return out(`🔑 This is a **${lang}** web app. HTML shows an instant preview, but ${lang} has to run on a server, so its preview is a real deployment on **Vercel**. Send me your Vercel token first (create one at https://vercel.com/account/tokens) like this:\n\n\`connect vercel YOUR_TOKEN\`\n\nI will start building as soon as it is connected. Or say **skip** and I build it now without a live preview.`);
+      }
+    }
     codeBusyRef.current.add(chat.id);
     busyChats.current.add(chat.id);
     const showWork = !opts.silent;
@@ -1256,9 +1270,9 @@ export default function DashboardPage() {
   }
 
   // Writes ONE key at a time, so a connector the server added (e.g. the agent's own inbox) is never overwritten.
-  async function saveConnector(kind: string, token: string) {
-    if (!user || !activeChat) return;
-    const chatId = activeChat.id;
+  async function saveConnector(kind: string, token: string, forChatId?: string) {
+    if (!user || !(forChatId || activeChat)) return;
+    const chatId = forChatId ?? (activeChat as Chat).id;
     const ref = doc(db, "users", user.uid, "chats", chatId);
     const name = `conn.${chatId.toLowerCase()}.${kind.toLowerCase().replace(/[^a-z0-9:]+/g, "_")}`;
     const next = { ...(chatsRef.current.find((c) => c.id === chatId)?.connectors ?? {}) };
@@ -1474,7 +1488,7 @@ export default function DashboardPage() {
     const slash = Boolean(video || code || team || deploy || recipe || rIntent);
     const analysis = e2bKey && !slash ? analyzePcMessage(text) : { pureCommand: null, compound: false, stopAfter: false };
     const key = apiKeys[chat.provider];
-    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !cIntent && !key) { setSettingsOpen(true); return; }
+    if (!analysis.pureCommand && !forget && !remember && !deploy && !recipe && !rIntent && !cIntent && !key && !vercelTokenIntent(text, Boolean(pendingCodeRef.current[chat.id]))) { setSettingsOpen(true); return; }
 
     const files = slash ? [] : attach.filter((a) => a.status === "ready");
     // a video attached here is the one Venus Pro edits (or studies for a template) when the owner asks for a video
@@ -1560,6 +1574,26 @@ export default function DashboardPage() {
     if (forget) { await applyMemoryCommand(chat, `forget|${forget[1].trim()}`); return; }
     if (remember) { await applyMemoryCommand(chat, `add|${remember[1].trim()}`); return; }
     if (rIntent) { void runRepoCommand(chat, rIntent); return; } // /clone, /push, "clone github.com/a/b", "push all changes"
+    // the owner pasted the Vercel token (or said skip) after the agent asked for it
+    const waitingVercel = Boolean(pendingCodeRef.current[chat.id]);
+    const vTok = vercelTokenIntent(text, waitingVercel);
+    if (vTok) {
+      setSending(true);
+      try {
+        await saveConnector("vercel", vTok, chat.id);
+        say(chat.id, "✅ Vercel is connected. The token is stored encrypted; you can change it any time under Connectors.");
+        const pend = pendingCodeRef.current[chat.id];
+        if (pend) { delete pendingCodeRef.current[chat.id]; void runCodeFor(chat, pend); }
+      } finally { setSending(false); }
+      return;
+    }
+    if (waitingVercel && SKIP_PREVIEW_RE.test(text)) {
+      const pend = pendingCodeRef.current[chat.id];
+      delete pendingCodeRef.current[chat.id];
+      say(chat.id, "👍 Okay, building it without a live preview. You can connect Vercel later in the Code page (Preview tab).");
+      void runCodeFor(chat, pend);
+      return;
+    }
     let connectHint = "";
     if (cIntent) {
       const done = await runConnectCommand(chat, cIntent);
