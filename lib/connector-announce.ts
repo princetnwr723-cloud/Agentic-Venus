@@ -12,6 +12,7 @@ const CAN: Record<string, string> = {
   "oauth:slack": "read channels, search messages and post in your workspace",
   "oauth:github_oauth": "read your repositories and issues",
   "oauth:notion_oauth": "read and write your Notion pages",
+  "oauth:shopify": "read and manage products, orders, customers, inventory and fulfillments in your Shopify store",
   "oauth:hubspot": "read CRM contacts, companies and deals",
   "oauth:youtube": "upload videos and Shorts to your channel, search YouTube and read your channel numbers",
   "oauth:x": "post on X (text and videos), search recent posts and read your own posts",
@@ -35,6 +36,7 @@ const CAN: Record<string, string> = {
 const TRY: Record<string, string> = {
   "oauth:google": 'Try: "Summarize my unread emails from today" or "Create a Google Sheet called Leads".',
   "oauth:microsoft": 'Try: "What is on my calendar tomorrow?"',
+  "oauth:shopify": 'Try: "Show my last 10 orders" or "List products that are out of stock".',
   "oauth:youtube": 'Try: "Post my latest Venus video to YouTube as unlisted" or "What do my last videos look like in numbers?"',
   "oauth:x": 'Try: "Search X for what people say about <topic> and draft 3 posts".',
   "oauth:meta": 'Try: "Post my latest Venus video as an Instagram Reel and on my Facebook Page".',
