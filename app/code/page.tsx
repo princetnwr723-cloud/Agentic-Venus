@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { doc, onSnapshot } from "firebase/firestore";
+import { FieldPath, doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { ArrowLeft, Download, File as FileIcon, Folder, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Square, Trash2, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Markdown from "@/components/Markdown";
@@ -16,6 +16,7 @@ import {
   watchCodeProject, watchCodeProjects, type CodeProject,
 } from "@/lib/code-store";
 import { wsCall, type CodeEnv } from "@/lib/code-agent";
+import type { ProjectKind } from "@/lib/code-kind";
 
 const fmtTool = (t: string): [string, string] => {
   if (t.startsWith("$ ")) return ["Bash", t.slice(2)];
@@ -64,6 +65,12 @@ export default function CodePage() {
   const [device, setDevice] = useState<"desktop" | "tablet" | "mobile">("desktop");
   const [mode, setMode] = useState<"static" | "live">("static");
   const [live, setLive] = useState<Live>({ state: "idle", url: null, log: "" });
+  // the kind of project (HTML, Node, Python, PHP, Java ...) decides how it can be previewed; Python / PHP / Go / Ruby web apps need Vercel
+  const [kind, setKind] = useState<ProjectKind | null>(null);
+  const [vInput, setVInput] = useState("");
+  const [vBusy, setVBusy] = useState<"saving" | "deploying" | null>(null);
+  const [vMsg, setVMsg] = useState("");
+  const [vOut, setVOut] = useState<{ url: string; state: string; note?: string } | null>(null);
   const [zipUrl, setZipUrl] = useState("");
   const [err, setErr] = useState("");
   const [full, setFull] = useState(false);
@@ -130,7 +137,7 @@ export default function CodePage() {
 
   useEffect(() => {
     if (!user || !wsId) return;
-    setProj(null); setTree([]); setFile(null); setChecks([]); setPage(null); setEntry(""); setZipUrl(""); setRepoOut(null);
+    setProj(null); setTree([]); setFile(null); setChecks([]); setPage(null); setEntry(""); setZipUrl(""); setRepoOut(null); setKind(null); setVOut(null); setVMsg("");
     setLive({ state: "idle", url: null, log: "" });
     return watchCodeProject(user.uid, wsId, setProj);
   }, [user, wsId]);
@@ -156,6 +163,38 @@ export default function CodePage() {
 
   async function refreshPreview(en = entry) {
     try { setPage(await pv("html", { entry: en || undefined })); setErr(""); } catch (x) { setErr(x instanceof Error ? x.message : "Preview failed."); }
+    try { const d = await pv("detect"); if (d?.kind) setKind(d.kind as ProjectKind); } catch { /* the instant preview keeps working */ }
+  }
+
+  const vToken = (chat?.connectors as Record<string, string> | undefined)?.vercel ?? "";
+  async function authHeaders() { return { "Content-Type": "application/json", Authorization: "Bearer " + (await user!.getIdToken()) }; }
+
+  // Python / PHP / Go / Ruby previews are real deployments on Vercel: the token is asked for FIRST
+  async function saveVercel() {
+    if (!user || !chatId || !vInput.trim()) return;
+    setVBusy("saving"); setVMsg("");
+    try {
+      const name = `conn.${chatId.toLowerCase()}.vercel`;
+      const res = await fetch("/api/vault", { method: "POST", headers: await authHeaders(), body: JSON.stringify({ action: "set", name, value: vInput.trim() }) });
+      const r = await res.json().catch(() => ({}));
+      if (!res.ok || r.error) throw new Error(r.error || "Could not save the token.");
+      await updateDoc(doc(db, "users", user.uid, "chats", chatId), new FieldPath("connectors", "vercel"), r.placeholder as string);
+      setVInput(""); setVMsg("✅ Vercel is connected. Now deploy the preview.");
+    } catch (x) { setVMsg("⚠️ " + (x instanceof Error ? x.message : "Could not save the token.")); }
+    finally { setVBusy(null); }
+  }
+  async function deployPreview() {
+    if (!user || !e2bKey || !sandboxId || !wsId || !vToken) return;
+    setVBusy("deploying"); setVMsg("Deploying to Vercel… this takes up to a minute."); 
+    try {
+      const res = await fetch("/api/deploy", { method: "POST", headers: await authHeaders(), body: JSON.stringify({ e2bKey, sandboxId, ws: wsId, vercelToken: vToken }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d?.error || "Deploy failed.");
+      touch(sandboxId, e2bKey);
+      setVOut({ url: String(d.url), state: String(d.state || ""), note: d.warning ? String(d.warning) : undefined });
+      setVMsg(d.state && d.state !== "READY" ? `Vercel is still building (${d.state}). Press Redeploy / reload in a minute.` : "");
+    } catch (x) { setVMsg("⚠️ " + (x instanceof Error ? x.message : "Deploy failed.")); }
+    finally { setVBusy(null); }
   }
   async function refreshSide() {
     const e = env();
@@ -326,6 +365,43 @@ export default function CodePage() {
   const term = log.filter((e) => e.kind === "term");
   const devW = device === "mobile" ? 390 : device === "tablet" ? 768 : undefined;
   const frameCls = `mx-auto rounded-md border border-line bg-white ${full ? "h-[calc(100vh-24px)]" : "h-full min-h-[420px]"}`;
+  const vercelPanel = kind && (kind.mode === "vercel" || kind.mode === "run") ? (
+    kind.mode === "run" ? (
+      <div className="mx-auto mt-10 max-w-sm space-y-3 text-center text-xs text-muted">
+        <p className="text-sm text-ink">{kind.label} project</p>
+        <p>{kind.note}</p>
+        <button onClick={() => setTab("terminal")} className="rounded-md border border-line px-3 py-1.5 text-ink hover:bg-panel2">Open the Terminal tab</button>
+      </div>
+    ) : vOut?.url ? (
+      <div className="flex h-full flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted">{kind.label} on Vercel:</span>
+          <a href={vOut.url} target="_blank" rel="noreferrer" className="truncate text-gold underline">{vOut.url}</a>
+          <button onClick={deployPreview} disabled={vBusy !== null} className="ml-auto rounded border border-line px-2 py-0.5 text-ink hover:bg-panel2 disabled:opacity-50">{vBusy === "deploying" ? "Deploying…" : "Redeploy"}</button>
+        </div>
+        {vOut.note && <p className="text-[11px] text-amber-300">{vOut.note}</p>}
+        {vMsg && <p className="text-[11px] text-muted">{vMsg}</p>}
+        <iframe key={vOut.url} src={vOut.url} sandbox="allow-scripts allow-forms allow-popups allow-same-origin" title="Vercel preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className={frameCls} />
+      </div>
+    ) : (
+      <div className="mx-auto mt-8 max-w-sm space-y-3 text-center text-xs text-muted">
+        <p className="text-sm text-ink">{kind.label} project</p>
+        <p>The instant preview is only for HTML. A {kind.label} app has to run on a server, so its preview is a real deployment on Vercel.</p>
+        {!vToken ? (
+          <>
+            <p className="text-ink">First connect Vercel: paste your token (<a href="https://vercel.com/account/tokens" target="_blank" rel="noreferrer" className="text-gold underline">create one here</a>).</p>
+            <input type="password" value={vInput} onChange={(e) => setVInput(e.target.value)} placeholder="Vercel token" className="w-full rounded-md border border-line bg-bg px-2 py-1.5 text-ink outline-none" />
+            <button onClick={saveVercel} disabled={vBusy !== null || !vInput.trim()} className="rounded-md bg-white px-3 py-1.5 font-medium text-bg disabled:opacity-50">{vBusy === "saving" ? "Saving…" : "Connect Vercel"}</button>
+          </>
+        ) : (
+          <button onClick={deployPreview} disabled={vBusy !== null} className="rounded-md bg-white px-3 py-1.5 font-medium text-bg disabled:opacity-50">{vBusy === "deploying" ? "Deploying…" : "Deploy the preview to Vercel"}</button>
+        )}
+        {vMsg && <p>{vMsg}</p>}
+        <p className="text-[11px] text-faint">{kind.note}</p>
+      </div>
+    )
+  ) : null;
+
   const inp = "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold focus:outline-none";
 
   return (
@@ -431,7 +507,7 @@ export default function CodePage() {
                 {sandboxId && tab === "preview" && (
                   <div className="flex h-full flex-col">
                     <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs">
-                      <span className="flex overflow-hidden rounded border border-line">
+                      <span className={`flex overflow-hidden rounded border border-line${vercelPanel ? " hidden" : ""}`}>
                         {(["static", "live"] as const).map((m) => <button key={m} onClick={() => setMode(m)} className={`px-2 py-0.5 ${mode === m ? "bg-panel2 text-ink" : "text-muted"}`}>{m === "static" ? "Instant" : "Live server"}</button>)}
                       </span>
                       {mode === "static" && page && page.files.length > 1 && <select value={entry || page.entry} onChange={(e) => { setEntry(e.target.value); refreshPreview(e.target.value); }} className="rounded border border-line bg-bg px-1.5 py-0.5 text-ink">{page.files.map((f) => <option key={f}>{f}</option>)}</select>}
@@ -446,7 +522,7 @@ export default function CodePage() {
                     </div>
                     <div className={full ? "fixed inset-0 z-50 overflow-auto bg-[#0b0c10] p-3" : "relative min-h-0 flex-1 overflow-auto bg-[#0b0c10] p-2"}>
                       <button onClick={() => setFull((v) => !v)} title={full ? "Exit fullscreen" : "Fullscreen preview"} className="absolute right-3 top-3 z-10 rounded-md bg-black/60 p-1.5 text-white hover:bg-black/80">{full ? <X size={15} /> : <Maximize2 size={15} />}</button>
-                      {mode === "static" ? (
+                      {vercelPanel ? vercelPanel : mode === "static" ? (
                         page?.html ? (
                           <iframe ref={frameRef} key={page.entry + ":" + hash(page.html)} sandbox="allow-scripts allow-forms allow-popups" srcDoc={page.html} title="Preview" style={{ width: devW ?? "100%", maxWidth: "100%" }} className={frameCls} />
                         ) : (
