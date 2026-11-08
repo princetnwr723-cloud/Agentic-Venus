@@ -23,3 +23,5 @@
 /lib/local-relay.ts           @princetnwr723-cloud
 /lib/local-relay-core.ts      @princetnwr723-cloud
 /app/api/local/               @princetnwr723-cloud
+/install.sh                   @princetnwr723-cloud
+/install.ps1                  @princetnwr723-cloud
