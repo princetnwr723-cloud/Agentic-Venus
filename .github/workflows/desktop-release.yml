@@ -1,12 +1,13 @@
 name: Desktop release
 on:
-  workflow_dispatch:          # the "Run workflow" button
+  workflow_dispatch:          # the "Run workflow" button (builds only, nothing is published)
   push:
     branches: [main]
     paths:                    # any change to the desktop app (or this file) builds the installers by itself
       - "desktop/**"
       - ".github/workflows/desktop-release.yml"
-    tags: ["desktop-v*"]      # a tag like desktop-v0.1.0 also makes a public release
+  release:
+    types: [published]        # you publish a release (any name, any tag) and the installers are attached to it by themselves
 permissions:
   contents: write
 concurrency:
@@ -40,9 +41,9 @@ jobs:
             desktop/dist/*.exe
             desktop/dist/*.dmg
             desktop/dist/*.AppImage
-  release:
+  attach:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')   # only a tag makes a public release; other builds just keep the files as downloads
+    if: github.event_name == 'release'          # only when a release was published
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -51,6 +52,8 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd assets && sha256sum AgenticVenus-* > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: assets/*
+      - name: Attach the installers to the release you published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" assets/* --clobber --repo "${{ github.repository }}"
