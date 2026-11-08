@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { vaultPut } from "@/lib/vault";
-import { getOAuthProvider } from "@/lib/tools/oauth-catalog";
+import { getOAuthProvider, withShop } from "@/lib/tools/oauth-catalog";
 import { identifyAccount } from "@/lib/tools/oauth-identify";
 import { extendToken, pkceVerifier, tokenRequest } from "@/lib/tools/oauth-token";
 import { syncConnectorAnnouncements } from "@/lib/connector-announce";
@@ -27,7 +27,7 @@ export async function GET(req: Request) {
     const expected = createHmac("sha256", secret()).update(payload).digest();
     const actual = Buffer.from(sig, "base64url");
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return fail(req, "OAuth state signature is invalid.");
-    const d = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { uid: string; chatId: string; provider: string; h?: string; exp: number; nonce: string };
+    const d = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { uid: string; chatId: string; provider: string; h?: string; s?: string; exp: number; nonce: string };
     if (!d.uid || !d.chatId || !d.nonce || !Number.isFinite(d.exp) || d.exp < Date.now()) return fail(req, "OAuth state expired. Start connection again.");
     const provider = getOAuthProvider(d.provider);
     if (!provider) return fail(req, "Unknown OAuth provider.");
@@ -39,9 +39,29 @@ export async function GET(req: Request) {
     const clientId = process.env[provider.clientIdEnv], clientSecret = process.env[provider.clientSecretEnv];
     if (!clientId || !clientSecret) return fail(req, `Server setup missing ${provider.clientIdEnv} or ${provider.clientSecretEnv}.`);
     const redirectUri = process.env.OAUTH_REDIRECT_URI || new URL("/api/connectors/oauth/callback", req.url).toString();
+
+    // Shopify: the store address comes from our own signed state; Shopify's own signature on the callback must match too.
+    const shop = provider.perShop ? String(d.s || "") : "";
+    if (provider.perShop) {
+      if (!shop) return fail(req, "Shopify store address is missing. Start the connection again.");
+      if (u.searchParams.get("shop")?.toLowerCase() !== shop) return fail(req, "Shopify answered for a different store than the one you asked for. Nothing was saved.");
+      const given = u.searchParams.get("hmac") || "";
+      const msg = Array.from(u.searchParams.entries()).filter(([k]) => k !== "hmac").sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${k}=${v}`).join("&");
+      const want = createHmac("sha256", clientSecret).update(msg).digest();
+      const got = /^[0-9a-f]{64}$/i.test(given) ? Buffer.from(given, "hex") : Buffer.alloc(0);
+      if (got.length !== want.length || !timingSafeEqual(got, want)) return fail(req, "Shopify's signature on this sign-in is invalid. Check SHOPIFY_CLIENT_SECRET in Vercel.");
+    }
+    const tokenUrl = withShop(provider.tokenUrl, shop);
     const basicAuth = ["notion_oauth", "figma"].includes(provider.id); // these two want a JSON body with Basic auth
     let response: Response;
-    if (basicAuth) {
+    if (provider.perShop) {
+      response = await fetch(tokenUrl, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "AgenticVenus/1.0" },
+        body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } else if (basicAuth) {
       response = await fetch(provider.tokenUrl, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}` },
@@ -54,9 +74,9 @@ export async function GET(req: Request) {
         grant_type: "authorization_code", code, redirect_uri: redirectUri,
         ...(provider.pkce ? { code_verifier: pkceVerifier(d.nonce) } : {}),
       });
-      response = await fetch(provider.tokenUrl, { method: "POST", headers: q.headers, body: q.body, signal: AbortSignal.timeout(15000) });
+      response = await fetch(tokenUrl, { method: "POST", headers: q.headers, body: q.body, signal: AbortSignal.timeout(15000) });
     }
-    const t = (await response.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; expires_in?: number };
+    const t = (await response.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; expires_in?: number; scope?: string };
     if (!response.ok || !t.access_token) return fail(req, `Token exchange failed for ${provider.label}. Check the app credentials, redirect URI and provider-specific OAuth requirements.`);
 
     // Facebook and Threads give a short login (about an hour). Swap it for the long one (about 60 days).
@@ -69,7 +89,7 @@ export async function GET(req: Request) {
     }
 
     // Which account did the person really sign in with? A different one than asked for is never saved.
-    const account = await identifyAccount(provider.id, t.access_token);
+    const account = await identifyAccount(provider.id, t.access_token, shop || undefined);
     if (d.h && account && account.toLowerCase() !== d.h.toLowerCase() && (provider.id === "google" || provider.id === "microsoft" || provider.identity === "email")) {
       return fail(req, `You signed in as ${account}, but you asked for ${d.h}. Nothing was saved. Try again and pick the right account.`);
     }
@@ -78,11 +98,11 @@ export async function GET(req: Request) {
     const chat = await chatRef.get();
     if (!chat.exists) return fail(req, "Target chat no longer exists.");
 
-    const stored = JSON.stringify({ access: t.access_token, refresh: t.refresh_token, exp: t.expires_in ? Date.now() + Number(t.expires_in) * 1000 : undefined });
+    const stored = JSON.stringify({ access: t.access_token, refresh: t.refresh_token, exp: t.expires_in ? Date.now() + Number(t.expires_in) * 1000 : undefined, ...(shop ? { shop } : {}) });
     const placeholder = await vaultPut(d.uid, `conn.${d.chatId.toLowerCase()}.oauth:${provider.id}`, stored);
     await chatRef.update({
       [`connectors.oauth:${provider.id}`]: placeholder,
-      [`connectorStatus.${provider.id}`]: { status: "connected", connectedAt: Date.now(), scopes: provider.scopes, refreshable: Boolean(t.refresh_token) || Boolean(provider.exchange), account },
+      [`connectorStatus.${provider.id}`]: { status: "connected", connectedAt: Date.now(), scopes: provider.perShop && t.scope ? t.scope.split(",").map((x) => x.trim()).filter(Boolean) : provider.scopes, refreshable: Boolean(t.refresh_token) || Boolean(provider.exchange), account },
     });
     await syncConnectorAnnouncements(d.uid, d.chatId, { added: [`oauth:${provider.id}`] }).catch(() => {}); // posts "Agent updated" in the chat
 
