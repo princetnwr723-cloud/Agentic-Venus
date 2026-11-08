@@ -23,6 +23,10 @@ export type VenusProject = {
   templateJson?: string; templateName?: string;
   /** Edit mode: how the owner wants the video edited (length, creative freedom, motion graphics). */
   editPolicy?: EditPolicy;
+  /** The length contract: the owner asked for about `seconds`; the finished video must stay inside [minSeconds, maxSeconds] (a range such as "15-20 minutes" sets both). */
+  minSeconds?: number; maxSeconds?: number;
+  /** The brief is a documentary / explainer: it gets the documentary craft (fact sheet, word budgets, real pictures, a voice-over). */
+  docu?: boolean;
 };
 
 const CHUNK_BYTES = 600_000;
