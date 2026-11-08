@@ -8,7 +8,7 @@ import { templateContext, type VideoTemplate } from "@/lib/venus-clone";
 import { sanitizeStoryboard, sceneLayout, summarizeScene, totalFramesOf, type Scene, type Storyboard } from "@/lib/venus-schema";
 import { addMotionGraphics, graphicsMissing, graphicsNeeds, graphicsReport } from "@/lib/venus-graphics";
 import { PART_FRAMES, parseUpload } from "@/lib/venus-jobs";
-import { findSeconds } from "@/lib/dashboard/helpers";
+import { chapterBudgets, countWords, findLengthPlan, fitSecondsToWords, isDocumentary, isHindiText, lengthReport, narrationOf, totalSecondsOf, trimSilent, wordBudget } from "@/lib/venus-length";
 import { detectScript, enforceScript, scriptSeconds, splitScript, voiceModeOf, wordsOf, type ScriptInfo } from "@/lib/venus-script";
 import type { ProviderId } from "@/lib/providers";
 
@@ -172,14 +172,23 @@ export async function signedUrl(env: PipelineEnv, path: string, download?: strin
   return data.url as string;
 }
 
+// The planning calls (the plan, the script, the fitting of the narration) let the model THINK first: a better plan makes the whole video better.
+// When the model or the provider cannot do that, the same request is asked once more in the normal way, so nothing ever fails because of it.
+const THINKING_KINDS = new Set(["storyboard", "outline", "narration-fit", "edit-plan", "edit-notes", "template-extract"]);
+
 async function aiCall(env: PipelineEnv, p: VenusProject, body: Record<string, unknown>) {
   const apiKey = env.apiKeys[p.provider];
   if (!apiKey) throw new Error("No API key saved for the selected model's provider.");
-  const res = await fetch("/api/venus/ai", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: p.provider, apiKey, model: p.model, ...body }),
-  });
-  const data = await readJson(res);
+  const send = async (power: boolean) => {
+    const res = await fetch("/api/venus/ai", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: p.provider, apiKey, model: p.model, ...(power ? { power: true } : {}), ...body }),
+    });
+    return { res, data: await readJson(res) };
+  };
+  const thinks = THINKING_KINDS.has(String(body.kind));
+  let { res, data } = await send(thinks);
+  if (thinks && !res.ok && !data.storyboard && !/limit|402|plan|quota|key/i.test(String(data?.error ?? ""))) ({ res, data } = await send(false));
   if (!res.ok && !data.storyboard) throw new Error(data?.error || "AI request failed.");
   return data;
 }
@@ -471,7 +480,10 @@ async function ttsPatch(run: Run, sb: Storyboard, index: number): Promise<Partia
     t = await studioCall(run.env, "tts", { sandboxId: run.sid, projectId: run.p.id, index, text: narration, voice: voiceArg, chatId: run.p.chatId, localWait: k < 30 });
   }
   const s = sb.scenes[index];
-  return { voice: t.file, seconds: t.seconds ? Math.min(30, Math.max(Number(s.seconds), Math.round((t.seconds + 0.6) * 10) / 10)) : s.seconds };
+  // the scene lasts as long as it is SPOKEN (plus a breath). It may stay a little longer (up to 2.5 s) for the picture to breathe, never more:
+  // a scene that the model planned for 12 s but that is spoken in 5 s used to keep 7 s of silence, which is what made videos drag and miss their length.
+  const spoken = t.seconds ? Math.round((t.seconds + 0.5) * 10) / 10 : 0;
+  return { voice: t.file, seconds: spoken ? Math.min(40, Math.max(2.5, spoken, Math.min(Number(s.seconds) || spoken, spoken + 2.5))) : s.seconds };
 }
 
 /** Voice-over for one scene, spoken by the user's voice system (Settings -> Voice). */
@@ -533,15 +545,18 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       // a SCRIPT from the owner (after "script:", in quotes, or a long pasted text) is used word for word as the voice-over
       const scriptInfo: ScriptInfo | null = run.p.mode === "edit" ? null : detectScript(run.p.brief, run.p.script);
       if (run.p.mode !== "edit") {
-        const asked = findSeconds(scriptInfo ? scriptInfo.instructions : run.p.brief);
+        const plan = findLengthPlan(scriptInfo ? scriptInfo.instructions : run.p.brief);
+        const asked = plan ? plan.target : null;
         const fmt = (n: number) => (n >= 90 ? Math.round((n / 60) * 10) / 10 + " minutes" : n + " seconds");
         let len = run.p.seconds;
+        // the length contract: a range ("15-20 minutes") gives the target in the middle and a hard ceiling at the upper end
+        if (plan && !scriptInfo) await upd(run, { minSeconds: plan.min, maxSeconds: plan.max });
         if (scriptInfo) {
           len = Math.min(3600, Math.max(15, Math.max(scriptSeconds(scriptInfo.script), asked ?? 0)));
           say(`📜 Script mode: your script (${wordsOf(scriptInfo.script).length} words) becomes the voice-over, word for word. The video will be about ${fmt(len)}.`);
         } else if (asked && Math.abs(asked - run.p.seconds) >= 5) {
           len = Math.min(3600, Math.max(15, asked));
-          say(`📏 You asked for ${fmt(len)}: the video will be that long (the form said ${run.p.seconds}s).`);
+          say(plan?.range ? `📏 You asked for ${fmt(plan.min)} to ${fmt(plan.max)}: the video will be about ${fmt(len)} and never longer than ${fmt(plan.max)}.` : `📏 You asked for ${fmt(len)}: the video will be that long (the form said ${run.p.seconds}s).`);
         }
         if (len !== run.p.seconds) await upd(run, { seconds: len });
       }
@@ -553,6 +568,11 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       const voiceArg: boolean | "auto" = voiceMode === "auto" ? "auto" : voiceOn;
       if (vs?.ready) say(`🔊 Voice-over voice: ${vs.provider === "studio-free" ? "free voice of the studio computer" : vs.provider}${vs.note ? ` — ${String(vs.note).slice(0, 110)}` : ""}`);
       if (voiceMode !== "auto" && voiceOn !== run.p.voice) await upd(run, { voice: voiceOn });
+      // documentary craft: a fact sheet, a word budget per chapter, real pictures and a voice-over (decided from the brief, in any language)
+      const docu = run.p.mode !== "edit" && (run.p.docu === true || isDocumentary(run.p.brief));
+      const hindi = isHindiText(run.p.brief) || /\bhindi\b|हिंदी|हिन्दी/i.test(run.p.brief);
+      if (docu && run.p.docu !== true) await upd(run, { docu: true });
+      if (docu) say("🎞️ Documentary mode: a fact sheet first, then the script with a word budget, real pictures and charts" + (voiceArg !== false ? ", and a voice-over." : "."));
       const style = STYLES[Math.floor(Math.random() * STYLES.length)];
       const twist = TWISTS[Math.floor(Math.random() * TWISTS.length)];
       const agentSid = run.p.mode === "edit" ? null : await agentComputer(run);
@@ -667,12 +687,12 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         await upd(run, { storyboardJson: JSON.stringify(clean), title: clean.title || run.p.title, sourceInfo: ing.source, seconds: len });
         const nClips = clean.scenes.filter((x) => x.type === "clip").length;
         say(`📋 Edit planned: ${nClips} clips + ${clean.scenes.length - nClips} designed scenes, about ${len}s.`);
-      } else if (run.p.seconds > 120) {
+      } else if (run.p.seconds > 90) {
         // ---------- a long video (up to one hour): chapter plan first, then every chapter is written on its own ----------
         say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
         hooks.progress({ label: "Chapter plan", value: null });
         const ctx = memory + (tpl ? "" : aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
-        const ob = { kind: "outline", brief: scriptInfo ? `${scriptInfo.instructions}\nTopic of the script: ${scriptInfo.script.slice(0, 600)}` : run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg !== false, context: ctx, template: tplNote || undefined };
+        const ob = { kind: "outline", brief: scriptInfo ? `${scriptInfo.instructions}\nTopic of the script: ${scriptInfo.script.slice(0, 600)}` : run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg !== false, context: ctx, template: tplNote || undefined, docu };
         let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
         if (!o.chapters) { say("First attempt failed — trying again…"); o = await aiCall(env, run.p, ob); }
         if (!o.chapters) throw new Error(o.error || "Could not plan the chapters.");
@@ -680,6 +700,11 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         // a script is cut into its own parts (the chapters of the video are the parts of the script)
         if (scriptInfo) chapters = splitScript(scriptInfo.script, 130).map((t, k) => ({ title: `Part ${k + 1}`, summary: t, seconds: Math.min(90, Math.max(20, Math.round(scriptSeconds(t) - 4 + 2))) }));
         const styleLock = o.style as Record<string, unknown>;
+        const factSheet = typeof o.facts === "string" ? (o.facts as string) : "";
+        if (docu && factSheet) say(`📚 Fact sheet ready (${factSheet.split("\n").length} checked facts): the script may only use these.`);
+        // the chapters add up EXACTLY to the length that was asked (the model's own numbers only decide how the time is shared)
+        if (!scriptInfo) { const fixed = chapterBudgets(run.p.seconds, chapters.map((c) => c.seconds), 20); chapters = chapters.map((c, k) => ({ ...c, seconds: Math.min(150, fixed[k]) })); }
+        const speaks = voiceArg !== false;
         const parts: Scene[][] = chapters.map(() => []);
         let done = 0;
         const queue = chapters.map((_, k) => k);
@@ -691,6 +716,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
             const pb = {
               kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: ch.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg, scriptText: scriptInfo ? ch.summary : undefined, captions: run.p.captions,
               design: "ai", context: memory + assetsNote, template: tplNote || undefined, part: { index: k, total: chapters.length, title: ch.title, summary: ch.summary }, style: styleLock,
+              docu, hindi, facts: factSheet || undefined, ...(speaks && docu && !scriptInfo ? { words: wordBudget(ch.seconds, hindi) } : {}),
             };
             let r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
             if (!r.storyboard) r = await aiCall(env, run.p, pb).catch((e) => ({ error: (e as Error).message }));
@@ -702,11 +728,35 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
           }
         };
         await Promise.all([worker(), worker(), worker()]);
+        // the narration of every chapter is measured against its word budget: too long (the video would run over) or too short (it would end early)
+        // is rewritten by the model, so the video ends where it was asked to end
+        if (speaks && docu && !scriptInfo) {
+          let fixedN = 0;
+          const fq = chapters.map((_, k) => k);
+          const fw = async () => {
+            while (fq.length) {
+              const k = fq.shift() as number;
+              check(run);
+              const idx = parts[k].map((x, i) => (narrationOf(x) ? i : -1)).filter((i) => i >= 0);
+              const have = idx.reduce((a, i) => a + countWords(narrationOf(parts[k][i])), 0);
+              const want = wordBudget(chapters[k].seconds, hindi);
+              if (!idx.length || (have <= want * 1.15 && have >= want * 0.8)) continue;
+              const r = await aiCall(env, run.p, { kind: "narration-fit", narrations: idx.map((i) => narrationOf(parts[k][i])), target: want, mode: have > want ? "condense" : "expand", hindi, topic: run.p.brief, facts: factSheet || undefined }).catch(() => null);
+              if (r?.narrations && (r.narrations as string[]).length === idx.length) {
+                idx.forEach((i, j) => { parts[k][i] = { ...parts[k][i], narration: (r.narrations as string[])[j] } as Scene; });
+                fixedN++;
+              }
+            }
+          };
+          hooks.progress({ label: "Fitting the script to the length", value: null });
+          await Promise.all([fw(), fw(), fw()]);
+          if (fixedN) say(`✂️ ${fixedN} chapter(s) were re-written to fit their time, so the video ends at the length you asked for.`);
+        }
         const all = parts.flat();
         const total = chapters.reduce((a, c) => a + c.seconds, 0);
         const sbNew = sanitizeStoryboard({ ...styleLock, title: o.title, scenes: all }, { aspect: run.p.aspect, theme: run.p.theme, captions: run.p.captions, maxSeconds: Math.max(run.p.seconds, total) * 1.05, maxScenes: 450 });
         sbNew.seed = rndSeed();
-        if (!scriptInfo) { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
+        if (!scriptInfo) { const stretched = speaks ? fitSecondsToWords(sbNew, hindi) : stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""}` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         const finalSb = await applySound(run, sbNew, voiceMode, scriptInfo, canVoice, say);
@@ -725,13 +775,14 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const body = {
           kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
           voice: voiceArg, scriptText: scriptInfo?.script, captions: run.p.captions, design: "ai", context, template: tplNote || undefined,
+          docu, hindi, ...(voiceArg !== false && docu && !scriptInfo ? { words: wordBudget(Math.min(90, run.p.seconds), hindi) } : {}),
         };
         let r = await aiCall(env, run.p, body).catch((e) => ({ error: (e as Error).message }));
         if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
         if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
         const sbNew = r.storyboard as Storyboard;
         sbNew.seed = rndSeed();
-        if (!scriptInfo) { const stretched = stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
+        if (!scriptInfo) { const stretched = voiceArg !== false && sbNew.scenes.some((x) => narrationOf(x)) ? fitSecondsToWords(sbNew, hindi) : stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
         const finalSb = await applySound(run, sbNew, voiceMode, scriptInfo, canVoice, say);
@@ -826,10 +877,36 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
             }
           };
           await Promise.all([worker(), worker(), worker()]);
+          // a voice-over that is missing in some scenes is NOT accepted (a silent documentary is a failed documentary):
+          // the scenes without a voice are recorded again, three rounds, a little slower each time
+          for (let round = 1; round <= 3 && patches.size < idxs.length; round++) {
+            const left = idxs.filter((i) => !patches.has(i));
+            say(`🔁 ${left.length} scene(s) have no voice yet: recording them again (round ${round}/3)…`);
+            await sleep(2500 * round);
+            for (const i of left) {
+              check(run);
+              try { const pt = await ttsPatch(run, sb, i); if (pt) patches.set(i, pt); }
+              catch (e) { if (String((e as Error).message) === "Stopped.") throw e; }
+              hooks.progress({ label: `Voice-over ${patches.size}/${idxs.length}`, value: patches.size / idxs.length });
+            }
+          }
           sb = { ...sb, scenes: sb.scenes.map((x, i) => (patches.has(i) ? ({ ...x, ...patches.get(i) } as Scene) : x)) };
-          await upd(run, { storyboardJson: JSON.stringify(sb) });
+          await upd(run, { storyboardJson: JSON.stringify(sb) }); // what is recorded is kept: a retry only records the missing scenes
+          if (patches.size < idxs.length) {
+            throw new Error(`The voice-over could not be recorded for ${idxs.length - patches.size} of ${idxs.length} scenes, so the video was not finished without a voice. Check Settings → Voice (a provider key, or the local voice model) and run it again: only the missing scenes are recorded.`);
+          }
           say(`🎙️ Voice-over ready (${patches.size}/${idxs.length} scenes). Video length ≈ ${Math.round(totalFramesOf(sb) / 30)}s.`);
         }
+      }
+      if (run.p.mode !== "edit") {
+        // the length contract: the video must end inside what was asked; only silent parts are ever trimmed (never the spoken words)
+        const fmtT = (n: number) => `${Math.floor(n / 60)}:${String(Math.round(n % 60)).padStart(2, "0")}`;
+        if (run.p.maxSeconds && totalSecondsOf(sb) > run.p.maxSeconds) {
+          sb = trimSilent(sb, run.p.maxSeconds);
+          await upd(run, { storyboardJson: JSON.stringify(sb) });
+        }
+        const rep = lengthReport(sb, { target: run.p.seconds, min: run.p.minSeconds, max: run.p.maxSeconds });
+        say(rep.status === "ok" ? `📏 Length check passed: ${fmtT(rep.seconds)} (asked about ${fmtT(run.p.seconds)}).` : rep.status === "long" ? `⚠️ The video is ${fmtT(rep.seconds)}, a little over the ${fmtT(run.p.maxSeconds ?? run.p.seconds)} you asked for: the spoken words were kept, ask for a shorter cut to condense them.` : `⚠️ The video is ${fmtT(rep.seconds)}, shorter than the ${fmtT(run.p.minSeconds ?? run.p.seconds)} you asked for: ask for a longer cut to add depth.`);
       }
       const musicOn = (run.p.mode === "edit" ? run.p.music === true : run.p.music !== false) && sb.sound?.music !== false;
       if (musicOn && !sb.music) {
@@ -863,38 +940,49 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       let sb = parseSb(run.p)!;
       const layout = sceneLayout(sb);
       const all = sb.scenes.map((_, i) => i);
-      const chosen = all.length > 6 ? all.filter((_, k) => k % Math.ceil(all.length / 6) === 0).slice(0, 6) : all;
-      const times = chosen.map((i) => Math.round(((layout[i].from + layout[i].dur / 2) / 30) * 100) / 100);
-      say("🔍 The agent is reviewing frames of the preview…");
-      hooks.progress({ label: "Quality check", value: null });
+      // a long video is checked in several contact sheets of 6 scenes (up to 4 sheets = 24 scenes, spread over the whole video)
+      const want = Math.min(all.length, 24);
+      const picked = all.length <= want ? all : Array.from({ length: want }, (_, k) => all[Math.min(all.length - 1, Math.floor(((k + 0.5) * all.length) / want))]);
+      const groups: number[][] = [];
+      for (let g = 0; g < picked.length; g += 6) groups.push(picked.slice(g, g + 6));
+      say(`🔍 The agent is reviewing frames of the preview (${picked.length} scenes)…`);
+      let changed = false;
+      let flagged = 0;
       try {
-        const f = await studioCall(env, "frames", { sandboxId: run.sid, projectId: run.p.id, times });
-        const r = await aiCall(env, run.p, {
-          kind: "review", image: { mediaType: f.mediaType, data: f.image },
-          tiles: chosen.map((i, k) => ({ tile: k + 1, index: i, type: sb.scenes[i].type, summary: summarizeScene(sb.scenes[i]).slice(0, 80) })),
-        });
-        const issues = ((r.issues ?? []) as Array<{ scene: number; problem: string; patch: Record<string, unknown> }>).filter((x) => Number.isInteger(x.scene) && x.scene >= 0 && x.scene < sb.scenes.length);
-        let changed = false;
-        for (const x of issues) {
-          const s = sb.scenes[x.scene];
-          if (s.type === "custom") {
-            say(`🛠️ Scene ${x.scene + 1}: ${x.problem} — redesigning.`);
-            sb = withScene(sb, x.scene, { ...s, code: await genCode(env, run.p, sb, x.scene, { previousCode: String(s.code ?? ""), critique: x.problem }) });
-            changed = true;
-          } else if (Object.keys(x.patch ?? {}).length > 0) {
-            say(`🛠️ Scene ${x.scene + 1}: ${x.problem}`);
-            sb = withScene(sb, x.scene, sanitizeStoryboard({ scenes: [{ ...s, ...x.patch }] }, { keepFiles: true }).scenes[0]);
-            changed = true;
+        for (let g = 0; g < groups.length; g++) {
+          check(run);
+          const chosen = groups[g];
+          const times = chosen.map((i) => Math.round(((layout[i].from + layout[i].dur / 2) / 30) * 100) / 100);
+          hooks.progress({ label: `Quality check ${g + 1}/${groups.length}`, value: g / groups.length });
+          const f = await studioCall(run.env, "frames", { sandboxId: run.sid, projectId: run.p.id, times });
+          const r = await aiCall(env, run.p, {
+            kind: "review", image: { mediaType: f.mediaType, data: f.image },
+            tiles: chosen.map((i, k) => ({ tile: k + 1, index: i, type: sb.scenes[i].type, summary: summarizeScene(sb.scenes[i]).slice(0, 80) })),
+          });
+          const issues = ((r.issues ?? []) as Array<{ scene: number; problem: string; patch: Record<string, unknown> }>).filter((x) => Number.isInteger(x.scene) && x.scene >= 0 && x.scene < sb.scenes.length);
+          flagged += issues.length;
+          for (const x of issues) {
+            const s2 = sb.scenes[x.scene];
+            if (s2.type === "custom") {
+              say(`🛠️ Scene ${x.scene + 1}: ${x.problem} — redesigning.`);
+              sb = withScene(sb, x.scene, { ...s2, code: await genCode(env, run.p, sb, x.scene, { previousCode: String(s2.code ?? ""), critique: x.problem }) });
+              changed = true;
+            } else if (Object.keys(x.patch ?? {}).length > 0) {
+              say(`🛠️ Scene ${x.scene + 1}: ${x.problem}`);
+              sb = withScene(sb, x.scene, sanitizeStoryboard({ scenes: [{ ...s2, ...x.patch }] }, { keepFiles: true }).scenes[0]);
+              changed = true;
+            }
           }
         }
         if (changed) {
           await upd(run, { storyboardJson: JSON.stringify(sb) });
           await renderKind(run, "preview");
           say("✅ Fixes applied and the preview was rendered again.");
-        } else say("👍 Quality check passed — no major issues.");
+        } else say(flagged ? "👍 Quality check done — the problems found need no change." : "👍 Quality check passed — no major issues.");
       } catch (e) {
         if (String((e as Error).message) === "Stopped.") throw e;
         say("ℹ️ Quality check skipped: " + (e as Error).message.slice(0, 120));
+        if (changed) await upd(run, { storyboardJson: JSON.stringify(sb) });
       }
     }
 
