@@ -1,4 +1,5 @@
 import { getModelPref } from "@/lib/model-pref";
+import { findLengthPlan } from "@/lib/venus-length";
 import { PROVIDERS, providerMeta, type ProviderId } from "@/lib/providers";
 import type { PcStatus, AgentRequest } from "@/components/dashboard/PcPanel";
 
@@ -136,6 +137,7 @@ export function guessVenusOptions(brief: string, ownerText = ""): { seconds: num
   const b = (brief + " " + ownerText).toLowerCase();
   const aspect = /9:16|reel|shorts?|tiktok|vertical|story/.test(b) ? "9:16" : /1:1|square/.test(b) ? "1:1" : "16:9";
   // the brief the agent wrote may have lost the length: the owner's own words count too
-  const seconds = findSeconds(brief) ?? findSeconds(ownerText) ?? 30;
+  // a range ("15-20 minute") is planned at its middle (the pipeline keeps the upper end as the hard ceiling)
+  const seconds = findLengthPlan(brief)?.target ?? findLengthPlan(ownerText)?.target ?? findSeconds(brief) ?? findSeconds(ownerText) ?? 30;
   return { seconds: Math.min(3600, Math.max(15, seconds)), aspect };
 }
