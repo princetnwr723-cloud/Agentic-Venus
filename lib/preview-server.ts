@@ -188,3 +188,14 @@ tail -c 1500 /tmp/jobs/serve.log 2>/dev/null`,
 export async function stopServe(sb: Sb) {
   await exec(sb, `fuser -k ${PORT}/tcp >/dev/null 2>&1 || true; pkill -f 'http.server ${PORT}' >/dev/null 2>&1 || true; true`, 15_000);
 }
+
+/** The files of the workspace (names only, 4 levels deep): enough to tell which language the project is in. */
+export async function listProjectFiles(sb: Sb, ws: string): Promise<string[]> {
+  const root = wsRoot(ws);
+  const r = await exec(
+    sb,
+    `cd ${q(root)} 2>/dev/null && find . -maxdepth 4 -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './.next/*' -not -path './dist/*' -not -path './build/*' -not -path './.venv/*' -not -path './venv/*' -not -path './__pycache__/*' -not -path './target/*' -not -path './vendor/*' 2>/dev/null | sed 's|^\\./||' | head -800`,
+    15_000
+  );
+  return r.stdout.split("\n").map((x) => x.trim()).filter(Boolean);
+}
