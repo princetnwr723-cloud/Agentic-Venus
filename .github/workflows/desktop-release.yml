@@ -7,7 +7,7 @@ on:
       - "desktop/**"
       - ".github/workflows/desktop-release.yml"
   release:
-    types: [published]        # you publish a release (any name, any tag) and the installers are attached to it by themselves
+    types: [published]        # you publish an EMPTY release (any name, any tag): Windows, Mac, Linux and Android files are attached by themselves
 permissions:
   contents: write
 concurrency:
@@ -41,18 +41,30 @@ jobs:
             desktop/dist/*.exe
             desktop/dist/*.dmg
             desktop/dist/*.AppImage
+
+  # The Android app is built by .github/workflows/android.yml (needs the secrets APP_URL and GOOGLE_SERVICES_JSON)
+  android:
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
+
   attach:
-    needs: build
-    if: github.event_name == 'release'          # only when a release was published
+    needs: [build, android]
+    # runs even if the Android build failed, so the PC installers still get attached
+    if: ${{ always() && github.event_name == 'release' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: assets
           merge-multiple: true
-      - name: Checksums
-        run: cd assets && sha256sum AgenticVenus-* > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - name: Attach the installers to the release you published
+      - name: Name the files and write checksums
+        run: |
+          cd assets
+          if [ -f app-debug.apk ]; then mv app-debug.apk AgenticVenus-android.apk; else echo "::warning::The Android app was not built (check the secrets APP_URL and GOOGLE_SERVICES_JSON)."; fi
+          ls -l
+          sha256sum AgenticVenus-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Attach everything to the release you published
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
