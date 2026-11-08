@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { connect } from "@/lib/e2b-server";
 import { readBody, requestStatus } from "@/lib/request";
-import { bundleHtml, serveStatus, startServe, stopServe } from "@/lib/preview-server";
+import { bundleHtml, listProjectFiles, serveStatus, startServe, stopServe } from "@/lib/preview-server";
+import { detectProject } from "@/lib/code-kind";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,6 +23,10 @@ export async function POST(req: Request) {
     switch (action) {
       case "html":
         return NextResponse.json(await bundleHtml(sb, ws, body.entry ? String(body.entry) : undefined));
+      case "detect": {
+        const files = await listProjectFiles(sb, ws);
+        return NextResponse.json({ kind: detectProject(files), count: files.length });
+      }
       case "serve":
         await startServe(sb, ws);
         return NextResponse.json({ ok: true });
