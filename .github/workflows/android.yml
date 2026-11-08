@@ -1,19 +1,28 @@
 name: Android APK
 
-# Builds an installable app-debug.apk. Run it from the Actions tab ("Run workflow"), then download the file under "Artifacts".
-# Secrets needed (Settings -> Secrets and variables -> Actions):
-#   APP_URL               your website, e.g. https://your-app.vercel.app
-#   GOOGLE_SERVICES_JSON  the full text of google-services.json from Firebase (Android app: com.agenticvenus.app)
+# Builds an installable app-debug.apk (a debug build, not a Play Store build).
+#   - Run it from the Actions tab ("Run workflow"): the APK appears under "Artifacts".
+#   - Type a release tag into "release_tag" and the APK is also attached to that existing release.
+#   - The release workflow (desktop-release.yml) calls this file when you publish a release.
+# Secrets (Settings -> Secrets and variables -> Actions):
+#   APP_URL               REQUIRED. Your website, e.g. https://your-app.vercel.app
+#   GOOGLE_SERVICES_JSON  optional. The text of google-services.json from Firebase (Android app: com.agenticvenus.app).
+#                         Without it the app still builds and works, only push notifications are off.
 on:
-  workflow_dispatch: {}
-  workflow_call: {}          # lets the release workflow build the APK too (desktop-release.yml)
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional: tag of an existing release to attach the APK to (empty = only build)"
+        required: false
+        default: ""
+  workflow_call: {}          # lets the release workflow build the APK too
   push:
     paths:
       - "mobile/**"
       - ".github/workflows/android.yml"
 
 permissions:
-  contents: read
+  contents: write            # needed only to attach the APK to a release
 
 jobs:
   apk:
@@ -30,8 +39,8 @@ jobs:
 
       - name: Check secrets
         run: |
-          [ -n "$APP_URL" ] || { echo "::error::Secret APP_URL is missing"; exit 1; }
-          [ -n "$GOOGLE_SERVICES_JSON" ] || { echo "::error::Secret GOOGLE_SERVICES_JSON is missing"; exit 1; }
+          [ -n "$APP_URL" ] || { echo "::error::The secret APP_URL is missing. Add it in Settings -> Secrets and variables -> Actions (your website address, e.g. https://your-app.vercel.app)."; exit 1; }
+          [ -n "$GOOGLE_SERVICES_JSON" ] || echo "::warning::GOOGLE_SERVICES_JSON is not set. The app will build, but push notifications will not work."
 
       - uses: actions/setup-node@v4
         with:
@@ -56,6 +65,7 @@ jobs:
         run: npx cap add android
 
       - name: Firebase config
+        if: ${{ env.GOOGLE_SERVICES_JSON != '' }}
         run: printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
       - name: Prepare (permissions, runner service, icon, login link)
@@ -75,3 +85,17 @@ jobs:
           name: venus-android
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Attach to the release you named
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          cd /tmp
+          cp "$GITHUB_WORKSPACE/mobile/android/app/build/outputs/apk/debug/app-debug.apk" AgenticVenus-android.apk
+          gh release download "$TAG" -p SHA256SUMS.txt -D /tmp --clobber --repo "${{ github.repository }}" || true
+          touch SHA256SUMS.txt
+          sed -i '/AgenticVenus-android.apk/d' SHA256SUMS.txt
+          sha256sum AgenticVenus-android.apk >> SHA256SUMS.txt
+          gh release upload "$TAG" AgenticVenus-android.apk SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
