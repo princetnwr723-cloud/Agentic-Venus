@@ -24,13 +24,13 @@ function openAIStyleContent(m: ChatMsg) {
   ];
 }
 
-async function callOpenAICompatible(provider: ProviderId, apiKey: string, model: string, messages: ChatMsg[]) {
+async function callOpenAICompatible(provider: ProviderId, apiKey: string, model: string, messages: ChatMsg[], power = false) {
   const url = OPENAI_COMPATIBLE_URLS[provider];
   if (!url) throw new Error(`No endpoint configured for ${provider}`);
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, messages: messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) })) }),
+    body: JSON.stringify({ model, messages: messages.map((m) => ({ role: m.role, content: openAIStyleContent(m) })), ...(power && provider === "openai" && /^(o\d|gpt-5)/i.test(model) ? { reasoning_effort: "medium" } : {}) }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error?.message || data?.error || `${provider} request failed`);
@@ -60,12 +60,15 @@ function anthropicSystem(system: string | undefined) {
   return system.length >= 3000 ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] : system;
 }
 
-async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number) {
+/** Tokens a model may spend THINKING before it answers (planning calls only; the answer keeps its own room). */
+const THINK_BUDGET = 3000;
+
+async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number, power = false) {
   const system = messages.find((m) => m.role === "system")?.content;
   const send = (sys: unknown) => fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system: sys, messages: anthropicMessages(messages) }),
+    body: JSON.stringify({ model, max_tokens: power ? maxTokens + THINK_BUDGET : maxTokens, system: sys, messages: anthropicMessages(messages), ...(power ? { thinking: { type: "enabled", budget_tokens: THINK_BUDGET } } : {}) }),
   });
   let res = await send(anthropicSystem(system));
   let data = await res.json().catch(() => ({}));
@@ -75,7 +78,7 @@ async function callAnthropic(apiKey: string, model: string, messages: ChatMsg[],
   return text;
 }
 
-async function callGemini(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number) {
+async function callGemini(apiKey: string, model: string, messages: ChatMsg[], maxTokens: number, power = false) {
   const contents = messages
     .filter((m) => m.role !== "system")
     .map((m) => ({
@@ -93,7 +96,7 @@ async function callGemini(apiKey: string, model: string, messages: ChatMsg[], ma
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
         contents: cs,
-        generationConfig: { maxOutputTokens: maxTokens },
+        generationConfig: power ? { maxOutputTokens: maxTokens + THINK_BUDGET, thinkingConfig: { thinkingBudget: THINK_BUDGET } } : { maxOutputTokens: maxTokens },
         ...(system && !inline ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       }),
     });
@@ -122,17 +125,29 @@ const TRANSIENT = /(\b429\b|rate.?limit|overloaded|timeout|timed out|fetch faile
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function callProvider({
-  provider, apiKey, model, messages, maxTokens = 8192,
+  provider, apiKey, model, messages, maxTokens = 8192, power = false,
 }: {
   provider: ProviderId; apiKey: string; model: string; messages: ChatMsg[]; maxTokens?: number;
+  /** Let the model think before it answers (extended thinking / reasoning). Models that do not support it answer normally. */
+  power?: boolean;
 }): Promise<string> {
-  const once = () => {
+  const run = (pw: boolean) => {
     switch (provider) {
-      case "anthropic": return callAnthropic(apiKey, model, messages, maxTokens);
-      case "gemini": return callGemini(apiKey, model, messages, maxTokens);
+      case "anthropic": return callAnthropic(apiKey, model, messages, maxTokens, pw);
+      case "gemini": return callGemini(apiKey, model, messages, maxTokens, pw);
       case "cohere": return callCohere(apiKey, model, messages);
-      default: return callOpenAICompatible(provider, apiKey, model, messages);
+      default: return callOpenAICompatible(provider, apiKey, model, messages, pw);
     }
+  };
+  const once = async () => {
+    if (power) {
+      try { return await run(true); }
+      catch (e) {
+        // a busy / rate-limited provider is retried by the loop below; anything else usually means "this model cannot think": answer normally
+        if (TRANSIENT.test(e instanceof Error ? e.message : String(e))) throw e;
+      }
+    }
+    return run(false);
   };
   for (let attempt = 0; ; attempt++) {
     try { return await once(); }
