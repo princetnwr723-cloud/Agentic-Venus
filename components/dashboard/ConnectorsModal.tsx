@@ -55,6 +55,7 @@ export default function ConnectorsModal({
   const [toks, setToks] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<Status>({ broken: [], accounts: {}, custom: {} });
   const [hint, setHint] = useState("");
+  const [shop, setShop] = useState(""); // Shopify store address
 
   async function callStatus(sync: boolean) {
     try {
@@ -96,9 +97,11 @@ export default function ConnectorsModal({
   }
 
   async function startOAuth(provider: string) {
+    const perShop = Boolean(OAUTH_PROVIDERS.find((x) => x.id === provider)?.perShop);
+    if (perShop && !shop.trim()) { say(provider, "Type your store address first, like your-store.myshopify.com."); return; }
     setBusy(provider); say(provider, "");
     try {
-      const { res, data } = await authedPost("/api/connectors/oauth/start", { provider, chatId, hint: hint.trim() || undefined });
+      const { res, data } = await authedPost("/api/connectors/oauth/start", { provider, chatId, hint: hint.trim() || undefined, shop: perShop ? shop.trim() : undefined });
       if (!res.ok || !data.url) throw new Error(data.error || "Could not start OAuth.");
       window.location.assign(data.url);
     } catch (e) { say(provider, e instanceof Error ? e.message : "OAuth could not start."); setBusy(null); }
@@ -218,6 +221,7 @@ export default function ConnectorsModal({
                         {on ? <span className="text-[10px] text-avatar-teal">{status.broken.includes(`oauth:${p.id}`) ? "Needs reconnect" : `Connected${status.accounts[p.id] ? " as " + status.accounts[p.id] : ""}`}</span> : <button disabled={busy === p.id} onClick={() => void startOAuth(p.id)} className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-bg disabled:opacity-50">{busy === p.id ? "Opening…" : "Connect"}</button>}
                       </div>
                       <p className="mt-1 text-[10px] leading-relaxed text-muted">{p.note}</p>
+                      {p.perShop && <input className={box + " mt-1.5"} placeholder="your-store.myshopify.com" value={shop} onChange={(e) => setShop(e.target.value)} />}
                       {on && (
                         <div className="mt-1 flex gap-3">
                           <button disabled={busy === p.id} onClick={() => void startOAuth(p.id)} className="text-[10px] text-gold underline">Reconnect</button>
