@@ -55,11 +55,35 @@ ${text.slice(0, 12000)}
 `;
 }
 
+/** DOCUMENTARY MODE: a video that explains something (why a city is rich, how a company grew, the story of an event). */
+function docuBlock(o: { words?: number; facts?: string; hindi?: boolean }): string {
+  return `
+DOCUMENTARY MODE (this overrides any rule above that says to avoid real pictures or to make mostly abstract scenes). Think like the best explainer-documentary makers (Vox, Kurzgesagt, Johnny Harris, Bloomberg Originals): a viewer must learn something real and must not want to leave.
+- NARRATION IS THE SPINE. Write the voice-over like a gifted storyteller: spoken language, short sentences, one idea per sentence, concrete nouns, numbers and years instead of adjectives, a curiosity gap before every reveal ("But that is not where the money came from."). The first 2 sentences are a hook: a surprising concrete fact or a question the viewer cannot ignore. No filler ("In today's video", "Let's dive in", "As we all know"), no repeating the topic, no clichés, no hype words.
+- EVIDENCE. ${o.facts ? "Every claim must come from the FACT SHEET below, the brief or the memory." : "Use only well-established, widely documented facts that you are certain about (and the brief and the memory)."} Round numbers honestly ("about", "nearly", "more than"), always name the year or period, tell legends as legends. If you are not certain of a number, leave it out or say it loosely ("billions", "most of"). Never invent statistics, quotes or names.${o.facts ? `\nFACT SHEET (the only facts you may use):\n${o.facts}` : ""}
+- A PICTURE THAT PROVES EACH BEAT. At least one scene in three is a REAL photo: type "image" with a precise English "imageQuery" of 3-8 words naming the real place, object, person or moment and, when it matters, the era (for example "Burj Khalifa skyline at night", "Dubai Creek wooden dhows 1960s", "Jebel Ali port aerial containers"). The renderer slowly pushes into the photo and lays your headline over it. Between the photos use: animated charts (bar-chart, line-chart, stat with a counting number) for every figure you speak, a timeline for years, a ranking for comparisons, "bg" scenery (city, sea, desert) for establishing shots, and \"custom\" scenes for the 2-4 hero moments of the part (a map that draws on, an object that transforms, a before/after, a diagram of how money flows). A data beat at least every 45 seconds; a change of rhythm (a quiet one-line scene, a quote, a big number) at least every 90 seconds.
+- Every scene's "narration" is 12-35 words and describes exactly what the viewer sees. The scene is as long as its words need (words / ${o.hindi ? "2.0" : "2.3"} seconds, plus half a second).${o.words ? `\n- WORD BUDGET: the narration of ALL scenes of this video / part together is ${o.words} words (+-8%). Count while you write; this is what makes the video end at the length that was asked for.` : ""}
+- Structure: HOOK -> the puzzle (why is this surprising?) -> the layers of the answer in order of importance, each with its proof -> the twist or the honest counterpoint (what is not perfect) -> the payoff that connects back to the hook. End with one memorable closing line, not a call to subscribe.
+- Be fair: show both the strengths and the limits of the story; never insult or flatter a country, religion or group.`;
+}
+
+export function narrationFitPrompt(o: { scenes: string[]; target: number; mode: "condense" | "expand"; hindi: boolean; topic: string; facts?: string }): string {
+  const have = o.scenes.reduce((a, t) => a + (t.trim().match(/[\p{L}\p{N}\p{M}'’-]+/gu) ?? []).length, 0);
+  return `You are the script editor of a documentary. Below are the narrations of ${o.scenes.length} consecutive scenes of one part of a video about: ${o.topic.slice(0, 300)}.
+They contain ${have} words but the part may contain only ${o.target} words (+-6%) so the video ends at the right length. ${o.mode === "condense" ? "CONDENSE: keep every fact, the hook and the payoff; remove repetition, filler and detail of low value; keep the spoken, vivid style." : "EXPAND: add the missing depth with true, specific, vivid detail from the fact sheet or from well-established knowledge; never pad with filler."}
+Rules: return exactly ${o.scenes.length} narrations, in the same order, one per scene, in ${o.hindi ? "Hindi (Devanagari), same tone as the original" : "the same language as the original"}. Each stays 8-40 words and keeps agreeing with what its scene shows. Never invent statistics.${o.facts ? `\nFACT SHEET:\n${o.facts.slice(0, 3500)}` : ""}
+Reply with ONE JSON object only: {"narrations":["...", "..."]}
+
+NARRATIONS:
+${o.scenes.map((t, i) => `${i + 1}. ${t}`).join("\n")}`;
+}
+
 export type PartInfo = { index: number; total: number; title: string; summary: string; seconds: number };
 
 export function directorPrompt(o: {
   brief: string; seconds: number; aspect: Aspect; voice: boolean | "auto"; captions: boolean;
   design: "ai" | "mixed" | "library"; context?: string; part?: PartInfo; style?: Record<string, unknown>; scriptText?: string; template?: string;
+  docu?: boolean; words?: number; facts?: string; hindi?: boolean;
 }): string {
   const a = ASPECTS[o.aspect];
   return `You are the creative director, motion designer and sound designer of "Venus Pro", an AI motion-graphics studio. You make ONLY motion graphics: designed, animated, code-rendered scenes (not slideshows, not stock montages). Turn the brief into a storyboard for a ${o.seconds}-second video (${a.width}x${a.height}, ${o.aspect}). Reply with ONE JSON object only, no prose, no markdown fences.
@@ -85,7 +109,7 @@ ${o.style ? `\nLOCKED ART DIRECTION (this is one part of a longer video; use EXA
 THE USER'S WORDS ARE THE LAW: if the brief names a topic, a style, scenes, texts, numbers, colours, a language, a tone or a structure, build exactly that, in that order. Your own taste only fills the gaps the brief leaves open. If the brief says what to show, never replace it with something you like more.
 
 ${designBlock(o.design)}
-${o.scriptText ? scriptBlock(o.scriptText) : ""}
+${o.scriptText ? scriptBlock(o.scriptText) : ""}${o.docu ? docuBlock(o) : ""}
 STORY MODE (the brief is a story, history, legend, biography, fable, journey or any narrative): think like a film director, not like a slide designer.
 - Scene count: at least seconds / 4 scenes and ideally seconds / 3.2 (30 seconds = 8 to 10 scenes, 60 seconds = 16 to 20). One story beat per scene, 2.5 to 5 seconds each. A story with 5 scenes in 30 seconds is wrong: it feels like a slideshow.
 - Build an arc: place (establishing shot) -> hero -> problem or conflict -> the decisive moment -> the aftermath or legacy. Every scene changes the picture (time of day, place, camera, who is on screen).
@@ -355,15 +379,15 @@ Write plain text (no JSON, max 650 words) with these parts:
 
 
 /** Long videos (several minutes up to one hour): first a chapter plan, then every chapter is written as its own storyboard. */
-export function outlinePrompt(o: { brief: string; seconds: number; aspect: Aspect; voice: boolean; chapters: number; context?: string; template?: string }): string {
+export function outlinePrompt(o: { brief: string; seconds: number; aspect: Aspect; voice: boolean; chapters: number; context?: string; template?: string; docu?: boolean }): string {
   const a = ASPECTS[o.aspect];
   return `You are the creative director of "Venus Pro", an AI motion-graphics studio. The user wants ONE long video of ${Math.round(o.seconds / 60 * 10) / 10} minutes (${a.width}x${a.height}, ${o.aspect}). Plan it as ${o.chapters} chapters. Reply with ONE JSON object only, no prose, no markdown fences.
 
 THE USER'S WORDS ARE THE LAW: topic, structure, style, language, tone, texts and numbers named in the brief must be followed exactly; your taste only fills gaps.
 Think like a documentary showrunner: a strong opening, a clear progression, variety in rhythm (data, story, explanation, humour, pause), a satisfying ending. Never invent statistics, quotes or product claims.
 
-Return {"title":"...","concept":"one sentence about the look and motion style","palette":{"bg1","bg2","accent","accent2","text","muted"} (six hex colours that fit THIS topic; not blue/purple by default),"fonts":{"display": inter|montserrat|poppins|spacegrotesk|playfair|oswald,"body": inter|poppins|spacegrotesk},"bg":{"kind": mesh|aurora|grid|halftone|stripes|rings|waves|noise|spot|blocks|flow|stars|paper|conic|topo|checker|rays|bokeh|circuit|glass,"colors":[2-4 hex]},"grade":"none|warm|cool|noir|vivid|fade|teal-orange|dream","audio":{"mood":"dark|epic|bright|tech|calm|playful"},"chapters":[{"title":"...","seconds":<number>,"summary":"2-3 sentences: exactly what is shown and said in this chapter, with the facts it may use"}]}
-The chapter seconds add up to about ${o.seconds}; each chapter is 30-75 seconds.${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}${o.template ? `\n\n${o.template}` : ""}
+Return {"title":"...","concept":"one sentence about the look and motion style","palette":{"bg1","bg2","accent","accent2","text","muted"} (six hex colours that fit THIS topic; not blue/purple by default),"fonts":{"display": inter|montserrat|poppins|spacegrotesk|playfair|oswald,"body": inter|poppins|spacegrotesk},"bg":{"kind": mesh|aurora|grid|halftone|stripes|rings|waves|noise|spot|blocks|flow|stars|paper|conic|topo|checker|rays|bokeh|circuit|glass,"colors":[2-4 hex]},"grade":"none|warm|cool|noir|vivid|fade|teal-orange|dream","audio":{"mood":"dark|epic|bright|tech|calm|playful"},${o.docu ? '"facts":[{"claim":"one precise, checkable fact with its year or period","confidence":"high|medium"}] (25-45 facts: only the best-established ones, leave out anything you are not sure about),' : ""}"chapters":[{"title":"...","seconds":<number>,"summary":"2-3 sentences: exactly what is shown and said in this chapter, with the facts it may use"}]}
+The chapter seconds add up to about ${o.seconds}; each chapter is 30-75 seconds.${o.docu ? " DOCUMENTARY: the chapters build ONE argument (hook, puzzle, the layers of the answer, the counterpoint, the payoff); each chapter has its own surprising turn." : ""}${o.context ? `\n\nWHAT YOU KNOW ABOUT THE USER:${o.context}` : ""}${o.template ? `\n\n${o.template}` : ""}
 
 BRIEF:
 ${o.brief}`;
