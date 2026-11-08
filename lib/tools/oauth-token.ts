@@ -1,10 +1,10 @@
 import { createHash, createHmac } from "crypto";
 import { http } from "./net";
-import type { OAuthProvider } from "./oauth-catalog";
+import { withShop, type OAuthProvider } from "./oauth-catalog";
 import type { ToolCtx } from "./types";
 
 // OAuth tokens are stored as {access, refresh, exp}. Old plain-string tokens still work.
-export type OTok = { access: string; refresh?: string; exp?: number };
+export type OTok = { access: string; refresh?: string; exp?: number; shop?: string }; // shop: Shopify store address
 
 export const parseTok = (v: string): OTok => {
   try { const j = JSON.parse(v); if (j && typeof j.access === "string") return j as OTok; } catch { /* plain token */ }
@@ -64,9 +64,9 @@ export async function refreshTok(p: OAuthProvider, t: OTok): Promise<OTok> {
   const id = process.env[p.clientIdEnv], secret = process.env[p.clientSecretEnv];
   if (!id || !secret || !t.refresh) throw new Error("no refresh token");
   const q = tokenRequest(p, { grant_type: "refresh_token", refresh_token: t.refresh });
-  const r = await http(p.tokenUrl, { method: "POST", headers: q.headers, body: q.body }, 15_000);
+  const r = await http(withShop(p.tokenUrl, t.shop), { method: "POST", headers: q.headers, body: q.body }, 15_000);
   if (r.status >= 400 || !r.json?.access_token) throw new Error("refresh failed");
-  return { access: String(r.json.access_token), refresh: r.json.refresh_token ? String(r.json.refresh_token) : t.refresh, exp: r.json.expires_in ? Date.now() + Number(r.json.expires_in) * 1000 : t.exp };
+  return { access: String(r.json.access_token), refresh: r.json.refresh_token ? String(r.json.refresh_token) : t.refresh, exp: r.json.expires_in ? Date.now() + Number(r.json.expires_in) * 1000 : t.exp, ...(t.shop ? { shop: t.shop } : {}) };
 }
 
 /** A valid access token for a provider; renews it (and saves the new one) when it is about to expire. */
