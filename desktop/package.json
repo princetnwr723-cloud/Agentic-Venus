@@ -24,7 +24,7 @@
       "category": "public.app-category.productivity"
     },
     "linux": { "target": ["AppImage"], "category": "Utility" },
-    "artifactName": "AgenticVenus-${version}-${os}-${arch}.${ext}"
+    "artifactName": "AgenticVenus-${os}-${arch}.${ext}"
   },
   "author": "AgenticVenus maintainers",
   "homepage": "https://github.com/princetnwr723-cloud/AgenticVenus"
