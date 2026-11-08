@@ -1,9 +1,15 @@
 import { http } from "./net";
+import { shopifyApiBase } from "./oauth-catalog";
 
 /** Which account did the user actually sign in with? Shown in Connectors and checked against the account they asked for. */
-export async function identifyAccount(providerId: string, access: string): Promise<string> {
+export async function identifyAccount(providerId: string, access: string, shop?: string): Promise<string> {
   const h = { Authorization: `Bearer ${access}`, Accept: "application/json", "User-Agent": "AgenticVenus/1.0" };
   try {
+    if (providerId === "shopify") {
+      if (!shop) return "";
+      const r = await http(`${shopifyApiBase(shop)}/shop.json`, { headers: { "X-Shopify-Access-Token": access, Accept: "application/json", "User-Agent": "AgenticVenus/1.0" } }, 10_000);
+      return r.status < 400 && r.json?.shop?.name ? `${r.json.shop.name} (${shop})` : shop;
+    }
     if (providerId === "google" || providerId === "youtube") {
       const r = await http("https://openidconnect.googleapis.com/v1/userinfo", { headers: h }, 10_000);
       return String(r.json?.email ?? "");
