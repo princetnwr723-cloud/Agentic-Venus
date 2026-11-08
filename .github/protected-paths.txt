@@ -30,3 +30,5 @@ lib/local-relay.ts
 lib/local-relay-core.ts
 app/api/local/**
 app/desktop-login/**
+install.sh
+install.ps1
