@@ -6,6 +6,7 @@ name: Android APK
 #   GOOGLE_SERVICES_JSON  the full text of google-services.json from Firebase (Android app: com.agenticvenus.app)
 on:
   workflow_dispatch: {}
+  workflow_call: {}          # lets the release workflow build the APK too (desktop-release.yml)
   push:
     paths:
       - "mobile/**"
