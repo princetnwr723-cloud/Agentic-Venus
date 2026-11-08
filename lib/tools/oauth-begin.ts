@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "crypto";
-import { getOAuthProvider } from "./oauth-catalog";
+import { getOAuthProvider, normalizeShop, withShop } from "./oauth-catalog";
 import { pkceChallenge, pkceVerifier } from "./oauth-token";
 
 function secret() {
@@ -20,7 +20,7 @@ export function oauthConfigured(providerId: string): boolean {
  * Shared by the Connectors window (/api/connectors/oauth/start) and by the agent (connect.service in the chat),
  * so both always build exactly the same, signed link.
  */
-export function buildOAuthUrl(o: { uid: string; chatId: string; providerId: string; redirectUri: string; hint?: string }): string {
+export function buildOAuthUrl(o: { uid: string; chatId: string; providerId: string; redirectUri: string; hint?: string; shop?: string }): string {
   const provider = getOAuthProvider(o.providerId);
   if (!provider) throw new Error("Unsupported OAuth provider.");
   const clientId = process.env[provider.clientIdEnv];
@@ -30,12 +30,15 @@ export function buildOAuthUrl(o: { uid: string; chatId: string; providerId: stri
   const useHint = hint && (provider.id === "google" || provider.id === "microsoft" || provider.identity === "email") ? hint : "";
   // The expected account travels inside the signed state, so it cannot be changed on the way.
   const nonce = randomBytes(18).toString("hex");
-  const payload = Buffer.from(JSON.stringify({ uid: o.uid, chatId: o.chatId, provider: provider.id, h: useHint || undefined, exp: Date.now() + 10 * 60_000, nonce })).toString("base64url");
+  // Shopify: the store address is part of the sign-in address, and it travels inside the signed state too.
+  const shop = provider.perShop ? normalizeShop(o.shop) : "";
+  if (provider.perShop && !shop) throw new Error("Shopify needs the store address first: open Connectors, type it like your-store.myshopify.com in the Shopify card and press Connect.");
+  const payload = Buffer.from(JSON.stringify({ uid: o.uid, chatId: o.chatId, provider: provider.id, h: useHint || undefined, s: shop || undefined, exp: Date.now() + 10 * 60_000, nonce })).toString("base64url");
   const state = `${payload}.${sign(payload)}`;
-  const url = new URL(provider.authorizeUrl);
+  const url = new URL(withShop(provider.authorizeUrl, shop));
   url.searchParams.set(provider.clientIdParam ?? "client_id", clientId);
   url.searchParams.set("redirect_uri", o.redirectUri);
-  url.searchParams.set("response_type", "code");
+  if (!provider.perShop) url.searchParams.set("response_type", "code");
   url.searchParams.set("state", state);
   if (provider.scopes.length) url.searchParams.set("scope", provider.scopes.join(provider.scopeSep ?? " "));
   // select_account: ALWAYS show the account chooser, so a different Google account that is already logged in
