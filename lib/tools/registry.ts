@@ -19,10 +19,10 @@ import { SOCIAL_TOOLS, providerOfPlatform, socialTargets } from "./social";
 import { mcpCall, mcpList, paramSummary, type McpTool } from "./mcp-client";
 import { CONNECT_TOOLS, isTrustedMcp, runConnect } from "./connect";
 import { refreshMcpToken, type McpOAuth } from "./mcp-oauth";
-import { oauthAccess } from "./oauth-token";
+import { oauthAccess, parseTok } from "./oauth-token";
 import { assertPublicUrl, cut, http } from "./net";
 import { safeId, unpack } from "./catalog";
-import { OAUTH_PROVIDERS, SOCIAL_PROVIDERS, type OAuthProvider } from "./oauth-catalog";
+import { OAUTH_PROVIDERS, SOCIAL_PROVIDERS, shopifyApiBase, type OAuthProvider } from "./oauth-catalog";
 import { INJECTION_PATTERNS, wrapUntrusted } from "@/lib/shield";
 import type { Risk, ToolCtx, ToolResult, ToolSpec } from "./types";
 
@@ -105,7 +105,7 @@ export async function buildCatalog(c: Conn, ctx?: ToolCtx): Promise<{ specs: Too
     }
   });
   for (const p of OAUTH_PROVIDERS) {
-    if (c[`oauth:${p.id}`]) specs.push({ name: `oauth_${safeId(p.id)}.request`, source: `oauth:${p.id}`, risk: "read", description: `${p.label} API request (hosts: ${p.hosts.join(", ")}). GET is read-only; other methods require approval.`, params: "method:GET|POST|PUT|PATCH|DELETE, path:string (starts with / or a full https URL on an allowed host), body?:object" });
+    if (c[`oauth:${p.id}`]) specs.push({ name: `oauth_${safeId(p.id)}.request`, source: `oauth:${p.id}`, risk: "read", description: p.perShop ? `${p.label} Admin API request for the connected store. REST like /products.json or /orders.json?status=any, GraphQL as POST /graphql.json with body {query, variables}. GET is read-only; other methods require approval.` : `${p.label} API request (hosts: ${p.hosts.join(", ")}). GET is read-only; other methods require approval.`, params: "method:GET|POST|PUT|PATCH|DELETE, path:string (starts with / or a full https URL on an allowed host), body?:object" });
   }
   for (const e of apiEntries(c)) {
     specs.push({
@@ -272,14 +272,23 @@ export async function callTool(
       const path = String(args.path ?? "");
       const full = /^https:\/\//i.test(path);
       if ((!full && (!path.startsWith("/") || path.startsWith("//"))) || path.length > 1500) return { ok: false, text: 'path must start with "/" or be a full https URL on the provider\'s API host.' };
-      const risk: Risk = method === "GET" ? "read" : "write";
+      // Shopify GraphQL is always a POST: a plain query (no "mutation") only reads, so it needs no approval.
+      const gqlText = (args.body as { query?: unknown } | undefined)?.query;
+      const gqlRead = Boolean(p.perShop) && /\/graphql\.json$/i.test(path.split("?")[0]) && typeof gqlText === "string" && !/\bmutation\b/i.test(gqlText);
+      const risk: Risk = method === "GET" || gqlRead ? "read" : "write";
       if (mustAsk(risk, isAuto(c, `oauth:${p.id}`))) return ask(name, args, risk);
 
       const access = await oauthAccess(p, raw, opts.ctx);
+      // Shopify: every store has its own address, saved with the login. Only that one store may be called.
+      const shop = p.perShop ? parseTok(raw).shop : undefined;
+      if (p.perShop && !shop) return { ok: false, text: `The ${p.label} store address is missing. Tell the user to press Reconnect for ${p.label} in Connectors and type the store address (your-store.myshopify.com).` };
+      const apiBase = shop ? shopifyApiBase(shop) : p.apiBase;
+      const hosts = shop ? [shop] : p.hosts;
       // Join by hand: new URL("/me", ".../v1.0/") would drop the "/v1.0" part.
-      const url = new URL(full ? path : p.apiBase.replace(/\/+$/, "") + path);
-      if (url.protocol !== "https:" || !p.hosts.includes(url.hostname)) return { ok: false, text: "Request blocked: URL is outside the provider's verified API hosts." };
+      const url = new URL(full ? path : apiBase.replace(/\/+$/, "") + path);
+      if (url.protocol !== "https:" || !hosts.includes(url.hostname)) return { ok: false, text: "Request blocked: URL is outside the provider's verified API hosts." };
       const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${access}` };
+      if (shop) { delete headers.Authorization; headers["X-Shopify-Access-Token"] = access; }
       if (p.id === "github_oauth") { headers["X-GitHub-Api-Version"] = "2022-11-28"; headers["User-Agent"] = "AgenticVenus"; }
       if (p.id === "notion_oauth") headers["Notion-Version"] = "2022-06-28";
       if (args.body !== undefined) headers["Content-Type"] = "application/json";
