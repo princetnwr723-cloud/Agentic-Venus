@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { callProvider } from "@/lib/ai-providers-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { addTokens, assertTokens, estTokens } from "@/lib/billing-server";
-import { directorPrompt, editNotesPrompt, editPlanPrompt, editPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, templateExtractPrompt, videoIntentPrompt, type EditFacts } from "@/lib/venus-prompts";
+import { directorPrompt, editNotesPrompt, editPlanPrompt, editPrompt, narrationFitPrompt, outlinePrompt, reviewPrompt, sceneCodePrompt, templateExtractPrompt, videoIntentPrompt, type EditFacts } from "@/lib/venus-prompts";
 import { checkCode, sanitizeScene, sanitizeSource, sanitizeStoryboard, type Aspect } from "@/lib/venus-schema";
 import type { ProviderId } from "@/lib/providers";
 
@@ -34,9 +34,12 @@ export async function POST(req: Request) {
     const uid = String(body.uid);
     await assertTokens(uid); // plan limit (HTTP 402 when used up)
 
-    const ask = async (content: string, image?: { mediaType: string; data: string }, maxTokens?: number) => {
+    // "power": the model is asked to THINK before it answers (extended thinking / reasoning where the model supports it; the provider layer
+    // falls back to a normal answer when it does not). It is used for the planning calls, where a better plan makes the whole video better.
+    const power = body.power === true;
+    const ask = async (content: string, image?: { mediaType: string; data: string }, maxTokens?: number, think = false) => {
       // a long edit plan is a long JSON: it gets more room, and falls back to the normal size when the model does not allow it
-      const run = (max?: number) => callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }], ...(max ? { maxTokens: max } : {}) });
+      const run = (max?: number) => callProvider({ provider, apiKey, model, messages: [{ role: "user", content, ...(image ? { image } : {}) }], ...(max ? { maxTokens: max } : {}), ...(power && think ? { power: true } : {}) });
       const out = maxTokens ? await run(maxTokens).catch(() => run()) : await run();
       await addTokens(uid, estTokens(content.length + out.length));
       return out;
@@ -57,8 +60,14 @@ export async function POST(req: Request) {
       const style = body.style && typeof body.style === "object" ? body.style as Record<string, unknown> : undefined;
       const voiceArg: boolean | "auto" = body.voice === "auto" ? "auto" : Boolean(body.voice);
       const scriptText = typeof body.scriptText === "string" && body.scriptText.trim() ? body.scriptText.slice(0, 12000) : undefined;
+      const docu = body.docu === true;
+      const words = Number(body.words) > 0 ? Math.min(9000, Math.round(Number(body.words))) : undefined;
+      const facts = typeof body.facts === "string" && body.facts.trim() ? body.facts.slice(0, 6000) : undefined;
+      const hindi = body.hindi === true;
+      const extraArgs = { docu, words, facts, hindi };
       const reply = await ask(
-        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText, template })
+        directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText, template, ...extraArgs }),
+        undefined, 12000, true
       );
       const raw = extractJson(reply);
       if (!raw) return NextResponse.json({ error: "The model did not return a valid storyboard: " + reply.slice(0, 160) }, { status: 422 });
@@ -70,7 +79,7 @@ export async function POST(req: Request) {
       const minScenes = Math.max(3, Math.round(seconds / 4.5));
       if (storyboard.scenes.length < minScenes) {
         const again = extractJson(await ask(
-          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText, template }) +
+          directorPrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect, voice: voiceArg, captions: Boolean(body.captions), design, context, part, style, scriptText, template, ...extraArgs }) +
           `\n\nIMPORTANT: your previous answer had only ${storyboard.scenes.length} scenes for ${Math.round(seconds)} seconds. Write the same story again with at least ${minScenes} scenes (about ${Math.round(seconds / 3.4)}): one story beat per scene, 2.5 to 5 seconds each, changing picture every time.`
         ));
         if (again) {
@@ -84,9 +93,10 @@ export async function POST(req: Request) {
 
     // ---- the chapter plan of a long video ----
     if (body.kind === "outline") {
-      const seconds = Math.min(3600, Math.max(120, Number(body.seconds) || 600));
+      const seconds = Math.min(3600, Math.max(60, Number(body.seconds) || 600));
       const chapters = Math.min(80, Math.max(2, Math.round(seconds / 55)));
-      const raw = extractJson(await ask(outlinePrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect: aspectOf(body.aspect), voice: Boolean(body.voice), chapters, context, template })));
+      const docu = body.docu === true;
+      const raw = extractJson(await ask(outlinePrompt({ brief: String(body.brief || "").slice(0, 4000), seconds, aspect: aspectOf(body.aspect), voice: Boolean(body.voice), chapters, context, template, docu }), undefined, 12000, true));
       const list = Array.isArray(raw?.chapters) ? raw.chapters : [];
       if (!raw || list.length < 2) return NextResponse.json({ error: "The model did not return a chapter plan." }, { status: 422 });
       const chs = list.slice(0, 90).map((c: any, i: number) => ({ title: String(c?.title ?? "Part " + (i + 1)).slice(0, 120), summary: String(c?.summary ?? "").slice(0, 700), seconds: Math.max(20, Math.min(90, Number(c?.seconds) || seconds / list.length)) }));
@@ -96,7 +106,10 @@ export async function POST(req: Request) {
       const first = sanitizeStoryboard({ ...raw, scenes: [] }, { aspect: aspectOf(body.aspect), theme: String(body.theme || "midnight") });
       const style: Record<string, unknown> = {};
       for (const key of STYLE_KEYS) if ((first as any)[key] !== undefined) style[key] = (first as any)[key];
-      return NextResponse.json({ title: first.title, style, chapters: chapterList });
+      const facts = docu && Array.isArray(raw?.facts)
+        ? (raw.facts as any[]).slice(0, 60).map((f: any) => String(typeof f === "string" ? f : f?.claim ?? "").replace(/\s+/g, " ").trim().slice(0, 240)).filter((x: string) => x.length > 8).map((x: string) => "- " + x).join("\n")
+        : "";
+      return NextResponse.json({ title: first.title, style, chapters: chapterList, facts });
     }
 
     // ---- editing the user's own video ----
@@ -162,6 +175,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ template: raw });
     }
 
+    // ---- the narration of one part is too long or too short for the length that was asked: condense or expand it (same scenes, same order) ----
+    if (body.kind === "narration-fit") {
+      const list = (Array.isArray(body.narrations) ? body.narrations : []).slice(0, 80).map((x: unknown) => String(x ?? "").slice(0, 700));
+      const target = Math.max(10, Math.min(4000, Math.round(Number(body.target) || 0)));
+      if (list.length === 0 || !target) return NextResponse.json({ error: "Nothing to fit." }, { status: 400 });
+      const mode = body.mode === "expand" ? "expand" : "condense";
+      const raw = extractJson(await ask(narrationFitPrompt({ scenes: list, target, mode, hindi: body.hindi === true, topic: String(body.topic || ""), facts: typeof body.facts === "string" ? body.facts : undefined }), undefined, 6000, true));
+      const out = Array.isArray(raw?.narrations) ? (raw.narrations as unknown[]).map((x) => String(x ?? "").replace(/\s+/g, " ").trim().slice(0, 700)) : [];
+      if (out.length !== list.length || out.some((x) => !x)) return NextResponse.json({ error: "The model did not return one narration per scene." }, { status: 422 });
+      return NextResponse.json({ narrations: out });
+    }
+
     if (body.kind === "scene-code") {
       const input = {
         scene: (body.scene ?? {}) as Record<string, unknown>,
@@ -174,7 +199,7 @@ export async function POST(req: Request) {
         error: typeof body.error === "string" ? body.error.slice(0, 1500) : undefined,
         critique: typeof body.critique === "string" ? body.critique.slice(0, 600) : undefined,
       };
-      let code = extractCode(await ask(sceneCodePrompt(input)));
+      let code = extractCode(await ask(sceneCodePrompt(input), undefined, 12000));
       let problem = checkCode(code);
       if (problem) {
         code = extractCode(await ask(sceneCodePrompt({ ...input, previousCode: code, error: problem, critique: undefined })));
