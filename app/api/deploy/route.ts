@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { connect, exec } from "@/lib/e2b-server";
 import { readBody, requestStatus } from "@/lib/request";
 import { q, wsRoot } from "@/lib/code-server";
+import { detectProject } from "@/lib/code-kind";
+import { prepareForVercel } from "@/lib/vercel-prep";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -42,6 +44,12 @@ done`;
     }
     if (files.length === 0) return fail("The codespace is empty — nothing to deploy yet.", 400);
 
+    // which language is it? Python / PHP get the small glue files Vercel needs; Java, Rust, C++ ... cannot run on Vercel at all
+    const kind = detectProject(files.map((f) => f.file));
+    if (kind.mode === "run") return fail(`${kind.label} cannot be hosted on Vercel as it is. It runs on the project computer (Terminal tab). For a visual preview ask the agent for a small HTML page, or for an api/ function in Python, Go or Ruby.`, 400);
+    const prep = prepareForVercel(files, kind);
+    files.splice(0, files.length, ...prep.files);
+
     const hasPkg = files.some((f) => f.file === "package.json");
     const name = slug(String(b.name || "")) || `venus-${slug(ws)}`;
 
@@ -63,7 +71,7 @@ done`;
     if (dep.readyState === "ERROR") return fail("Vercel build failed: " + (dep.errorMessage || "see the deployment logs on Vercel."));
 
     const host = dep.alias?.[0] || dep.url;
-    return NextResponse.json({ url: `https://${host}`, state: dep.readyState || "QUEUED", files: files.length });
+    return NextResponse.json({ url: `https://${host}`, state: dep.readyState || "QUEUED", files: files.length, kind: kind.id, label: kind.label, added: prep.added, ...(prep.warning ? { warning: prep.warning } : {}) });
   } catch (err) {
     return fail(err instanceof Error ? err.message : "Deploy failed.", requestStatus(err));
   }
