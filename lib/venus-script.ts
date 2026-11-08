@@ -177,12 +177,20 @@ export function enforceScript(sbIn: Storyboard, scriptRaw: string): { sb: Storyb
 const ON_RE = /(voice[\s-]?over|voiceover|narrat|dubb|commentary|awaaz|avaaz|आवाज|वॉइस|वॉयस)/i;
 const OFF_RE = /(no voice|without (?:a )?voice|voice[\s-]?less|silent|music only|only music|no narration|bina (?:awaaz|voice)|बिना आवाज)/i;
 
-/** on = always a voice-over; off = never; auto = the agent decides from the story (a better model decides better). */
+// A video that explains, tells or teaches NEEDS a voice. Before, the chat default was "auto" and the model often chose "music only"
+// (that is why a documentary came out without a voice-over). Now the default is ON; only an explicit wish for silence turns it off.
+const NARRATIVE_RE = /(documentar|dastavez|डॉक्यूमेंट|explainer|explained|deep[\s-]?dive|case study|history|itihas|इतिहास|biograph|story|kahani|कहानी|why |how |kaise|kyun|क्यों|कैसे|tutorial|news|review|ad\b|promo|launch|economy|rich|facts?)/i;
+const MUSIC_ONLY_RE = /(music (?:video|only)|visuali[sz]er|lyric|\bloop\b|abstract|mood (?:piece|reel)|screensaver)/i;
+
+/** on = always a voice-over; off = never; auto = the agent decides from the story (only when asked for explicitly). */
 export function voiceModeOf(p: { brief: string; voice?: boolean; voiceMode?: "auto" | "on" | "off"; origin?: string }, script: ScriptInfo | null): "on" | "off" | "auto" {
   if (script) return "on";
   if (p.voiceMode) return p.voiceMode;
   if (OFF_RE.test(p.brief)) return "off";
   if (ON_RE.test(p.brief)) return "on";
-  if (p.origin !== "chat" && p.voice === true) return "on"; // a ticked box of the form; the chat only switched it on when an OpenAI key existed
+  if (MUSIC_ONLY_RE.test(p.brief) && !NARRATIVE_RE.test(p.brief)) return "off";
+  if (p.origin === "chat") return "on"; // the chat asked for a video: a video with something to say gets a voice
+  if (p.voice === true) return "on"; // a ticked box of the form
+  if (NARRATIVE_RE.test(p.brief)) return "on";
   return "auto";
 }
