@@ -14,7 +14,23 @@ export type OAuthProvider = {
   authorizeExtra?: Record<string, string>; // fixed extra authorize parameters
   identity?: "email";                     // the signed-in account name is an e-mail address (checked against the "account" field)
   exchange?: "meta" | "threads";          // short-lived token is swapped for a long-lived one (no refresh token exists)
+  perShop?: boolean;                      // Shopify: every store has its own address (your-store.myshopify.com); "{shop}" in the URLs below is replaced by it
 };
+
+/* ---------------- Shopify helpers (each store has its own address) ---------------- */
+export const SHOPIFY_API_VERSION = "2026-07"; // quarterly Shopify API version; change here when you want a newer one
+const SHOP_RE = /^[a-z0-9][a-z0-9-]{0,60}\.myshopify\.com$/;
+/** "My-Store", "my-store.myshopify.com" or "https://my-store.myshopify.com/admin" all become "my-store.myshopify.com". Empty string when it is not a real Shopify store address. */
+export function normalizeShop(input: unknown): string {
+  let s = String(input ?? "").trim().toLowerCase();
+  if (!s) return "";
+  s = s.replace(/^https?:\/\//, "").split(/[/?#]/)[0].replace(/:\d+$/, "");
+  if (!s.includes(".")) s += ".myshopify.com";
+  return SHOP_RE.test(s) ? s : "";
+}
+export const shopifyApiBase = (shop: string) => `https://${shop}/admin/api/${SHOPIFY_API_VERSION}`;
+/** Puts the store address into a provider URL that contains "{shop}". */
+export const withShop = (url: string, shop?: string) => (shop ? url.split("{shop}").join(shop) : url);
 
 const googleScopes = [
   "openid", "email", "profile",
@@ -38,6 +54,7 @@ export const OAUTH_PROVIDERS: OAuthProvider[] = [
   { id: "zoom", label: "Zoom", authorizeUrl: "https://zoom.us/oauth/authorize", tokenUrl: "https://zoom.us/oauth/token", clientIdEnv: "ZOOM_CLIENT_ID", clientSecretEnv: "ZOOM_CLIENT_SECRET", scopes: ["user:read:user", "meeting:read:list_meetings"], apiBase: "https://api.zoom.us/v2", apiHost: "api.zoom.us", hosts: ["api.zoom.us"], note: "Meetings. Scopes depend on the Marketplace app." },
   { id: "figma", label: "Figma", authorizeUrl: "https://www.figma.com/oauth", tokenUrl: "https://api.figma.com/v1/oauth/token", clientIdEnv: "FIGMA_CLIENT_ID", clientSecretEnv: "FIGMA_CLIENT_SECRET", scopes: ["file_read"], apiBase: "https://api.figma.com/v1", apiHost: "api.figma.com", hosts: ["api.figma.com"], note: "Read files." },
   { id: "webflow", label: "Webflow", authorizeUrl: "https://webflow.com/oauth/authorize", tokenUrl: "https://api.webflow.com/oauth/access_token", clientIdEnv: "WEBFLOW_CLIENT_ID", clientSecretEnv: "WEBFLOW_CLIENT_SECRET", scopes: ["sites:read", "pages:read"], apiBase: "https://api.webflow.com/v2", apiHost: "api.webflow.com", hosts: ["api.webflow.com"], note: "Sites and pages." },
+  { id: "shopify", label: "Shopify", perShop: true, scopeSep: ",", authorizeUrl: "https://{shop}/admin/oauth/authorize", tokenUrl: "https://{shop}/admin/oauth/access_token", clientIdEnv: "SHOPIFY_CLIENT_ID", clientSecretEnv: "SHOPIFY_CLIENT_SECRET", scopes: ["read_products", "write_products", "read_orders", "write_orders", "read_customers", "read_inventory", "write_inventory", "read_fulfillments", "write_fulfillments", "read_draft_orders", "write_draft_orders"], apiBase: "https://{shop}/admin/api/" + SHOPIFY_API_VERSION, apiHost: "{shop}", hosts: ["{shop}"], note: "Products, orders, customers, inventory and fulfillments of ONE store. Type the store address (your-store.myshopify.com) first, then press Connect. REST (/products.json) and GraphQL (POST /graphql.json) both work. Add the callback URL of this site to the Shopify app's allowed redirect URLs." },
   // ---------------- Social media ----------------
   // YouTube uses the same Google app (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) as Gmail, but asks only for YouTube permissions.
   { id: "youtube", label: "YouTube", social: true, identity: "email", authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth", tokenUrl: "https://oauth2.googleapis.com/token", clientIdEnv: "GOOGLE_CLIENT_ID", clientSecretEnv: "GOOGLE_CLIENT_SECRET", scopes: ["openid", "email", "https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"], authorizeExtra: { access_type: "offline", prompt: "select_account consent" }, apiBase: "https://www.googleapis.com/youtube/v3", apiHost: "www.googleapis.com", hosts: ["www.googleapis.com", "youtube.googleapis.com"], note: "Upload videos, search YouTube, read your channel. Enable YouTube Data API v3 in Google Cloud. Same Google client id/secret as Gmail." },
