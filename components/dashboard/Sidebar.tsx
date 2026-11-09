@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Key, LogOut, Menu, Plus, Search, Settings, X } from "lucide-react";
+import { Key, LogOut, Menu, Moon, Plus, Search, Settings, Sun, User, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import type { Chat } from "@/lib/chats";
 import { splitSuggestions } from "@/lib/suggest";
 import { avatarFor, setActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import { closeDrawer, openDrawer, useDashFlag, useDrawer } from "@/lib/mobile-ui";
+import AboutModal from "@/components/dashboard/AboutModal";
+import { shownName, useProfile } from "@/lib/profile";
+import { useTheme } from "@/lib/theme";
 
 export default function Sidebar({
   chats,
@@ -27,13 +30,18 @@ export default function Sidebar({
   onSignOut: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const { profile } = useProfile();
+  const [theme, setTheme] = useTheme();
+  // the sidebar shows the owner's NAME (never the email)
+  const label = shownName(profile, userLabel);
   const [q, setQ] = useState("");
   const drawer = useDrawer();
   const touchX = useRef<number | null>(null);
   const busy = useAnyActivity();
   useAvatarStore();
   useDashFlag();
-  const initial = userLabel.trim().charAt(0).toUpperCase() || "?";
+  const initial = label.trim().charAt(0).toUpperCase() || "?";
 
   // tells the header which chat is open (so a changed avatar shows there too); on a phone the list closes by itself
   useEffect(() => {
@@ -148,6 +156,28 @@ export default function Sidebar({
               <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
               <div className="absolute bottom-[calc(100%+4px)] left-4 right-4 z-20 overflow-hidden rounded-lg border border-line bg-panel2 shadow-xl">
                 <button
+                  onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
+                  className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
+                >
+                  <User size={15} /> About
+                </button>
+                <div className="grid grid-cols-2 gap-1 border-y border-line px-2 py-2">
+                  <button
+                    onClick={() => setTheme("dark")}
+                    aria-pressed={theme === "dark"}
+                    className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs ${theme === "dark" ? "bg-line text-ink" : "text-muted hover:text-ink"}`}
+                  >
+                    <Moon size={13} /> Night mode
+                  </button>
+                  <button
+                    onClick={() => setTheme("light")}
+                    aria-pressed={theme === "light"}
+                    className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs ${theme === "light" ? "bg-line text-ink" : "text-muted hover:text-ink"}`}
+                  >
+                    <Sun size={13} /> Light mode
+                  </button>
+                </div>
+                <button
                   onClick={() => { setMenuOpen(false); onOpenApiKeys(); }}
                   className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-ink hover:bg-line"
                 >
@@ -167,7 +197,7 @@ export default function Sidebar({
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-panel2 text-xs font-medium text-ink">
               {initial}
             </div>
-            <span className="min-w-0 flex-1 truncate text-sm text-ink">{userLabel}</span>
+            <span className="min-w-0 flex-1 truncate text-sm text-ink">{label}</span>
             <button
               aria-label="Settings"
               title="Settings"
@@ -179,6 +209,7 @@ export default function Sidebar({
           </div>
         </div>
       </aside>
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </>
   );
 }
