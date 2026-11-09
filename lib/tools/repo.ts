@@ -1,10 +1,13 @@
 import type { Def } from "./plugins";
 import { runClone, runPush, runStatus, runWriteFile } from "@/lib/repo-server";
+import { OWNER_TOOLS } from "./owner-tools";
 
 const s = (v: unknown, n = 4000) => String(v ?? "").trim().slice(0, n);
 const need = <T,>(ctx: T | undefined): T => { if (!ctx) throw new Error("This tool only works from a chat."); return ctx; };
 
+// REPO_TOOLS is already part of every chat's free tool list, so the deck.*, profile.* and dashboard.* tools ride along with it.
 export const REPO_TOOLS: Def[] = [
+  ...OWNER_TOOLS,
   {
     name: "repo.status", risk: "read", params: "",
     description: "Is a GitHub repository cloned in this chat's Venus Code workspace? Shows the repo, branch and how many files are changed. Check it before touching repo files.",
