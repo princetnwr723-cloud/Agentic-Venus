@@ -16,6 +16,10 @@ export async function GET() {
   });
 }
 
+// Files the chat shows (attachments, files the agent made, computer replays and result files) are kept for good:
+// the delete action below never touches them, only Venus Pro's own project media.
+const KEEP = /^[^/]+\/(attachments|files|proof)\//;
+
 const safeName = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(-60) || "video.mp4";
 
 export async function POST(req: Request) {
@@ -25,7 +29,7 @@ export async function POST(req: Request) {
 
     if (body.action === "url") {
       const path = String(body.path || "");
-      if (!path.startsWith(uid + "/")) return NextResponse.json({ error: "Not your video." }, { status: 403 });
+      if (!path.startsWith(uid + "/") || path.includes("..")) return NextResponse.json({ error: "Not your file." }, { status: 403 });
       let url = await createSignedDownload(path);
       if (body.download) url += (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(String(body.download));
       return NextResponse.json({ url });
@@ -54,7 +58,7 @@ export async function POST(req: Request) {
     if (body.action === "delete") {
       const paths = (Array.isArray(body.paths) ? body.paths : [])
         .map(String)
-        .filter((p: string) => p.startsWith(uid + "/"));
+        .filter((p: string) => p.startsWith(uid + "/") && !p.includes("..") && !KEEP.test(p));
       await removeObjects(paths);
       return NextResponse.json({ ok: true });
     }
