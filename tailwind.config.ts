@@ -1,5 +1,8 @@
 import type { Config } from "tailwindcss";
 
+// Colors are CSS variables (see app/theme.css) so the whole app can switch between Night and Light mode.
+const v = (name: string) => `rgb(var(--c-${name}) / <alpha-value>)`;
+
 const config: Config = {
   content: [
     "./app/**/*.{ts,tsx}",
@@ -9,15 +12,15 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        bg: "#0A0A0B",
-        panel: "#151517",
-        panel2: "#1B1B1F",
-        line: "#28282D",
-        ink: "#F1F0EC",
-        muted: "#8B8A90",
-        faint: "#5B5A60",
-        gold: "#E7B24D",
-        goldSoft: "#3A2E17",
+        bg: v("bg"),
+        panel: v("panel"),
+        panel2: v("panel2"),
+        line: v("line"),
+        ink: v("ink"),
+        muted: v("muted"),
+        faint: v("faint"),
+        gold: v("gold"),
+        goldSoft: v("goldSoft"),
         avatar: {
           teal: "#3FC9AE",
           amber: "#EFA83B",
