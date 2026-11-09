@@ -5,6 +5,7 @@ import { Copy, Mail, RefreshCw, Users, X } from "lucide-react";
 import { doc, updateDoc } from "firebase/firestore";
 import BotAvatar from "@/components/BotAvatar";
 import AvatarEditor from "@/components/AvatarEditor";
+import DashboardCard from "@/components/dashboard/DashboardCard";
 import { auth, db } from "@/lib/firebase";
 import { avatarFor, setAvatarOverride, useAvatarStore } from "@/lib/avatar-activity";
 import { browserCreate, browserOverview } from "@/lib/mail-browser";
@@ -158,6 +159,9 @@ export default function IdentityPanel({
                   </button>
                 </div>
               </div>
+
+              {/* This chat's dashboard: created once with "[dashboard" in the chat, always shown here under Agent cooperation */}
+              <DashboardCard chatId={chatId} agentName={name} color={shown} />
             </div>
           )}
 
