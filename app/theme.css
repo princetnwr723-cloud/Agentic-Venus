@@ -1,0 +1,119 @@
+/* AgenticVenus themes: Night (default, the original look) and Light.
+   Every Tailwind color (bg, panel, ink, line ...) reads these variables, so one switch re-colors the whole app. */
+
+:root,
+html[data-theme="dark"] {
+  --c-bg: 10 10 11;
+  --c-panel: 21 21 23;
+  --c-panel2: 27 27 31;
+  --c-line: 40 40 45;
+  --c-ink: 241 240 236;
+  --c-muted: 139 138 144;
+  --c-faint: 91 90 96;
+  --c-gold: 231 178 77;
+  --c-goldSoft: 58 46 23;
+}
+
+html[data-theme="light"] {
+  --c-bg: 246 246 249;
+  --c-panel: 255 255 255;
+  --c-panel2: 240 240 245;
+  --c-line: 224 224 232;
+  --c-ink: 20 20 26;
+  --c-muted: 99 99 112;
+  --c-faint: 142 142 156;
+  --c-gold: 168 104 8;
+  --c-goldSoft: 253 240 211;
+  color-scheme: light;
+}
+html[data-theme="dark"] { color-scheme: dark; }
+
+body {
+  background: rgb(var(--c-bg));
+  color: rgb(var(--c-ink));
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+html[data-theme="light"] * { scrollbar-color: #c9c9d3 transparent; }
+html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c9c9d3; }
+html[data-theme="light"] :focus-visible { outline-color: #a86808; }
+
+/* ---------- Light mode: things that were written for a dark page ---------- */
+
+/* white buttons with dark text (primary buttons) become dark buttons with light text */
+html[data-theme="light"] .bg-white.text-bg { background-color: rgb(var(--c-ink)); }
+
+/* translucent white "glass" overlays become translucent dark ones */
+html[data-theme="light"] .bg-white\/5 { background-color: rgba(20, 20, 30, 0.04); }
+html[data-theme="light"] .bg-white\/10 { background-color: rgba(20, 20, 30, 0.07); }
+html[data-theme="light"] .bg-white\/15 { background-color: rgba(20, 20, 30, 0.09); }
+html[data-theme="light"] .bg-white\/20 { background-color: rgba(20, 20, 30, 0.12); }
+html[data-theme="light"] .bg-white\/\[0\.06\] { background-color: rgba(20, 20, 30, 0.05); }
+html[data-theme="light"] .border-white\/10 { border-color: rgba(20, 20, 30, 0.1); }
+html[data-theme="light"] .hover\:bg-white\/10:hover { background-color: rgba(20, 20, 30, 0.09); }
+
+/* error / success / diff colors that were light-on-dark */
+html[data-theme="light"] .text-red-300 { color: #b91c1c; }
+html[data-theme="light"] .text-red-200 { color: #991b1b; }
+html[data-theme="light"] .bg-red-950\/40 { background-color: rgba(254, 226, 226, 0.85); }
+html[data-theme="light"] .border-red-900\/50 { border-color: rgba(185, 28, 28, 0.3); }
+html[data-theme="light"] .text-emerald-200,
+html[data-theme="light"] .text-emerald-300 { color: #047857; }
+html[data-theme="light"] .text-indigo-200 { color: #4338ca; }
+html[data-theme="light"] .bg-emerald-500\/10 { background-color: rgba(16, 185, 129, 0.12); }
+html[data-theme="light"] .bg-red-500\/10 { background-color: rgba(239, 68, 68, 0.1); }
+
+/* glass (phone look) */
+html[data-theme="light"] .glass {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.6));
+  border-color: rgba(20, 20, 30, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 12px 32px rgba(40, 40, 70, 0.14);
+}
+html[data-theme="light"] .glass-strong {
+  background: linear-gradient(150deg, rgba(255, 255, 255, 0.95), rgba(244, 244, 250, 0.92));
+  border-color: rgba(20, 20, 30, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 -10px 40px rgba(40, 40, 70, 0.12);
+}
+@media (max-width: 767px) {
+  html[data-theme="light"] .glass-m {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.78));
+    border-color: rgba(20, 20, 30, 0.1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 12px 32px rgba(40, 40, 70, 0.16);
+  }
+  html[data-theme="light"][data-dash] body { background: #f6f6f9; }
+  html[data-theme="light"][data-dash] aside.w-\[46\%\],
+  html[data-theme="light"][data-dash] aside.w-\[62\%\] { background: rgba(255, 255, 255, 0.92); }
+  html[data-theme="light"][data-dash] [data-msg] .bg-panel2.rounded-xl {
+    background: rgba(20, 20, 30, 0.05);
+    border-color: rgba(20, 20, 30, 0.08);
+  }
+  html[data-theme="light"][data-dash] [data-msg] .bg-ink.rounded-xl {
+    background: linear-gradient(135deg, #26262e, #14141a);
+    box-shadow: 0 6px 18px rgba(20, 20, 40, 0.25);
+  }
+  html[data-theme="light"][data-dash] .wb-card {
+    background: rgba(255, 255, 255, 0.8);
+    border-color: rgba(20, 20, 30, 0.1);
+  }
+  html[data-theme="light"][data-dash] select {
+    background-color: rgba(20, 20, 30, 0.05);
+    border-color: rgba(20, 20, 30, 0.12);
+  }
+}
+
+/* Sections that are dark on purpose (the terminal in Venus Code, video studio previews) stay dark in Light mode:
+   they get the Night colors back, so their text stays readable. */
+html[data-theme="light"] :is(
+  [class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"],
+  [class*="bg-[#07100c]"], [class*="bg-[#082a21]"], [class*="bg-[#0d4a36]"], [class*="bg-[#0b3a2c]"]
+) {
+  --c-bg: 10 10 11; --c-panel: 21 21 23; --c-panel2: 27 27 31; --c-line: 40 40 45;
+  --c-ink: 241 240 236; --c-muted: 139 138 144; --c-faint: 91 90 96; --c-gold: 231 178 77; --c-goldSoft: 58 46 23;
+  color: rgb(var(--c-ink));
+}
+html[data-theme="light"] :is([class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"]) .bg-white\/5 { background-color: rgba(255, 255, 255, 0.05); }
+html[data-theme="light"] :is([class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"]) .bg-white\/10 { background-color: rgba(255, 255, 255, 0.1); }
+html[data-theme="light"] :is([class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"]) .border-white\/10 { border-color: rgba(255, 255, 255, 0.1); }
+html[data-theme="light"] :is([class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"]) .text-red-300 { color: #fca5a5; }
+html[data-theme="light"] :is([class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"]) .text-emerald-200 { color: #a7f3d0; }
+html[data-theme="light"] :is([class*="bg-[#12141a]"], [class*="bg-[#0b0c10]"], [class*="bg-[#101012]"], [class*="bg-[#1a1a1f]"]) .text-indigo-200 { color: #c7d2fe; }
