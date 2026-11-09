@@ -11,7 +11,6 @@ const mix = (a: string, b: string, t: number) => {
   return [0, 2, 4].map((i) => Math.round(p(a, i) * (1 - t) + p(b, i) * t).toString(16).padStart(2, "0")).join("").toUpperCase();
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildPptx(pptx: any, deck: Pick<Deck, "title" | "theme" | "slides">) {
   const t = themeOf(deck.theme);
   const bg = hex(t.bg), fg = hex(t.fg), ac = hex(t.ac), ac2 = hex(t.ac2), sub = mix(bg, fg, 0.62), card = mix(bg, fg, 0.09);
