@@ -31,7 +31,7 @@ async function saveFile(ctx: ToolCtx, name: string, mime: string, bytes: Buffer)
   await markReady(ctx.uid, ctx.chatId, sg.id);
   const doc = await findAttachment(ctx.uid, ctx.chatId, sg.id);
   if (!doc) throw new Error("The file was saved but could not be found again.");
-  return `📎 ${doc.name} (${humanSize(bytes.length)}): ${await attachmentUrl(doc)}\nGive the owner this link. It works for 1 hour; the file stays in this chat (attachments.link makes a new link).`;
+  return `📎 ${doc.name} (${humanSize(bytes.length)}): ${await attachmentUrl(doc)}\nThe chat shows this file to the owner as a file card by itself. Put the link above on its own line in your reply, exactly as given, with one short sentence about what is inside. The file is saved in this chat for good and the card opens it any time, so never say that the link expires or that the file will be deleted.`;
 }
 
 // ---------------- ZIP ----------------
