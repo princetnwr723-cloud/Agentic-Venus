@@ -1,14 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, CornerUpLeft, Repeat, Reply, RotateCcw, Wrench } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, Copy, CornerUpLeft, Repeat, Reply, RotateCcw, Wrench, XCircle } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { ChatMessage } from "@/lib/chats";
 import Markdown from "@/components/Markdown";
 import { splitSuggestions } from "@/lib/suggest";
 import { extractToolCalls } from "@/lib/tools/prompt";
 import { splitAttachmentBlock, type AttachKind } from "@/lib/attachments";
 import { previewFor } from "@/lib/attach-client";
+import { parseWork } from "@/lib/chat-files";
 import AttachCard from "@/components/dashboard/AttachCard";
+import FileCard from "@/components/dashboard/FileCard";
+import { CodeCard, LiveComputerCard, ReplayCard, VideoCard } from "@/components/dashboard/WorkCards";
 import FountFeedback from "@/components/fount/FountFeedback";
 import ConnectCard, { parseConnectCard } from "@/components/dashboard/ConnectCard";
 import PayCards from "@/components/dashboard/PayCard";
@@ -46,6 +50,21 @@ function viewOf(m: ChatMessage) {
   const body = extractToolCalls(split.body).clean; // old messages that still hold a raw [[TOOL:...]] show clean
   const tool = /^🔧\s*Using\s+(.+?)…?$/.exec(body.trim());
   return { body, next: split.next, empty: /^[.\u2026\s]*$/.test(body), toolName: tool ? tool[1] : "" };
+}
+
+// A reply that starts with ✅ / ⚠️ / ❌ gets a clear status line on top instead of a loose emoji.
+const STATUS: Array<{ re: RegExp; label: string; cls: string; Icon: LucideIcon }> = [
+  { re: /^\s*(?:✅|✔️|☑️)\s*/u, label: "Done", cls: "border-avatar-teal/30 bg-avatar-teal/10 text-avatar-teal", Icon: CheckCircle2 },
+  { re: /^\s*(?:⚠️|⚠)\s*/u, label: "Needs your attention", cls: "border-avatar-amber/30 bg-avatar-amber/10 text-avatar-amber", Icon: AlertTriangle },
+  { re: /^\s*(?:❌|⛔|🚫)\s*/u, label: "Could not finish", cls: "border-red-400/30 bg-red-400/10 text-red-300", Icon: XCircle },
+];
+
+function statusOf(text: string): { text: string; s: (typeof STATUS)[number] | null } {
+  for (const s of STATUS) {
+    const m = s.re.exec(text);
+    if (m && text.length > m[0].length + 2) return { text: text.slice(m[0].length), s };
+  }
+  return { text, s: null };
 }
 
 export default function ChatThread({
@@ -94,6 +113,14 @@ export default function ChatThread({
         const active = replyingAt != null && replyingAt === m.at;
         // The agent asked to connect a service: show the logo card with a Connect button instead of text.
         const card = isAssistant ? parseConnectCard(m.content) : null;
+        // Finished work and files: the text is cleaned and the files / video / replay / code preview become cards of their own.
+        const work = isAssistant && !card ? parseWork(body) : null;
+        const st = work ? statusOf(work.text) : { text: "", s: null };
+        const shownText = work ? st.text : body;
+        const cardCount = work ? work.files.length + (work.replay ? 1 : 0) + (work.video ? 1 : 0) + (work.code ? 1 : 0) : 0;
+        const showBubble = Boolean(card) || Boolean(shownText.trim()) || cardCount === 0;
+        const fresh = Date.now() - (m.at ?? 0) < 10 * 60_000;
+        const sameSpeaker = i > 0 && messages[i - 1].role === "assistant";
         return (
           <div key={i} data-msg={i} className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}>
             {m.role === "user" ? (
@@ -113,16 +140,34 @@ export default function ChatThread({
                           {sent.files.map((f, k) => <AttachCard key={k} name={f.name} kind={f.kind as AttachKind} preview={f.id ? previewFor(f.id) : undefined} />)}
                         </div>
                       )}
-                      {(sent.text.trim() || sent.files.length === 0) && <div className="whitespace-pre-wrap rounded-xl bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">{sent.text}</div>}
+                      {(sent.text.trim() || sent.files.length === 0) && <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">{sent.text}</div>}
                     </>
                   );
                 })()}
               </div>
             ) : (
-              <div className="max-w-[85%]">
-                <div className={`rounded-xl border bg-panel2 px-4 py-2.5 text-sm leading-relaxed text-ink transition-colors ${active ? "border-gold/70" : "border-line"}`}>
-                  {card ? <ConnectCard card={card} /> : <Markdown text={body || "…"} />}
-                </div>
+              <div className="w-full max-w-[85%]">
+                {agentName && !sameSpeaker && <p className="mb-1 ml-1 text-[11px] font-medium tracking-wide text-faint">{agentName}</p>}
+                {showBubble && (
+                  <div className={`rounded-2xl rounded-tl-md border bg-panel2 px-4 py-3 text-sm leading-relaxed text-ink shadow-panel transition-colors ${active ? "border-gold/70" : "border-line"}`}>
+                    {st.s && (
+                      <div className={`mb-2.5 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${st.s.cls}`}>
+                        <st.s.Icon size={13} /> {st.s.label}
+                      </div>
+                    )}
+                    {card ? <ConnectCard card={card} /> : <Markdown text={shownText || "…"} />}
+                  </div>
+                )}
+
+                {work && cardCount > 0 && (
+                  <div className={`${showBubble ? "mt-2.5" : ""} space-y-2.5`}>
+                    {work.code && <CodeCard chatId={work.code.chatId} status={work.code.status} fresh={fresh} />}
+                    {work.video && <VideoCard path={work.video.path} projectId={work.video.projectId} title={work.video.title} />}
+                    {work.replay && <ReplayCard path={work.replay.path} />}
+                    {work.files.map((f) => <FileCard key={f.path} file={f} />)}
+                  </div>
+                )}
+
                 <div className="mt-1 flex items-center gap-0.5">
                   {onReply && (
                     <Tool label="Reply to this message (select text first to reply to a part)" active={active} onClick={(e) => onReply(quoteOf(e, body), m.at)}>
@@ -132,7 +177,7 @@ export default function ChatThread({
                   {!card && (
                   <Tool
                     label="Copy"
-                    onClick={() => { navigator.clipboard?.writeText(body); setCopied(i); setTimeout(() => setCopied((v) => (v === i ? null : v)), 1200); }}
+                    onClick={() => { navigator.clipboard?.writeText(work ? work.text : body); setCopied(i); setTimeout(() => setCopied((v) => (v === i ? null : v)), 1200); }}
                   >
                     {copied === i ? <Check size={14} className="text-avatar-teal" /> : <Copy size={14} />}
                   </Tool>
@@ -181,13 +226,16 @@ export default function ChatThread({
 
       {pending && (
         <div className="flex justify-start">
-          <div className="flex items-center gap-1 rounded-xl border border-line bg-panel2 px-4 py-3">
+          <div className="flex items-center gap-1 rounded-2xl rounded-tl-md border border-line bg-panel2 px-4 py-3">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:150ms]" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:300ms]" />
           </div>
         </div>
       )}
+
+      {/* The computer starts working: its live screen appears right here in the chat, and goes away when the task ends */}
+      {chatId && <LiveComputerCard chatId={chatId} agentName={agentName} />}
 
       {/* The agent wants to pay: its message and the order card (product, card, total, Allow / Deny) right here in the chat */}
       {chatId && <PayCards chatId={chatId} agentName={agentName} />}
