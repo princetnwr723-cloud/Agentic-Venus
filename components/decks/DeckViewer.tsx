@@ -110,6 +110,14 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
     else download(`${deck.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "deck"}.html`, blob);
   };
 
+  // Esc closes the viewer (when not presenting and nothing is unsaved)
+  useEffect(() => {
+    if (present) return;
+    const k = (e: KeyboardEvent) => { if (e.key === "Escape" && !dirty) onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [present, dirty, onClose]);
+
   // Present mode keys
   useEffect(() => {
     if (!present || !deck) return;
@@ -131,7 +139,13 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
   );
 
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col bg-bg text-ink">
+    <div
+      className="fixed inset-0 z-[60] flex flex-col bg-bg text-ink"
+      /* nothing inside the viewer may reach the windows behind it (that used to close everything) */
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
       <DeckStyles />
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
         <input value={deck?.title ?? ""} onChange={(e) => { setDeck((d) => d && { ...d, title: e.target.value }); setDirty(true); }} className="min-w-[160px] flex-1 rounded-md bg-transparent px-2 py-1.5 text-sm font-medium text-ink focus:bg-panel2 focus:outline-none" aria-label="Deck title" />
@@ -148,6 +162,7 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
       </div>
       {err && <p className="border-b border-red-900/50 bg-red-950/40 px-4 py-2 text-xs text-red-300">{err}</p>}
       {!deck && !err && <div className="flex flex-1 items-center justify-center text-sm text-muted"><Loader2 className="mr-2 animate-spin" size={16} /> Opening…</div>}
+      {deck && deck.slides.length === 0 && <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted">This presentation has no slides, so it cannot be shown. Delete it with the bin icon above, then make a new one.</div>}
 
       {deck && sl && (
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
