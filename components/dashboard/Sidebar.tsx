@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Key, LogOut, Menu, Moon, Plus, Search, Settings, Sun, User, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
-import type { Chat } from "@/lib/chats";
+import { byRecent, type Chat } from "@/lib/chats";
 import { splitSuggestions } from "@/lib/suggest";
 import { avatarFor, setActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import { closeDrawer, openDrawer, useDashFlag, useDrawer } from "@/lib/mobile-ui";
@@ -49,10 +49,12 @@ export default function Sidebar({
     closeDrawer();
   }, [activeId]);
 
+  // the chat with the newest message is always on top, and it moves up by itself when a new message arrives
+  const ordered = useMemo(() => byRecent(chats), [chats]);
   const needle = q.trim().toLowerCase();
   const shown = needle
-    ? chats.filter((c) => c.agentName.toLowerCase().includes(needle) || c.messages.some((m) => m.content.toLowerCase().includes(needle)))
-    : chats;
+    ? ordered.filter((c) => c.agentName.toLowerCase().includes(needle) || c.messages.some((m) => m.content.toLowerCase().includes(needle)))
+    : ordered;
 
   return (
     <>
