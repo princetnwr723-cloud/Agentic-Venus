@@ -10,7 +10,6 @@ import CallButton from "@/components/dashboard/CallButton";
 import BotAvatar from "@/components/BotAvatar";
 import type { AvatarColor } from "@/lib/bots";
 import { useAuth } from "@/lib/auth-context";
-import { appendChatMessages } from "@/lib/chats";
 import { deckIntent } from "@/lib/intent";
 import { decksApi } from "@/components/decks/DeckViewer";
 
@@ -189,27 +188,23 @@ export default function ChatComposer({
   async function runDeck(text: string, arg: string, natural = false) {
     if (!user || !chatId) return;
     const cid = chatId;
-    let clock = Date.now();
-    const stamp = () => (clock = Math.max(clock + 1, Date.now()));
-    const post = (role: "user" | "assistant", content: string) => appendChatMessages(user.uid, cid, [{ role, content, at: stamp() }]).catch(() => undefined);
-    await post("user", text);
+    // the server writes the messages (a message this browser writes itself is not shown by the chat screen)
+    const post = (messages: Array<{ role: "user" | "assistant"; content: string }>) => decksApi({ action: "post", chatId: cid, messages }).catch(() => undefined);
     const [main, ...rest] = natural ? [arg] : arg.split("|");
     const look = rest.join("|").replace(/\s+/g, " ").trim();
     const n = /\b(\d{1,2})\s*(?:slides?|pages?)\b/i.exec(main);
     const slides = n ? Math.max(3, Math.min(24, Number(n[1]))) : 10;
     const topic = main.replace(n?.[0] ?? "", " ").replace(/\s+/g, " ").trim();
     if (topic.length < 3) {
-      await post("assistant", "ℹ️ Write what the presentation is about after the command, for example:\n\n`/deck how our AI agents save 20 hours a week, for a client meeting`\n\nOptional: add a number of slides (`/deck AI for beginners 8 slides`) and a look after a `|` (`/deck my startup pitch | dark and bold like a keynote`).");
+      await post([{ role: "user", content: text }, { role: "assistant", content: "ℹ️ Write what the presentation is about after the command, for example:\n\n`/deck how our AI agents save 20 hours a week, for a client meeting`\n\nOptional: add a number of slides (`/deck AI for beginners 8 slides`) and a look after a `|` (`/deck my startup pitch | dark and bold like a keynote`)." }]);
       return;
     }
     setDeckBusy(true);
+    await post([{ role: "user", content: text }, { role: "assistant", content: `⏳ Designing your presentation “${topic.length > 70 ? topic.slice(0, 68) + "…" : topic}” (${slides} slides). This takes about 1 to 2 minutes…` }]);
     try {
-      await post("assistant", `⏳ Designing your presentation “${topic.length > 70 ? topic.slice(0, 68) + "…" : topic}” (${slides} slides). This takes about 1 to 2 minutes…`);
-      const r = await decksApi<{ deck: { id: string; title: string; slides: unknown[] } }>({ action: "generate", chatId: cid, topic, slides, style: look || undefined });
-      await post("assistant", `✅ Your presentation **${r.deck.title}** is ready (${r.deck.slides.length} slides). Open the **Decks** button (presentation icon) to preview it, present it, edit it and download PowerPoint / HTML / PDF.`);
-    } catch (e) {
-      await post("assistant", `⚠️ I could not make the presentation: ${e instanceof Error ? e.message : "something went wrong"}\n\nTry again, use fewer slides, or pick a stronger model for this chat.`);
-    }
+      // announce: the server itself writes the ✅ / ⚠️ result into the chat, even if this window is closed meanwhile
+      await decksApi({ action: "generate", chatId: cid, topic, slides, style: look || undefined, announce: true });
+    } catch { /* the server already wrote the reason into the chat */ }
     setDeckBusy(false);
   }
 
