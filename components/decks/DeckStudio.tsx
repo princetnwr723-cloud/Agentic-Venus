@@ -3,7 +3,7 @@
 // download as PowerPoint / HTML / PDF. Nothing here touches Venus Code or any website project.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, X } from "lucide-react";
+import { Loader2, Trash2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { listChats, type Chat } from "@/lib/chats";
 import { getActiveChat } from "@/lib/avatar-activity";
@@ -80,12 +80,23 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
     setBusy(false);
   }
 
+  async function removeDeck(d: DeckListItem) {
+    if (!window.confirm(`Delete the presentation “${d.title}”? This cannot be undone.`)) return;
+    try { await decksApi({ action: "delete", id: d.id }); setDecks((l) => l.filter((x) => x.id !== d.id)); }
+    catch (e) { setErr(e instanceof Error ? e.message : "Could not delete."); }
+  }
+
   if (!open) return null;
   const chip = "rounded-full border px-3 py-1 text-xs transition-colors";
   return createPortal(
-    <div className="fixed inset-0 z-[56] flex items-stretch justify-center bg-black/70 sm:items-center sm:px-4" onClick={() => !busy && onClose()}>
+    <>
       <DeckStyles />
-      <div className="flex max-h-full w-full flex-col overflow-hidden bg-panel sm:max-h-[92vh] sm:max-w-3xl sm:rounded-xl2 sm:border sm:border-line" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="fixed inset-0 z-[56] flex items-stretch justify-center bg-black/70 sm:items-center sm:px-4"
+        onMouseDown={(e) => { if (e.target === e.currentTarget && !busy && !openId) onClose(); }}
+        onClick={(e) => e.stopPropagation()}
+      >
+      <div className="flex max-h-full w-full flex-col overflow-hidden bg-panel sm:max-h-[92vh] sm:max-w-3xl sm:rounded-xl2 sm:border sm:border-line">
         <div className="flex items-center gap-3 border-b border-line px-5 py-4">
           <span className="flex h-10 w-10 items-center justify-center rounded-full bg-goldSoft text-gold"><DeckIcon size={21} /></span>
           <div className="min-w-0 flex-1"><h2 className="text-base font-semibold text-ink">Decks</h2><p className="text-xs text-muted">Write one command. Get a real presentation.</p></div>
@@ -140,16 +151,20 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
           {decks.length === 0 && <p className="text-xs text-faint">None yet. Your first one will appear here.</p>}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {decks.map((d) => (
-              <button key={d.id} type="button" onClick={() => setOpenId(d.id)} className="group overflow-hidden rounded-lg border border-line text-left transition-colors hover:border-muted">
-                {d.cover ? <SlideView deck={{ theme: d.theme, slides: [d.cover] }} index={0} style={{ borderRadius: 0 }} /> : <div className="aspect-video bg-panel2" />}
-                <div className="px-2.5 py-2"><p className="truncate text-xs font-medium text-ink">{d.title}</p><p className="text-[10px] text-faint">{d.slideCount} slides · {ago(d.updatedAt)}</p></div>
-              </button>
+              <div key={d.id} className="group relative overflow-hidden rounded-lg border border-line transition-colors hover:border-muted">
+                <button type="button" onClick={() => setOpenId(d.id)} className="block w-full text-left" aria-label={`Open ${d.title}`}>
+                  {d.cover ? <SlideView deck={{ theme: d.theme, slides: [d.cover] }} index={0} style={{ borderRadius: 0 }} /> : <div className="aspect-video bg-panel2" />}
+                  <div className="px-2.5 py-2"><p className="truncate text-xs font-medium text-ink">{d.title}</p><p className="text-[10px] text-faint">{d.slideCount} slides · {ago(d.updatedAt)}</p></div>
+                </button>
+                <button type="button" onClick={() => void removeDeck(d)} title="Delete" aria-label={`Delete ${d.title}`} className="absolute right-1.5 top-1.5 rounded-full bg-black/60 p-1.5 text-white opacity-90 hover:bg-red-600"><Trash2 size={13} /></button>
+              </div>
             ))}
           </div>
         </div>
       </div>
+      </div>
       {openId && <DeckViewer id={openId} onClose={() => setOpenId(null)} onChanged={refresh} />}
-    </div>,
+    </>,
     document.body,
   );
 }
