@@ -1,5 +1,5 @@
 // Builds a real PowerPoint (.pptx) from a deck. `pptx` is a `new PptxGenJS()` (passed in, so this file has no import and can run in the browser or in tests).
-import { themeOf, type Deck } from "@/lib/decks";
+import { isFree, plainText, themeOf, type Deck } from "@/lib/decks";
 
 const hex = (c: string) => {
   const m = /^#([0-9a-f]{6})$/i.exec(c.trim());
@@ -11,7 +11,11 @@ const mix = (a: string, b: string, t: number) => {
   return [0, 2, 4].map((i) => Math.round(p(a, i) * (1 - t) + p(b, i) * t).toString(16).padStart(2, "0")).join("").toUpperCase();
 };
 
-export function buildPptx(pptx: any, deck: Pick<Deck, "title" | "theme" | "slides">) {
+/**
+ * `images[i]` is a picture (PNG data URL) of slide i. A free-form slide (designed by the model as HTML) goes into PowerPoint as that
+ * picture, so it looks exactly like the preview; when no picture could be made, its text goes in as a plain slide instead.
+ */
+export function buildPptx(pptx: any, deck: Pick<Deck, "title" | "theme" | "slides">, images: Array<string | null | undefined> = []) {
   const t = themeOf(deck.theme);
   const bg = hex(t.bg), fg = hex(t.fg), ac = hex(t.ac), ac2 = hex(t.ac2), sub = mix(bg, fg, 0.62), card = mix(bg, fg, 0.09);
   const font = /Georgia/.test(t.hf) ? "Georgia" : "Calibri";
@@ -22,6 +26,17 @@ export function buildPptx(pptx: any, deck: Pick<Deck, "title" | "theme" | "slide
   const total = deck.slides.length;
 
   deck.slides.forEach((sl, idx) => {
+    if (isFree(sl)) {
+      const f = pptx.addSlide();
+      if (sl.notes) f.addNotes(sl.notes);
+      const img = images[idx];
+      f.background = { color: img ? "FFFFFF" : bg };
+      if (img) { f.addImage({ data: img.replace(/^data:/, ""), x: 0, y: 0, w: 10, h: 5.625 }); return; }
+      const [head, ...rest] = plainText(sl.html as string);
+      f.addText(head ?? "", { x: 0.65, y: 0.5, w: 8.7, h: 1.1, fontFace: font, fontSize: 30, bold: true, color: fg, margin: 0, valign: "top" });
+      if (rest.length) f.addText(rest.slice(0, 12).map((b) => ({ text: b, options: { bullet: { indent: 16 }, breakLine: true, paraSpaceAfter: 8 } })), { x: 0.65, y: 1.8, w: 8.7, h: 3.3, fontFace: font, fontSize: 16, color: fg, margin: 0, valign: "top" });
+      return;
+    }
     const s = pptx.addSlide();
     s.background = { color: bg };
     s.addShape(pptx.ShapeType.ellipse, { x: 7.6, y: -1.7, w: 4.2, h: 4.2, fill: { color: ac, transparency: 84 }, line: { color: ac, transparency: 100 } });
