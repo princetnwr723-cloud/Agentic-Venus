@@ -19,7 +19,7 @@ export async function POST(req: Request) {
     }
     if (action === "save") return NextResponse.json({ deck: await saveDeck(uid, { ...(body.deck ?? {}), id: body.deck?.id, by: "owner" }) });
     if (action === "delete") { await deleteDeck(uid, String(body.id || "")); return NextResponse.json({ ok: true }); }
-    if (action === "generate") return NextResponse.json({ deck: await generateDeck(uid, { chatId: String(body.chatId || ""), topic: String(body.topic || ""), slides: Number(body.slides), theme: body.theme ? String(body.theme) : undefined, language: body.language ? String(body.language) : undefined }) });
+    if (action === "generate") return NextResponse.json({ deck: await generateDeck(uid, { chatId: String(body.chatId || ""), topic: String(body.topic || ""), slides: Number(body.slides), style: body.style ? String(body.style) : undefined, language: body.language ? String(body.language) : undefined }) });
     return fail("Unknown action.", 400);
   } catch (e) {
     const m = e instanceof Error ? e.message : "Decks failed.";
