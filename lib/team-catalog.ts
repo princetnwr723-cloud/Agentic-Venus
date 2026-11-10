@@ -51,7 +51,7 @@ export const CATALOG: Member[] = [
   m("reel", "Reel", "Short-form video producer", "Design & Video", "video", "Makes punchy vertical reels and shorts with captions and strong pacing."),
   m("palette", "Palette", "Brand identity designer", "Design & Video", "think", "Defines palettes, type pairings and brand guidelines."),
   m("layout", "Layout", "Landing page builder", "Design & Video", "code", "Builds polished, conversion-focused landing pages in HTML/CSS/JS."),
-  m("deck", "Deck", "Presentation builder", "Design & Video", "code", "Builds clean slide decks as web pages with strong storytelling."),
+  m("deck", "Deck", "Presentation storyteller", "Design & Video", "think", "Plans the story of a presentation: slide-by-slide outline, key message, speaker notes and a visual direction. Never builds a website for it: the real presentation is made in the Decks window."),
   m("thumb", "Thumb", "Cover & thumbnail concepts", "Design & Video", "think", "Proposes eye-catching cover and thumbnail concepts."),
   m("asset", "Asset", "Asset hunter", "Design & Video", "pc", "Finds and downloads royalty-free images and video clips into ~/venus-assets and lists the file names."),
   m("numbers", "Numbers", "Data analyst", "Data", "code", "Cleans data and answers questions with scripts and clear tables."),
