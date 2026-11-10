@@ -15,9 +15,12 @@ const toDeck = (id: string, d: Record<string, unknown>): Deck => ({
   theme: String(d.theme ?? "venus"), slides: Array.isArray(d.slides) ? (d.slides as Slide[]) : [], createdAt: num(d.createdAt), updatedAt: num(d.updatedAt), by: d.by === "owner" ? "owner" : "agent",
 });
 
-export async function listDecks(uid: string, chatId?: string): Promise<DeckSummary[]> {
+/** A deck in the list, with its first slide so the list can show a small preview. */
+export type DeckListItem = DeckSummary & { cover?: Slide };
+
+export async function listDecks(uid: string, chatId?: string): Promise<DeckListItem[]> {
   const snap = await col(uid).orderBy("updatedAt", "desc").limit(200).get();
-  return snap.docs.map((x) => { const d = x.data(); return { id: x.id, chatId: String(d.chatId ?? ""), title: String(d.title ?? ""), theme: String(d.theme ?? "venus"), slideCount: Array.isArray(d.slides) ? d.slides.length : 0, createdAt: num(d.createdAt), updatedAt: num(d.updatedAt), by: d.by }; })
+  return snap.docs.map((x) => { const d = x.data(); return { id: x.id, chatId: String(d.chatId ?? ""), title: String(d.title ?? ""), theme: String(d.theme ?? "venus"), slideCount: Array.isArray(d.slides) ? d.slides.length : 0, cover: Array.isArray(d.slides) ? (d.slides[0] as Slide | undefined) : undefined, createdAt: num(d.createdAt), updatedAt: num(d.updatedAt), by: d.by }; })
     .filter((d) => !chatId || d.chatId === chatId);
 }
 
@@ -37,7 +40,7 @@ export async function saveDeck(uid: string, input: { id?: string; chatId?: strin
     await col(uid).doc(cur.id).set({ ...c, chatId: cur.chatId, createdAt: cur.createdAt, updatedAt: now, by: cur.by ?? "agent" });
     return { ...cur, ...c, updatedAt: now };
   }
-  if ((await col(uid).count().get()).data().count >= MAX_DECKS) throw new Error(`You already have ${MAX_DECKS} decks. Delete some in Venus Code → Decks first.`);
+  if ((await col(uid).count().get()).data().count >= MAX_DECKS) throw new Error(`You already have ${MAX_DECKS} decks. Delete some in Decks first.`);
   const ref = col(uid).doc();
   const doc = { ...c, chatId: String(input.chatId ?? ""), createdAt: now, updatedAt: now, by: input.by === "owner" ? "owner" : "agent" };
   await ref.set(doc);
@@ -53,7 +56,7 @@ const SCHEMA = `{"title":"...","subtitle":"...","theme":"venus|paper|ocean|sunse
 
 export const DECK_GUIDE = `Slide layouts (use a MIX, never 8 bullet slides in a row): title (first slide: title, subtitle, body=presenter/date), section (kicker="01", title), bullets (title, 3-5 short bullets, max 12 words each), two-column (title, left{title,bullets}, right{title,bullets}), comparison (same as two-column, for A vs B), stats (title, 2-4 stats {value,label}), timeline (title, 3-5 steps {title,text}), quote (quote, by), closing (title, subtitle, bullets=contact lines). One idea per slide. Real facts only: if you do not know a number, do not invent it. Add speaker notes (2-3 sentences) to every slide. Themes: ${DECK_THEMES.map((t) => t.id).join(", ")}.`;
 
-/** The owner pressed "Generate" in Venus Code → Decks: this chat's own model writes the deck. */
+/** The owner pressed "Make presentation" in the Decks window: this chat's own model writes the deck. */
 export async function generateDeck(uid: string, p: { chatId: string; topic: string; slides?: number; theme?: string; language?: string }): Promise<Deck> {
   const topic = String(p.topic || "").trim().slice(0, 1500);
   if (topic.length < 3) throw new Error("Tell me what the deck is about.");
@@ -62,7 +65,7 @@ export async function generateDeck(uid: string, p: { chatId: string; topic: stri
   const sys = `You are a presentation designer. Reply with ONE valid JSON object only (no prose, no code fences) in this shape:\n${SCHEMA}\n\n${DECK_GUIDE}\nWrite in the language of the topic${p.language ? ` (${p.language})` : ""}. Exactly ${n} slides: first "title", last "closing".`;
   let deck: ReturnType<typeof cleanDeck> | null = null;
   for (let i = 0; i < 2 && !deck; i++) {
-    const raw = await callProvider({ provider: agent.provider, apiKey: agent.apiKey, model: agent.model, maxTokens: 9000, messages: [{ role: "system", content: sys }, { role: "user", content: `TOPIC / BRIEF:\n${topic}${i ? "\n\nIMPORTANT: reply with the JSON object only." : ""}` }] });
+    const raw = await callProvider({ provider: agent.provider, apiKey: agent.apiKey, model: agent.model, maxTokens: 7000, messages: [{ role: "system", content: sys }, { role: "user", content: `TOPIC / BRIEF:\n${topic}${i ? "\n\nIMPORTANT: reply with the JSON object only." : ""}` }] });
     const c = cleanDeck(parseJsonLoose(raw));
     if (c.slides.length >= 2) deck = c;
   }
