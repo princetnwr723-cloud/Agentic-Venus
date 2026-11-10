@@ -7,7 +7,6 @@ import { Loader2, Trash2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { listChats, type Chat } from "@/lib/chats";
 import { getActiveChat } from "@/lib/avatar-activity";
-import { DECK_THEMES } from "@/lib/decks";
 import type { DeckListItem } from "@/lib/decks-server";
 import DeckViewer, { DeckStyles, SlideView, decksApi } from "@/components/decks/DeckViewer";
 import { DeckIcon, SparkIcon } from "@/components/icons";
@@ -18,7 +17,8 @@ const IDEAS = [
   "Monthly business report: sales, wins, problems, next steps",
   "Why Dubai became so rich: story for investors",
 ];
-const STEPS = ["Understanding your topic…", "Planning the story…", "Writing the slides…", "Choosing layouts and notes…", "Almost ready…"];
+const LOOKS = ["Dark and bold, like a keynote", "Clean white, minimal", "Colourful and playful", "Luxury black and gold"];
+const STEPS = ["Understanding your topic…", "Planning the story…", "Designing every slide…", "Writing the slides and notes…", "Almost ready…"];
 const ago = (ms: number) => { const m = Math.round((Date.now() - ms) / 60000); if (m < 1) return "just now"; if (m < 60) return `${m} min ago`; const h = Math.round(m / 60); return h < 24 ? `${h} h ago` : `${Math.round(h / 24)} d ago`; };
 
 export default function DeckStudio({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -28,7 +28,7 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
   const [decks, setDecks] = useState<DeckListItem[]>([]);
   const [topic, setTopic] = useState("");
   const [count, setCount] = useState(10);
-  const [theme, setTheme] = useState("venus");
+  const [look, setLook] = useState("");
   const [busy, setBusy] = useState(false);
   const [secs, setSecs] = useState(0);
   const [err, setErr] = useState("");
@@ -72,7 +72,7 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
     if (topic.trim().length < 3) { setErr("Write what the presentation is about."); box.current?.focus(); return; }
     setBusy(true); setErr("");
     try {
-      const r = await decksApi<{ deck: { id: string } }>({ action: "generate", chatId, topic: topic.trim(), slides: count, theme });
+      const r = await decksApi<{ deck: { id: string } }>({ action: "generate", chatId, topic: topic.trim(), slides: count, style: look.trim() || undefined });
       setTopic("");
       await refresh();
       setOpenId(r.deck.id);
@@ -109,7 +109,7 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
             id="deck-cmd" ref={box} rows={3} value={topic} disabled={busy} maxLength={1500}
             onChange={(e) => setTopic(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void generate(); } }}
-            placeholder="e.g. Make a presentation on how our AI agents save 20 hours a week, for a client meeting"
+            placeholder="e.g. Make a presentation on how our AI agents save 20 hours a week, for a client meeting. The AI designs every slide itself."
             className="w-full resize-none rounded-lg border border-line bg-bg px-3.5 py-3 text-sm text-ink placeholder:text-faint focus:border-gold focus:outline-none disabled:opacity-60"
           />
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -122,14 +122,9 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
               <div className="flex flex-wrap gap-1.5">{[6, 8, 10, 12, 15, 20].map((n) => <button key={n} type="button" disabled={busy} onClick={() => setCount(n)} aria-pressed={count === n} className={`${chip} ${count === n ? "border-gold bg-goldSoft text-ink" : "border-line text-muted hover:text-ink"}`}>{n}</button>)}</div>
             </div>
             <div>
-              <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Look</p>
-              <div className="flex flex-wrap gap-2">
-                {DECK_THEMES.map((t) => (
-                  <button key={t.id} type="button" disabled={busy} title={t.name} aria-label={t.name} aria-pressed={theme === t.id} onClick={() => setTheme(t.id)}
-                    className={`h-7 w-7 rounded-full border-2 transition-transform hover:scale-110 ${theme === t.id ? "border-gold" : "border-line"}`}
-                    style={{ background: `linear-gradient(135deg, ${t.bg}, ${t.bg2} 60%, ${t.ac})` }} />
-                ))}
-              </div>
+              <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Look (optional)</p>
+              <input value={look} disabled={busy} maxLength={200} onChange={(e) => setLook(e.target.value)} list="deck-looks" placeholder="Empty = the AI decides" className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold focus:outline-none" aria-label="Look and feel" />
+              <datalist id="deck-looks">{LOOKS.map((l) => <option key={l} value={l} />)}</datalist>
             </div>
             <div>
               <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Written by</p>
@@ -145,7 +140,7 @@ export default function DeckStudio({ open, onClose }: { open: boolean; onClose: 
           <button type="button" onClick={generate} disabled={busy} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-white py-3 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-70">
             {busy ? <><Loader2 size={16} className="animate-spin" /> {STEPS[Math.min(STEPS.length - 1, Math.floor(secs / 7))]} <span className="opacity-60">{secs}s</span></> : <><SparkIcon size={17} /> Make presentation</>}
           </button>
-          <p className="mt-2 text-center text-[11px] text-faint">{busy ? "This takes about 20 to 60 seconds. Keep this window open." : "Ctrl/⌘ + Enter also works. Then preview, present, edit and download."}</p>
+          <p className="mt-2 text-center text-[11px] text-faint">{busy ? "Designing every slide takes about 1 to 2 minutes. Keep this window open." : "Ctrl/⌘ + Enter also works. Then preview, present, edit and download."}</p>
 
           <p className="mb-2 mt-6 text-[11px] font-medium uppercase tracking-wider text-faint">Your presentations ({decks.length})</p>
           {decks.length === 0 && <p className="text-xs text-faint">None yet. Your first one will appear here.</p>}
