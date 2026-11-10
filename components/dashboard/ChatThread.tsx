@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, CheckCircle2, Copy, CornerUpLeft, Repeat, Reply, RotateCcw, Wrench, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ChatMessage } from "@/lib/chats";
@@ -16,6 +16,9 @@ import { CodeCard, LiveComputerCard, ReplayCard, VideoCard } from "@/components/
 import FountFeedback from "@/components/fount/FountFeedback";
 import ConnectCard, { parseConnectCard } from "@/components/dashboard/ConnectCard";
 import PayCards from "@/components/dashboard/PayCard";
+
+// runs before the screen is painted (so a chat never flashes at its top), and falls back to useEffect where there is no screen
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 function Tool({ label, onClick, active, children }: { label: string; onClick: (e: React.MouseEvent) => void; active?: boolean; children: React.ReactNode }) {
   return (
@@ -92,8 +95,64 @@ export default function ChatThread({
 }) {
   const [copied, setCopied] = useState<number | null>(null);
 
+  // ---- the chat always opens at its LATEST message, and follows new ones while you are at the bottom
+  const root = useRef<HTMLDivElement>(null);
+  const stick = useRef(true); // true = the reader is at (or near) the bottom, so new content keeps the view at the bottom
+  const seen = useRef(0);
+
+  const scroller = useCallback((): HTMLElement | null => {
+    let el = root.current?.parentElement ?? null;
+    while (el) {
+      const oy = getComputedStyle(el).overflowY;
+      if (oy === "auto" || oy === "scroll") return el;
+      el = el.parentElement;
+    }
+    return null;
+  }, []);
+  const toBottom = useCallback(() => {
+    const el = scroller();
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [scroller]);
+
+  // another chat was opened: jump to the bottom at once, and once more while cards, images and long replies finish drawing
+  useIsoLayoutEffect(() => {
+    stick.current = true;
+    seen.current = messages.length;
+    toBottom();
+    const timers = [60, 220, 600, 1300].map((ms) => window.setTimeout(() => { if (stick.current) toBottom(); }, ms));
+    return () => timers.forEach((id) => window.clearTimeout(id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
+
+  // remember whether the reader scrolled up (then new content must not pull them down) or is back at the bottom
+  useEffect(() => {
+    const el = scroller();
+    if (!el) return;
+    const onScroll = () => { stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 140; };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [chatId, scroller]);
+
+  // the content grows after the first paint (markdown, cards, the live computer, the run bar): stay at the bottom while it does
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => { if (stick.current) toBottom(); });
+    if (root.current) ro.observe(root.current);
+    const wrap = scroller()?.firstElementChild;
+    if (wrap) ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [chatId, scroller, toBottom]);
+
+  // a new message (or a streaming reply): sending a message always brings you down to it
+  useIsoLayoutEffect(() => {
+    const n = messages.length;
+    if (n > seen.current && messages[n - 1]?.role === "user") stick.current = true;
+    seen.current = n;
+    if (stick.current) toBottom();
+  }, [messages, pending, busy, toBottom]);
+
   return (
-    <div className="space-y-4">
+    <div ref={root} className="space-y-4">
       {messages.map((m, i) => {
         const isAssistant = m.role === "assistant";
         const { body, next, empty, toolName } = viewOf(m);
