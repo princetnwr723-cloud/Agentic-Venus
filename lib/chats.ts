@@ -33,10 +33,24 @@ function chatsCol(uid: string) {
   return collection(db, "users", uid, "chats");
 }
 
+/** When a chat was last active: the time of its newest message, or (no messages yet) the time it was created. */
+export function lastActivity(c: Pick<Chat, "messages" | "createdAt">): number {
+  const msgs = Array.isArray(c.messages) ? c.messages : [];
+  let at = 0;
+  for (let i = msgs.length - 1; i >= 0 && i >= msgs.length - 5; i--) { const v = Number(msgs[i]?.at); if (Number.isFinite(v) && v > at) at = v; }
+  const created = c.createdAt && typeof c.createdAt.toMillis === "function" ? c.createdAt.toMillis() : 0;
+  return Math.max(at, created);
+}
+
+/** The chat with the newest message first (a brand new chat counts from the moment it was created). */
+export function byRecent<T extends Pick<Chat, "messages" | "createdAt">>(list: T[]): T[] {
+  return [...list].sort((a, b) => lastActivity(b) - lastActivity(a));
+}
+
 export async function listChats(uid: string): Promise<Chat[]> {
   const q = query(chatsCol(uid), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Chat, "id">) }));
+  return byRecent(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Chat, "id">) })));
 }
 
 export async function createChat(
