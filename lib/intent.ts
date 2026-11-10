@@ -11,12 +11,12 @@ const INTENTS: Intent[] = ["chat", "set_role", "assemble", "pc", "code", "video"
 const SYSTEM = `You are the "understand first" brain of an AI agent. Read the user's latest message and decide what they REALLY want right now. Reply with ONE JSON object only (no prose, no fences):
 {"intent":"...","task":"...","reply":"...","role":"...","facts":[],"then":[],"why":"..."}
 
-HOW THE AGENT WORKS: real work that needs a live computer the user can watch is intent "pc": research on live websites, collecting leads or any list, scraping, reading a whole GitHub repository, forms, logins, downloads, terminal/system work, signing up for services, audits, comparisons that need live data. The coding studio ("code") is ONLY for building or changing software. Chat is for conversation AND for everything a connected tool can do in a call.
+HOW THE AGENT WORKS: real work that needs a live computer the user can watch is intent "pc": research on live websites, collecting leads or any list, scraping, reading a whole GitHub repository, forms, logins, downloads, terminal/system work, signing up for services, audits, comparisons that need live data. The coding studio ("code") is ONLY for building or changing software (a presentation, PPT or slide deck is NOT software: it is chat, made with the deck.create tool). Chat is for conversation AND for everything a connected tool can do in a call.
 
 INTENTS
 - set_role: the user tells you WHO you are or gives your job ("you are my CEO", "from now on you are the lead developer of this project", "tum meri company ke head ho"). Put the role in one sentence in "role". If the same message ALSO asks for work (read the repo, assign a team...), put those steps in "then" and the remaining work as ONE self-contained instruction in "task".
 - assemble: the user asks you to hire / assemble / assign / set up a team. Nothing is started.
-- chat: questions, discussion, advice, writing, brainstorming, opinions, simple status, small lookups, AND every action a connected tool can do directly: sending, reading or searching email (gmail.*, email.*), messages (whatsapp/sms/telegram/slack), Google Sheets/Calendar/Drive (oauth_google), and posting, UPLOADING an already finished Venus Pro video (also "upload another one", "post it again"), or researching on a connected social platform (YouTube, X, LinkedIn, Facebook, Instagram, Threads, TikTok, Pinterest, Reddit) with the social.* tools, and adding / editing / deleting files in a GitHub repo (github.put_files, or repo.write_file + repo.push when the repo is cloned). This stays "chat" even for MANY recipients, files or platforms: the chat calls the tool. NEVER "pc", "video" or "code" for these ("video" means MAKING a new video, never uploading one). Leave "reply" empty.
+- chat: questions, discussion, advice, writing, brainstorming, opinions, simple status, small lookups, AND making a presentation / PPT / PowerPoint / slides / pitch deck (the built-in deck.create tool designs it and saves it in the Decks window: NEVER code, NEVER pc, NEVER a website), AND every action a connected tool can do directly: sending, reading or searching email (gmail.*, email.*), messages (whatsapp/sms/telegram/slack), Google Sheets/Calendar/Drive (oauth_google), and posting, UPLOADING an already finished Venus Pro video (also "upload another one", "post it again"), or researching on a connected social platform (YouTube, X, LinkedIn, Facebook, Instagram, Threads, TikTok, Pinterest, Reddit) with the social.* tools, and adding / editing / deleting files in a GitHub repo (github.put_files, or repo.write_file + repo.push when the repo is cloned). This stays "chat" even for MANY recipients, files or platforms: the chat calls the tool. NEVER "pc", "video" or "code" for these ("video" means MAKING a new video, never uploading one). Leave "reply" empty.
 - pc: ONE job that needs a live computer (see above), including analysing or reverse engineering software (REA runs on the computer). If no tool call can do it, it is pc.
 - code: ONE job that is software to build or change (website, app, script, bug fix, new feature). NEVER for research, leads, reading, writing, plans, company/role setup, sending email, or adding a file to a repo.
 - video: ONE motion-graphics video or reel.
@@ -48,6 +48,20 @@ const MAILY = /\b(e-?mails?|mails?)\b/i;
 const MAIL_ACT = /\b(send|bhej\w*|write|draft|reply|follow\s?-?up|forward)\b/i;
 const FINDY = /\b(find|collect|gather|scrape|extract|research|generate|compile|list|dhund\w*|dhoond\w*|nikal\w*)\b/i;
 
+
+// A presentation / PPT / slide deck is made with the deck.* tools (the Decks window): never as a website in Venus Code, never on the computer.
+const DECK_NOUN = /\b(presentations?|ppts?|pptx|power\s?points?|slide\s?decks?|slides?|pitch\s?decks?|decks?)\b/i;
+const DECK_VERB = /\b(make|create|build|prepare|design|generate|write|draft|need|want|redo|redesign|change|edit|update|bana\w*|bna\w*|banwa\w*|tayyar|chahiye|chaahiye|de\s?do|dedo|karo|kar\s?do|kardo|lik\w*)\b/i;
+const SITE_WORD = /\b(website|web\s?site|web\s?app|webapp|landing\s?page|react|next\.?js|html\s?page)\b/i;
+
+export function deckIntent(t: string): boolean {
+  const text = String(t ?? "");
+  if (!text || text.length > 4000 || !DECK_NOUN.test(text)) return false;
+  // "website" next to "presentation" means the owner really wants a website, unless PPT / PowerPoint / a slide deck is named too
+  if (SITE_WORD.test(text) && !/\b(ppts?|pptx|power\s?points?|slide\s?decks?|pitch\s?decks?)\b/i.test(text)) return false;
+  return DECK_VERB.test(text);
+}
+
 // ---------- multi-step detection: the agent decides by itself when a team is needed ----------
 const D_CODE = /\b(website|web ?site|landing|app|script|api|bot|extension|game|dashboard|component|bug|code|frontend|backend)\b/i;
 const D_VIDEO = /\b(video|reel|reels|shorts?|animation|motion graphics?)\b/i;
@@ -67,6 +81,7 @@ export function needsTeam(t: string, _tools: string[] = []): boolean {
   const text = String(t ?? "").trim();
   if (!text || text.startsWith("/") || text.length > 4000) return false;
   if (repoFileIntent(text)) return false;
+  if (deckIntent(text) && !D_VIDEO.test(text) && !D_PC.test(text)) return false;
   if (D_QUESTION.test(text) && /\?\s*$/.test(text)) return false;
   if (!D_ACTION.test(text)) return false;
   const heavy = [D_CODE, D_VIDEO, D_PC].filter((r) => r.test(text)).length;
@@ -79,6 +94,7 @@ export function needsTeam(t: string, _tools: string[] = []): boolean {
  * "send 5 emails" used to be caught here (it looks like "5 <noun>") and opened the computer.
  */
 export function forcePc(t: string, tools: string[] = []): boolean {
+  if (deckIntent(t)) return false;
   if (CODE_RE.test(t)) return false;
   if (repoFileIntent(t)) return false;
   const messageTool = tools.some((n) => /^(mail|gmail|email|oauth_google|oauth_microsoft|whatsapp|sms|telegram|slackbot)\b/.test(n));
@@ -94,6 +110,7 @@ export function forcePc(t: string, tools: string[] = []): boolean {
 function heuristic(text: string, hasComputer: boolean): Understanding | null {
   const base = { task: text, reply: "", role: "", why: "keyword fallback (the model step failed)", facts: [] as string[], then: [] as Then[] };
   if (repoFileIntent(text)) return null; // plain chat with tools
+  if (deckIntent(text)) return null; // plain chat: the deck.create tool makes the presentation
   if (SET_ROLE.test(text) && !CODE_RE.test(text)) {
     const then: Then[] = [];
     if (READ_REPO.test(text) || forcePc(text)) then.push("pc");
@@ -148,6 +165,11 @@ ${a.text.slice(0, 1500)}`
 
     // Posting / uploading / researching on a connected social platform is a social.* tool call: never the computer, never the video maker.
     if (socialJob && ["pc", "code", "video", "team", "clarify"].includes(intent)) { u.intent = intent = "chat"; u.task = ""; u.reply = ""; u.why = "social media job: handled by the social.* tools"; }
+
+    // A presentation is made by the deck.create tool (saved in Decks): never Venus Code, never the computer, never a team of specialists.
+    if (deckIntent(a.text) && ["pc", "code", "video", "team", "clarify"].includes(intent) && !(intent === "team" && (D_VIDEO.test(a.text) || D_PC.test(a.text)))) {
+      u.intent = intent = "chat"; u.task = ""; u.reply = ""; u.why = "presentation: made with the deck.create tool (Decks window)";
+    }
 
     // A work order must never be answered as plain chat (that is how fake "verified leads" appeared).
     if (forced && (intent === "chat" || intent === "clarify")) { u.intent = intent = "pc"; u.why = "work order: forced to the computer"; }
