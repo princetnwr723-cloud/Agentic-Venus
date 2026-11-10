@@ -2,7 +2,7 @@
 // They are "free" tools (always available in every chat). They only touch the owner's own data inside AgenticVenus.
 import type { Def } from "./plugins";
 import type { ToolCtx } from "./types";
-import { cleanDeck, DECK_THEMES, themeOf } from "@/lib/decks";
+import { cleanDeck } from "@/lib/decks";
 import { DECK_GUIDE, deleteDeck, getDeck, listDecks, saveDeck } from "@/lib/decks-server";
 import { getProfile, saveProfile, PROFILE_TEXT } from "@/lib/profile-server";
 import { collectStats, enableDashboard, logDashboard } from "@/lib/dashboard-server";
@@ -11,18 +11,18 @@ const need = (ctx: ToolCtx | undefined): ToolCtx => { if (!ctx) throw new Error(
 const s = (v: unknown, n = 300) => String(v ?? "").trim().slice(0, n);
 const asJson = (v: unknown): unknown => { if (typeof v !== "string") return v; try { return JSON.parse(v); } catch { return v; } };
 
-const SLIDE_PARAMS = "slides:array of {layout:title|section|bullets|two-column|comparison|stats|timeline|quote|closing, kicker?, title?, subtitle?, body?, bullets?:string[], left?:{title,bullets}, right?:{title,bullets}, stats?:[{value,label}], steps?:[{title,text}], quote?, by?, notes?}";
+const SLIDE_PARAMS = "slides:array of {html:string (the COMPLETE design of the slide: one HTML fragment for a 1280x720 canvas, single quotes for attributes), notes?:string (speaker notes)}. Old decks may also hold {layout:title|section|bullets|two-column|comparison|stats|timeline|quote|closing, kicker?, title?, subtitle?, body?, bullets?, left?, right?, stats?, steps?, quote?, by?} slides; keep those as they are unless asked to change them";
 
 export const OWNER_TOOLS: Def[] = [
   // ---------------- Decks ----------------
   {
-    name: "deck.create", risk: "read", params: `title:string, theme?:${DECK_THEMES.map((t) => t.id).join("|")}, subtitle?:string, ${SLIDE_PARAMS}`,
-    description: `Make a presentation (deck) for the owner. YOU write every slide yourself (research first with the web tools if the topic needs facts), then call this once with all slides. It is saved in the owner's Decks (the presentation icon button in the left sidebar), where the owner can preview, present, edit it and download PowerPoint / HTML / PDF. Never build a presentation as a website in Venus Code. ${DECK_GUIDE} After it succeeds, tell the owner to open the Decks button in the left sidebar.`,
+    name: "deck.create", risk: "read", params: `title:string, subtitle?:string, ${SLIDE_PARAMS}`,
+    description: `THE way to make any presentation, PPT, slides or pitch deck ("presentation bana do", "ppt banao", "make slides"). YOU design and write every slide yourself (research first with the web tools if the topic needs facts), then call this ONCE with all slides. It is saved in the owner's Decks (the presentation icon button in the left sidebar), where the owner can preview, present, edit it and download PowerPoint / HTML / PDF. NEVER build a presentation as a website, an HTML project or a slideshow app in Venus Code, on the computer or with file.create: always this tool. ${DECK_GUIDE} After it succeeds, tell the owner to open the Decks button in the left sidebar.`,
     run: async (a, _c, ctx) => {
       const c = need(ctx);
       const clean = cleanDeck({ ...a, slides: asJson(a.slides) });
       const d = await saveDeck(c.uid, { ...clean, chatId: c.chatId, by: "agent" });
-      return `Deck created: "${d.title}" (${d.slides.length} slides, theme ${themeOf(d.theme).name}), id ${d.id}.\nTell the owner: tap the Decks icon (presentation screen) in the left sidebar to preview, present, edit and download it (PowerPoint / HTML / PDF).`;
+      return `Deck created: "${d.title}" (${d.slides.length} slides), id ${d.id}.\nTell the owner: tap the Decks icon (presentation screen) in the left sidebar to preview, present, edit and download it (PowerPoint / HTML / PDF).`;
     },
   },
   {
@@ -40,13 +40,13 @@ export const OWNER_TOOLS: Def[] = [
     run: async (a) => { throw new Error("unused " + s(a.id)); },
   },
   {
-    name: "deck.update", risk: "read", params: `id:string, title?:string, theme?:string, subtitle?:string, ${SLIDE_PARAMS} (the COMPLETE new list of slides; it replaces the old one)`,
-    description: "Change a deck: read it with deck.get, then send the full updated slides list.",
+    name: "deck.update", risk: "read", params: `id:string, title?:string, subtitle?:string, ${SLIDE_PARAMS} (the COMPLETE new list of slides; it replaces the old one)`,
+    description: "Change a deck (also \"change slide 3\", \"make it shorter\", \"new colours\"): read it with deck.get, then send the full updated slides list. Redesign slides freely with new html when the owner asks for a different look.",
     run: async (a, _c, ctx) => {
       const c = need(ctx);
       const cur = await getDeck(c.uid, s(a.id, 80));
       if (!cur) throw new Error("Deck not found. Use deck.list for the ids.");
-      const d = await saveDeck(c.uid, { id: cur.id, title: a.title ?? cur.title, subtitle: a.subtitle ?? cur.subtitle, theme: a.theme ?? cur.theme, slides: a.slides !== undefined ? asJson(a.slides) : cur.slides });
+      const d = await saveDeck(c.uid, { id: cur.id, title: a.title ?? cur.title, subtitle: a.subtitle ?? cur.subtitle, theme: cur.theme, slides: a.slides !== undefined ? asJson(a.slides) : cur.slides });
       return `Deck updated: "${d.title}" (${d.slides.length} slides). It is in the Decks button (left sidebar).`;
     },
   },
