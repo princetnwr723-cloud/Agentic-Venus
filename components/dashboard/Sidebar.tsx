@@ -9,6 +9,8 @@ import { splitSuggestions } from "@/lib/suggest";
 import { avatarFor, setActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import { closeDrawer, openDrawer, useDashFlag, useDrawer } from "@/lib/mobile-ui";
 import AboutModal from "@/components/dashboard/AboutModal";
+import DeckStudio from "@/components/decks/DeckStudio";
+import { DeckIcon } from "@/components/icons";
 import { shownName, useProfile } from "@/lib/profile";
 import { useTheme } from "@/lib/theme";
 
@@ -31,6 +33,7 @@ export default function Sidebar({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [deckOpen, setDeckOpen] = useState(false);
   const { profile } = useProfile();
   const [theme, setTheme] = useTheme();
   // the sidebar shows the owner's NAME (never the email)
@@ -88,6 +91,14 @@ export default function Sidebar({
         <div className="flex items-center justify-between px-4 pb-4 pt-[calc(var(--sat)+1rem)] md:pt-4">
           <Logo size={18} />
           <div className="flex items-center gap-1">
+            <button
+              aria-label="Decks (presentations)"
+              title="Decks: make a presentation with one command"
+              onClick={() => setDeckOpen(true)}
+              className="press rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"
+            >
+              <DeckIcon size={18} />
+            </button>
             <button
               aria-label="New chat"
               title="New chat"
@@ -210,6 +221,7 @@ export default function Sidebar({
         </div>
       </aside>
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
+      <DeckStudio open={deckOpen} onClose={() => setDeckOpen(false)} />
     </>
   );
 }
