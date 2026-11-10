@@ -19,6 +19,8 @@ import {
 } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import PaymentApprovals from "@/components/dashboard/PaymentApprovals";
+import DeckStudio from "@/components/decks/DeckStudio";
+import { DeckIcon } from "@/components/icons";
 import GlassSheet from "@/components/ui/GlassSheet";
 import { avatarFor, getActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import type { AvatarColor } from "@/lib/bots";
@@ -121,6 +123,7 @@ export default function ChatHeader({
   const [compact, setCompact] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
+  const [deckOpen, setDeckOpen] = useState(false);
 
   // measure the header itself (not the screen): the chat column gets narrow when the computer panel is open
   useEffect(() => {
@@ -159,6 +162,7 @@ export default function ChatHeader({
     { key: "profile", label: "Profile & email", icon: <User size={16} />, onClick: onIdentity },
     { key: "code", label: "Venus Code", icon: <Code2 size={16} />, onClick: onCode },
     { key: "venus", label: "Venus Pro (video)", icon: <Film size={16} />, onClick: onVenus },
+    { key: "decks", label: "Decks (presentations)", icon: <DeckIcon size={17} />, onClick: () => setDeckOpen(true), active: deckOpen },
     { key: "skills", label: "Memory & Skills", icon: <Brain size={16} />, onClick: onSkills },
     { key: "runs", label: "Runs", icon: <Activity size={16} />, onClick: onRuns },
     { key: "vpassword", label: "vPassword", icon: <KeyRound size={16} />, onClick: onVpassword },
@@ -189,6 +193,7 @@ export default function ChatHeader({
     runs: { label: "Runs", hint: "Background tasks", tone: "sky" },
     code: { label: "Venus Code", hint: "Build & deploy", tone: "sky" },
     venus: { label: "Venus Pro", hint: "Video studio", tone: "violet" },
+    decks: { label: "Decks", hint: "Make presentations", tone: "violet" },
     skills: { label: "Memory & Skills", hint: "What it knows", tone: "gold" },
     connectors: { label: "Connectors", hint: hasConnectors ? "Connected" : "Link your tools", tone: "teal" },
     vpassword: { label: "vPassword", hint: "Logins vault", tone: "sky" },
@@ -196,7 +201,7 @@ export default function ChatHeader({
   };
   const groups: Array<{ title: string; keys: string[] }> = [
     { title: "Work", keys: ["pc", "team", "routines", "runs"] },
-    { title: "Create", keys: ["code", "venus"] },
+    { title: "Create", keys: ["code", "venus", "decks"] },
     { title: "Brain & access", keys: ["skills", "connectors", "vpassword"] },
     { title: "Agent", keys: ["profile"] },
   ];
@@ -357,6 +362,8 @@ export default function ChatHeader({
           </section>
         ))}
       </GlassSheet>
+
+      <DeckStudio open={deckOpen} onClose={() => setDeckOpen(false)} />
     </>
   );
 }
