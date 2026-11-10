@@ -1,8 +1,12 @@
 // Shared by the browser, the server and the agent tools (no imports on purpose).
 // A deck is plain JSON: { title, theme, slides[] }. ONE renderer (slideHtml + deckCss) draws every slide, so the preview in
-// Venus Code, the Present mode, the downloaded HTML and the PDF print all look exactly the same.
+// the Decks window, the Present mode, the downloaded HTML and the PDF print all look exactly the same.
+// NO FIXED TEMPLATE: the AI model designs every slide itself as free HTML on a 1280x720 canvas (layout "free", field `html`).
+// The old ready-made layouts below still exist, only so that decks made earlier keep opening and can still be edited.
 
-export const LAYOUTS = ["title", "section", "bullets", "two-column", "comparison", "stats", "timeline", "quote", "closing"] as const;
+export const LAYOUTS = ["free", "title", "section", "bullets", "two-column", "comparison", "stats", "timeline", "quote", "closing"] as const;
+export const SLIDE_W = 1280;
+export const SLIDE_H = 720;
 export type Layout = (typeof LAYOUTS)[number];
 export type Column = { title?: string; bullets: string[] };
 export type Slide = {
@@ -12,6 +16,8 @@ export type Slide = {
   stats?: Array<{ value: string; label: string }>;
   steps?: Array<{ title: string; text?: string }>;
   quote?: string; by?: string; notes?: string;
+  /** layout "free": the complete design of this slide, written by the model as HTML + CSS for a 1280x720 canvas. */
+  html?: string;
 };
 export type Deck = { id: string; chatId: string; title: string; subtitle?: string; theme: string; slides: Slide[]; createdAt: number; updatedAt: number; by?: "agent" | "owner" };
 export type DeckSummary = { id: string; chatId: string; title: string; theme: string; slideCount: number; createdAt: number; updatedAt: number; by?: string };
@@ -41,12 +47,60 @@ const col = (v: unknown): Column | undefined => {
   return bullets.length || title ? { title: title || undefined, bullets } : undefined;
 };
 
+
+// ---------------------------------------------------------------- free-form slide HTML (written by a model: always cleaned, always shown inside a sandboxed frame)
+export const MAX_SLIDE_HTML = 16000;
+
+/** Keeps the design (tags, inline styles, <style>, inline SVG) and removes everything that could run code or load a page. */
+export function cleanHtml(raw: unknown, max = MAX_SLIDE_HTML): string {
+  let h = String(raw ?? "").replace(/\r/g, "").replace(/```(?:html|xml)?/gi, "");
+  h = h.replace(/<!doctype[^>]*>/gi, "").replace(/<\/?(?:html|head|body)\b[^>]*>/gi, "");
+  h = h.replace(/<title\b[\s\S]*?<\/title>/gi, "").replace(/<(?:meta|link|base)\b[^>]*>/gi, "");
+  h = h.replace(/<(script|iframe|object|embed|applet|frameset|frame|noscript)\b[\s\S]*?<\/\1\s*>/gi, "").replace(/<\/?(?:script|iframe|object|embed|applet|frameset|frame|noscript)\b[^>]*>/gi, "");
+  h = h.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+  h = h.replace(/(href|src|xlink:href|action)\s*=\s*(["']?)\s*(?:javascript|vbscript|data:text\/html)[^"'>\s]*/gi, "$1=$2#");
+  h = h.replace(/@import[^;{]*;?/gi, "").replace(/expression\s*\(/gi, "(").replace(/behavior\s*:[^;"']*/gi, "");
+  return h.trim().slice(0, max);
+}
+
+/** The text of a free slide without its markup (used for the PowerPoint fallback and for the thumbnails' titles). */
+export function plainText(html: string): string[] {
+  return String(html ?? "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<(?:br|\/p|\/div|\/h[1-6]|\/li|\/tr)\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .split("\n").map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+/** The full page of one free slide: this is what the sandboxed frame shows (and what is turned into a picture for PowerPoint). */
+export function freeDoc(html: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=${SLIDE_W}"><style>*{box-sizing:border-box}html,body{margin:0;padding:0;width:${SLIDE_W}px;height:${SLIDE_H}px;overflow:hidden;background:#fff}body{font-family:Inter,"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}</style></head><body>${html}</body></html>`;
+}
+
+/** Reads the reply of a model that was asked for <deck-title>, <deck-subtitle> and one <slide><notes>..</notes> HTML </slide> per slide. */
+export function parseDeckText(raw: string): { title: string; subtitle: string; slides: Array<{ layout: "free"; html: string; notes: string }> } | null {
+  const text = String(raw ?? "");
+  if (!/<slide\b/i.test(text)) return null;
+  const tag = (n: string) => new RegExp(`<${n}>([\\s\\S]*?)</${n}>`, "i").exec(text)?.[1]?.replace(/\s+/g, " ").trim() ?? "";
+  const slides = text.split(/<slide\b[^>]*>/i).slice(1).map((part) => {
+    const body = part.replace(/<\/slide>[\s\S]*$/i, "");
+    const notes = /<notes>([\s\S]*?)<\/notes>/i.exec(body)?.[1]?.trim() ?? "";
+    return { layout: "free" as const, html: cleanHtml(body.replace(/<notes>[\s\S]*?<\/notes>/i, "")), notes: notes.slice(0, 900) };
+  }).filter((x) => x.html.length > 40);
+  return slides.length ? { title: tag("deck-title"), subtitle: tag("deck-subtitle"), slides } : null;
+}
+
+export const isFree = (sl: Slide | undefined) => Boolean(sl && sl.layout === "free" && sl.html);
+
 export function cleanSlide(raw: unknown): Slide | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
+  const html = cleanHtml(o.html ?? o.markup);
+  if (html.length > 40) return { layout: "free", html, ...(long(o.notes ?? o.speaker_notes, 900) ? { notes: long(o.notes ?? o.speaker_notes, 900) } : {}), ...(s(o.title, 120) ? { title: s(o.title, 120) } : {}) };
   let layout = s(o.layout ?? o.type, 20).toLowerCase().replace(/[_\s]+/g, "-") as Layout;
   if (layout === ("two-columns" as string) || layout === ("columns" as string)) layout = "two-column";
-  if (!LAYOUTS.includes(layout)) layout = "bullets";
+  if (!LAYOUTS.includes(layout) || layout === "free") layout = "bullets";
   const sl: Slide = { layout };
   const put = <K extends keyof Slide>(k: K, v: Slide[K] | undefined | "") => { if (v !== undefined && v !== "" && !(Array.isArray(v) && !v.length)) sl[k] = v as Slide[K]; };
   put("kicker", s(o.kicker, 40)); put("title", s(o.title, 120)); put("subtitle", s(o.subtitle, 220)); put("body", long(o.body ?? o.text, 500));
@@ -85,6 +139,7 @@ const ul = (a?: string[]) => (a?.length ? `<ul class="b">${a.map((x) => `<li>${e
 const colHtml = (c: Column | undefined, cls = "") => `<div class="col ${cls}">${c?.title ? `<h3>${esc(c.title)}</h3>` : ""}${ul(c?.bullets)}</div>`;
 
 export function slideHtml(sl: Slide, n: number, total: number, brand = "AgenticVenus"): string {
+  if (isFree(sl)) return `<div class="s l-free"><iframe title="Slide ${n}" sandbox="" referrerpolicy="no-referrer" srcdoc="${esc(freeDoc(sl.html as string))}" style="display:block;width:${SLIDE_W}px;height:${SLIDE_H}px;border:0;background:#fff;pointer-events:none"></iframe></div>`;
   const head = `${sl.kicker ? `<div class="k">${esc(sl.kicker)}</div>` : ""}${sl.title ? `<h2 class="t">${esc(sl.title)}</h2>` : ""}`;
   let body = "";
   switch (sl.layout) {
@@ -122,6 +177,8 @@ export const themeVars = (t: DeckTheme) => `--bg:${t.bg};--bg2:${t.bg2};--fg:${t
 
 export const deckCss = () => `
 .dk .s{position:relative;width:1280px;height:720px;overflow:hidden;background:linear-gradient(135deg,var(--bg),var(--bg2));color:var(--fg);font-family:var(--font);--sc:1;text-align:left}
+.dk .s.l-free{background:none}
+.dk .s.l-free::before,.dk .s.l-free::after{display:none}
 .dk .s::before{content:"";position:absolute;right:-190px;top:-190px;width:540px;height:540px;border-radius:50%;background:radial-gradient(circle,var(--ac) 0,transparent 68%);opacity:.26}
 .dk .s::after{content:"";position:absolute;left:-150px;bottom:-210px;width:470px;height:470px;border-radius:50%;background:radial-gradient(circle,var(--ac2) 0,transparent 70%);opacity:.17}
 .dk .in{position:relative;z-index:1;height:100%;padding:64px 84px 70px;display:flex;flex-direction:column}
