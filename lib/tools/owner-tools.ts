@@ -9,7 +9,6 @@ import { collectStats, enableDashboard, logDashboard } from "@/lib/dashboard-ser
 
 const need = (ctx: ToolCtx | undefined): ToolCtx => { if (!ctx) throw new Error("This tool only works from a chat."); return ctx; };
 const s = (v: unknown, n = 300) => String(v ?? "").trim().slice(0, n);
-const link = (c: ToolCtx, id: string) => `${c.origin || c.baseUrl || ""}/code?chat=${encodeURIComponent(c.chatId)}&deck=${encodeURIComponent(id)}`;
 const asJson = (v: unknown): unknown => { if (typeof v !== "string") return v; try { return JSON.parse(v); } catch { return v; } };
 
 const SLIDE_PARAMS = "slides:array of {layout:title|section|bullets|two-column|comparison|stats|timeline|quote|closing, kicker?, title?, subtitle?, body?, bullets?:string[], left?:{title,bullets}, right?:{title,bullets}, stats?:[{value,label}], steps?:[{title,text}], quote?, by?, notes?}";
@@ -18,12 +17,12 @@ export const OWNER_TOOLS: Def[] = [
   // ---------------- Decks ----------------
   {
     name: "deck.create", risk: "read", params: `title:string, theme?:${DECK_THEMES.map((t) => t.id).join("|")}, subtitle?:string, ${SLIDE_PARAMS}`,
-    description: `Make a presentation (deck) for the owner. YOU write every slide yourself (research first with the web tools if the topic needs facts), then call this once with all slides. It is saved in Venus Code → Decks, where the owner can present it, edit it and download PowerPoint / HTML / PDF. ${DECK_GUIDE} After it succeeds, tell the owner the link from the result.`,
+    description: `Make a presentation (deck) for the owner. YOU write every slide yourself (research first with the web tools if the topic needs facts), then call this once with all slides. It is saved in the owner's Decks (the presentation icon button in the left sidebar), where the owner can preview, present, edit it and download PowerPoint / HTML / PDF. Never build a presentation as a website in Venus Code. ${DECK_GUIDE} After it succeeds, tell the owner to open the Decks button in the left sidebar.`,
     run: async (a, _c, ctx) => {
       const c = need(ctx);
       const clean = cleanDeck({ ...a, slides: asJson(a.slides) });
       const d = await saveDeck(c.uid, { ...clean, chatId: c.chatId, by: "agent" });
-      return `Deck created: "${d.title}" (${d.slides.length} slides, theme ${themeOf(d.theme).name}), id ${d.id}.\nOpen it: ${link(c, d.id)}\nTell the owner it is in Venus Code → Decks (they can present, edit, and download PowerPoint / HTML / PDF there).`;
+      return `Deck created: "${d.title}" (${d.slides.length} slides, theme ${themeOf(d.theme).name}), id ${d.id}.\nTell the owner: tap the Decks icon (presentation screen) in the left sidebar to preview, present, edit and download it (PowerPoint / HTML / PDF).`;
     },
   },
   {
@@ -48,7 +47,7 @@ export const OWNER_TOOLS: Def[] = [
       const cur = await getDeck(c.uid, s(a.id, 80));
       if (!cur) throw new Error("Deck not found. Use deck.list for the ids.");
       const d = await saveDeck(c.uid, { id: cur.id, title: a.title ?? cur.title, subtitle: a.subtitle ?? cur.subtitle, theme: a.theme ?? cur.theme, slides: a.slides !== undefined ? asJson(a.slides) : cur.slides });
-      return `Deck updated: "${d.title}" (${d.slides.length} slides). Open it: ${link(c, d.id)}`;
+      return `Deck updated: "${d.title}" (${d.slides.length} slides). It is in the Decks button (left sidebar).`;
     },
   },
   {
