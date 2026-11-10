@@ -9,6 +9,10 @@ import { MAX_ATTACH_FILES, badgeOf, humanSize, shortName, type Attachment, type 
 import CallButton from "@/components/dashboard/CallButton";
 import BotAvatar from "@/components/BotAvatar";
 import type { AvatarColor } from "@/lib/bots";
+import { useAuth } from "@/lib/auth-context";
+import { appendChatMessages } from "@/lib/chats";
+import { deckIntent } from "@/lib/intent";
+import { decksApi } from "@/components/decks/DeckViewer";
 
 export type Mentionable = { id: string; name: string; color: AvatarColor; hint: string; preview: string };
 
@@ -28,6 +32,17 @@ const CSS = `
 `;
 
 const MAX_TEXTAREA_PX = 168;
+
+// A normal sentence that asks for a NEW presentation ("ek presentation bana do AI par", "make a pitch deck for my startup").
+// It is made by the deck generator straight away, exactly like /deck. Changing an existing deck, questions and long texts still go to the agent.
+const NEW_DECK_VERB = /\b(make|create|build|prepare|generate|design|draft|bana\w*|bna\w*|banwa\w*|banao|tayyar|chahiye|chaahiye|de\s?do|dedo|need|want)\b/i;
+const OLD_DECK_WORK = /\b(change|edit|update|modify|fix|redo|redesign|delete|remove|shorter|existing|purani|badal\w*|slide\s*(?:no\.?\s*)?\d+)\b/i;
+const QUESTION = /^\s*(what|kya|how|why|explain|kaise|kyu|kyun|which|kaun|can you tell)\b/i;
+function wantsNewDeck(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (t.length < 8 || t.length > 1500 || t.startsWith("/") || QUESTION.test(t)) return false;
+  return deckIntent(t) && NEW_DECK_VERB.test(t) && !OLD_DECK_WORK.test(t);
+}
 
 function KindIcon({ kind, size = 18 }: { kind: AttachKind | string; size?: number }) {
   switch (kind) {
@@ -156,6 +171,68 @@ export default function ChatComposer({
   const [idx, setIdx] = useState(0);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
+  const { user } = useAuth();
+  const [deckBusy, setDeckBusy] = useState(false);
+  const [deckSecs, setDeckSecs] = useState(0);
+
+  useEffect(() => {
+    if (!deckBusy) { setDeckSecs(0); return; }
+    const id = window.setInterval(() => setDeckSecs((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [deckBusy]);
+
+  /**
+   * "/deck <topic>", or a normal sentence that asks for a new presentation, makes the presentation right away with this chat's model
+   * (exactly like the Decks button), so no router or agent can turn it into a website. Optional: "12 slides" anywhere, and (for /deck) "| the look".
+   * Everything is written into the chat (and saved), so it shows up like any other message.
+   */
+  async function runDeck(text: string, arg: string, natural = false) {
+    if (!user || !chatId) return;
+    const cid = chatId;
+    let clock = Date.now();
+    const stamp = () => (clock = Math.max(clock + 1, Date.now()));
+    const post = (role: "user" | "assistant", content: string) => appendChatMessages(user.uid, cid, [{ role, content, at: stamp() }]).catch(() => undefined);
+    await post("user", text);
+    const [main, ...rest] = natural ? [arg] : arg.split("|");
+    const look = rest.join("|").replace(/\s+/g, " ").trim();
+    const n = /\b(\d{1,2})\s*(?:slides?|pages?)\b/i.exec(main);
+    const slides = n ? Math.max(3, Math.min(24, Number(n[1]))) : 10;
+    const topic = main.replace(n?.[0] ?? "", " ").replace(/\s+/g, " ").trim();
+    if (topic.length < 3) {
+      await post("assistant", "ℹ️ Write what the presentation is about after the command, for example:\n\n`/deck how our AI agents save 20 hours a week, for a client meeting`\n\nOptional: add a number of slides (`/deck AI for beginners 8 slides`) and a look after a `|` (`/deck my startup pitch | dark and bold like a keynote`).");
+      return;
+    }
+    setDeckBusy(true);
+    try {
+      await post("assistant", `⏳ Designing your presentation “${topic.length > 70 ? topic.slice(0, 68) + "…" : topic}” (${slides} slides). This takes about 1 to 2 minutes…`);
+      const r = await decksApi<{ deck: { id: string; title: string; slides: unknown[] } }>({ action: "generate", chatId: cid, topic, slides, style: look || undefined });
+      await post("assistant", `✅ Your presentation **${r.deck.title}** is ready (${r.deck.slides.length} slides). Open the **Decks** button (presentation icon) to preview it, present it, edit it and download PowerPoint / HTML / PDF.`);
+    } catch (e) {
+      await post("assistant", `⚠️ I could not make the presentation: ${e instanceof Error ? e.message : "something went wrong"}\n\nTry again, use fewer slides, or pick a stronger model for this chat.`);
+    }
+    setDeckBusy(false);
+  }
+
+  function submit(e: React.FormEvent) {
+    const c = /^\s*\/deck(?:\s+([\s\S]*))?$/i.exec(draft);
+    if (c && chatId && user) {
+      e.preventDefault();
+      if (deckBusy) return;
+      const text = draft.trim();
+      setDraft("");
+      void runDeck(text, (c[1] ?? "").trim());
+      return;
+    }
+    // no command needed: "presentation bana do ..." / "make slides for ..." in a normal message does the same
+    if (!c && chatId && user && !deckBusy && attach.length === 0 && !replyTo && wantsNewDeck(draft)) {
+      e.preventDefault();
+      const text = draft.trim();
+      setDraft("");
+      void runDeck(text, text, true);
+      return;
+    }
+    onSubmit(e);
+  }
 
   // clicking a reply icon puts the cursor straight into the message box
   useEffect(() => { if (replyTo) inputRef.current?.focus(); }, [replyTo?.at, replyTo]);
@@ -235,8 +312,14 @@ export default function ChatComposer({
         </div>
       )}
 
+      {deckBusy && (
+        <p className="cc-in mb-2 flex items-center gap-2 px-3 text-[11px] text-gold" aria-live="polite">
+          <Loader2 size={12} className="animate-spin" /> Designing your presentation… {deckSecs}s <span className="text-faint">· you can keep chatting</span>
+        </p>
+      )}
+
       <form
-        onSubmit={onSubmit}
+        onSubmit={submit}
         onDragEnter={(e) => { if (e.dataTransfer?.types?.includes("Files")) { dragDepth.current++; setDragging(true); } }}
         onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
         onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); }}
@@ -354,7 +437,7 @@ export default function ChatComposer({
 
       {!draft && !attach.length && !replyTo && (
         <p className="mt-1.5 hidden truncate px-12 text-center text-[11px] text-faint sm:block">
-          @agent · /code · /video · /team · /deploy · /recipe &nbsp;—&nbsp; Shift+Enter for a new line
+          @agent · /deck (or just ask for a presentation) · /code · /video · /team · /deploy · /recipe &nbsp;—&nbsp; Shift+Enter for a new line
         </p>
       )}
     </div>
