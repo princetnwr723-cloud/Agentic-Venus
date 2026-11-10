@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Download, FileDown, Loader2, Play, Plus, Printer, Save, Trash2, X } from "lucide-react";
 import { auth } from "@/lib/firebase";
-import { DECK_THEMES, LAYOUTS, deckCss, deckToHtml, slideHtml, themeOf, themeVars, type Deck, type Slide } from "@/lib/decks";
+import { DECK_THEMES, LAYOUTS, SLIDE_H, SLIDE_W, deckCss, deckToHtml, freeDoc, isFree, plainText, slideHtml, themeOf, themeVars, type Deck, type Slide } from "@/lib/decks";
 import { buildPptx } from "@/lib/decks-pptx";
 
 export async function decksApi<T = Record<string, unknown>>(body: Record<string, unknown>): Promise<T> {
@@ -43,6 +43,7 @@ const lines = (a?: string[]) => (a ?? []).join("\n");
 const unlines = (t: string) => t.split("\n").map((x) => x.trim()).filter(Boolean);
 const pair = (t: string) => unlines(t).map((l) => { const [a, ...b] = l.split("|"); return [a.trim(), b.join("|").trim()] as const; });
 const BLANK: Slide = { layout: "bullets", title: "New slide", bullets: ["First point"] };
+const BLANK_FREE: Slide = { layout: "free", html: "<div style='width:1280px;height:720px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:linear-gradient(135deg,#14112b,#2b1d63);color:#fff;font-family:Inter,system-ui,sans-serif;text-align:center'><div style='font-size:76px;font-weight:800'>New slide</div><div style='font-size:30px;opacity:.7'>Edit the design in the panel, or ask your agent</div></div>" };
 
 function download(name: string, data: Blob) {
   const a = document.createElement("a"); a.href = URL.createObjectURL(data); a.download = name;
@@ -59,6 +60,50 @@ function loadPptx(): Promise<new () => unknown> {
     document.head.appendChild(s);
   });
   return pptxLoad.then(() => w.PptxGenJS as new () => unknown);
+}
+
+let h2cLoad: Promise<unknown> | null = null;
+type H2c = (el: HTMLElement, o: Record<string, unknown>) => Promise<HTMLCanvasElement>;
+function loadH2c(): Promise<H2c> {
+  const w = window as unknown as { html2canvas?: H2c };
+  if (w.html2canvas) return Promise.resolve(w.html2canvas);
+  h2cLoad ||= new Promise((ok, no) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
+    s.onload = () => ok(null); s.onerror = () => { h2cLoad = null; no(new Error("html2canvas failed to load")); };
+    document.head.appendChild(s);
+  });
+  return h2cLoad.then(() => w.html2canvas as H2c);
+}
+
+/** A free-form slide as a PNG picture (for PowerPoint). Tries html2canvas first, then the browser's own SVG renderer; null when neither works. */
+async function slideToPng(html: string): Promise<string | null> {
+  try {
+    const h2c = await loadH2c();
+    const fr = document.createElement("iframe");
+    fr.setAttribute("sandbox", "allow-same-origin"); // no scripts can run in it
+    fr.style.cssText = `position:fixed;left:-99999px;top:0;width:${SLIDE_W}px;height:${SLIDE_H}px;border:0;opacity:0;pointer-events:none`;
+    fr.srcdoc = freeDoc(html);
+    const loaded = new Promise((ok) => { fr.onload = () => ok(null); window.setTimeout(() => ok(null), 4000); });
+    document.body.appendChild(fr);
+    try {
+      await loaded;
+      await new Promise((ok) => window.setTimeout(ok, 120));
+      const body = fr.contentDocument?.body;
+      if (body) { const c = await h2c(body, { width: SLIDE_W, height: SLIDE_H, windowWidth: SLIDE_W, windowHeight: SLIDE_H, scale: 1.5, backgroundColor: "#ffffff", logging: false }); return c.toDataURL("image/png"); }
+    } finally { fr.remove(); }
+  } catch { /* try the second way */ }
+  try {
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    host.setAttribute("style", `width:${SLIDE_W}px;height:${SLIDE_H}px;overflow:hidden;background:#fff;font-family:Inter,'Segoe UI',system-ui,Arial,sans-serif`);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${SLIDE_W}" height="${SLIDE_H}"><foreignObject width="100%" height="100%">${new XMLSerializer().serializeToString(host)}</foreignObject></svg>`;
+    const img = new Image();
+    await new Promise<void>((ok, no) => { img.onload = () => ok(); img.onerror = () => no(new Error("svg")); img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg); });
+    const c = document.createElement("canvas"); c.width = 1920; c.height = 1080;
+    c.getContext("2d")?.drawImage(img, 0, 0, 1920, 1080);
+    return c.toDataURL("image/png");
+  } catch { return null; }
 }
 
 export default function DeckViewer({ id, onClose, onChanged }: { id: string; onClose: () => void; onChanged: () => void }) {
@@ -98,8 +143,17 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
     setBusy("pptx"); setErr("");
     try {
       const P = await loadPptx();
-      const p = buildPptx(new P(), deck) as { write: (o: { outputType: string }) => Promise<Blob> };
+      const images: Array<string | null> = [];
+      let failed = 0;
+      for (const s of deck.slides) {
+        if (!isFree(s)) { images.push(null); continue; }
+        const png = await slideToPng(s.html as string);
+        if (!png) failed++;
+        images.push(png);
+      }
+      const p = buildPptx(new P(), deck, images) as { write: (o: { outputType: string }) => Promise<Blob> };
       download(`${deck.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "deck"}.pptx`, await p.write({ outputType: "blob" }));
+      if (failed) setErr(`${failed} slide(s) could not be turned into a picture in this browser, so only their text went into the PowerPoint. Use the HTML or PDF download for the exact design.`);
     } catch (e) { setErr(e instanceof Error ? e.message : "PowerPoint export failed."); }
     setBusy("");
   }
@@ -135,7 +189,7 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
   const lab = "mb-1 mt-3 block text-[10px] font-medium uppercase tracking-wider text-faint";
   const L = sl?.layout;
   const field = (key: string, derived: string, set: (t: string) => void, rows = 4, ph = "") => (
-    <textarea rows={rows} className={inp} placeholder={ph} value={raw[key] ?? derived} onChange={(e) => { setRaw((r) => ({ ...r, [key]: e.target.value })); set(e.target.value); }} />
+    <textarea rows={rows} className={`${inp} ${key === "h" ? "font-mono text-[11px]" : ""}`} placeholder={ph} value={raw[key] ?? derived} onChange={(e) => { setRaw((r) => ({ ...r, [key]: e.target.value })); set(e.target.value); }} />
   );
 
   return (
@@ -149,9 +203,9 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
       <DeckStyles />
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
         <input value={deck?.title ?? ""} onChange={(e) => { setDeck((d) => d && { ...d, title: e.target.value }); setDirty(true); }} className="min-w-[160px] flex-1 rounded-md bg-transparent px-2 py-1.5 text-sm font-medium text-ink focus:bg-panel2 focus:outline-none" aria-label="Deck title" />
-        <select value={deck?.theme ?? "venus"} onChange={(e) => { setDeck((d) => d && { ...d, theme: e.target.value }); setDirty(true); }} className="rounded-md border border-line bg-bg px-2 py-1.5 text-xs text-ink" aria-label="Theme">
+        {deck?.slides.some((s) => !isFree(s)) && <select value={deck?.theme ?? "venus"} onChange={(e) => { setDeck((d) => d && { ...d, theme: e.target.value }); setDirty(true); }} className="rounded-md border border-line bg-bg px-2 py-1.5 text-xs text-ink" aria-label="Theme">
           {DECK_THEMES.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
+        </select>}
         <button onClick={() => { setIdx(0); setPresent(true); }} disabled={!deck} className="flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-bg disabled:opacity-50"><Play size={13} /> Present</button>
         <button onClick={pptx} disabled={!deck || busy === "pptx"} className="flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs hover:bg-panel2 disabled:opacity-50">{busy === "pptx" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} PowerPoint</button>
         <button onClick={() => html(false)} disabled={!deck} className="flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs hover:bg-panel2 disabled:opacity-50"><FileDown size={13} /> HTML</button>
@@ -170,7 +224,7 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
             {deck.slides.map((s, i) => (
               <button key={i} onClick={() => setIdx(i)} className={`block w-full rounded-lg border p-0.5 text-left ${i === idx ? "border-gold" : "border-line hover:border-muted"}`} aria-label={`Slide ${i + 1}`}>
                 <SlideView deck={{ theme: deck.theme, slides: [s] }} index={0} style={{ borderRadius: 6 }} />
-                <span className="block px-1 py-0.5 text-[10px] text-faint">{i + 1} · {s.layout}</span>
+                <span className="block truncate px-1 py-0.5 text-[10px] text-faint">{i + 1} · {isFree(s) ? (plainText(s.html as string)[0] ?? "slide") : s.layout}</span>
               </button>
             ))}
           </div>
@@ -181,7 +235,7 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
               <button onClick={() => setIdx(Math.max(0, idx - 1))} className="rounded-md border border-line px-3 py-1.5 hover:bg-panel2">←</button>
               <span className="text-muted">{idx + 1} / {deck.slides.length}</span>
               <button onClick={() => setIdx(Math.min(deck.slides.length - 1, idx + 1))} className="rounded-md border border-line px-3 py-1.5 hover:bg-panel2">→</button>
-              <button onClick={() => slides([...deck.slides.slice(0, idx + 1), { ...BLANK }, ...deck.slides.slice(idx + 1)], idx + 1)} className="flex items-center gap-1 rounded-md border border-line px-3 py-1.5 hover:bg-panel2"><Plus size={13} /> Slide</button>
+              <button onClick={() => slides([...deck.slides.slice(0, idx + 1), { ...(isFree(sl) ? BLANK_FREE : BLANK) }, ...deck.slides.slice(idx + 1)], idx + 1)} className="flex items-center gap-1 rounded-md border border-line px-3 py-1.5 hover:bg-panel2"><Plus size={13} /> Slide</button>
               <button onClick={() => slides([...deck.slides.slice(0, idx + 1), JSON.parse(JSON.stringify(sl)), ...deck.slides.slice(idx + 1)], idx + 1)} className="flex items-center gap-1 rounded-md border border-line px-3 py-1.5 hover:bg-panel2"><Copy size={13} /> Duplicate</button>
               <button disabled={idx === 0} onClick={() => { const a = [...deck.slides]; [a[idx - 1], a[idx]] = [a[idx], a[idx - 1]]; slides(a, idx - 1); }} className="rounded-md border border-line p-1.5 hover:bg-panel2 disabled:opacity-30" title="Move up"><ChevronUp size={14} /></button>
               <button disabled={idx >= deck.slides.length - 1} onClick={() => { const a = [...deck.slides]; [a[idx + 1], a[idx]] = [a[idx], a[idx + 1]]; slides(a, idx + 1); }} className="rounded-md border border-line p-1.5 hover:bg-panel2 disabled:opacity-30" title="Move down"><ChevronDown size={14} /></button>
@@ -193,9 +247,10 @@ export default function DeckViewer({ id, onClose, onChanged }: { id: string; onC
           <div className="max-h-[42vh] w-full shrink-0 overflow-y-auto border-t border-line bg-panel p-4 md:max-h-none md:w-[300px] md:border-l md:border-t-0">
             <p className="text-xs font-medium text-ink">Edit slide {idx + 1}</p>
             <label className={lab}>Layout</label>
-            <select value={sl.layout} onChange={(e) => edit({ layout: e.target.value as Slide["layout"] })} className={inp}>{LAYOUTS.map((l) => <option key={l} value={l}>{l}</option>)}</select>
-            <label className={lab}>Small label (kicker)</label><input className={inp} value={sl.kicker ?? ""} onChange={(e) => edit({ kicker: e.target.value })} />
-            {L !== "quote" && <><label className={lab}>Title</label><input className={inp} value={sl.title ?? ""} onChange={(e) => edit({ title: e.target.value })} /></>}
+            <select value={sl.layout} onChange={(e) => { const l = e.target.value as Slide["layout"]; edit(l === "free" ? { layout: l, html: sl.html || BLANK_FREE.html } : { layout: l, html: undefined, title: sl.title || plainText(sl.html ?? "")[0] || "New slide" }); }} className={inp}>{LAYOUTS.map((l) => <option key={l} value={l}>{l === "free" ? "free design (HTML)" : `${l} (old layout)`}</option>)}</select>
+            {L === "free" && <><label className={lab}>Slide design (HTML + CSS, 1280 × 720)</label>{field("h", sl.html ?? "", (t) => edit({ html: t }), 14, "<div style=\"width:1280px;height:720px\">…</div>")}<p className="mt-1 text-[10px] leading-relaxed text-faint">Scripts and outside links are removed when you save. Easiest: tell your agent “redesign slide {idx + 1}: …”.</p></>}
+            {L !== "free" && <><label className={lab}>Small label (kicker)</label><input className={inp} value={sl.kicker ?? ""} onChange={(e) => edit({ kicker: e.target.value })} /></>}
+            {L !== "quote" && L !== "free" && <><label className={lab}>Title</label><input className={inp} value={sl.title ?? ""} onChange={(e) => edit({ title: e.target.value })} /></>}
             {["title", "section", "closing"].includes(L as string) && <><label className={lab}>Subtitle</label><input className={inp} value={sl.subtitle ?? ""} onChange={(e) => edit({ subtitle: e.target.value })} /></>}
             {["title", "bullets", "stats"].includes(L as string) && <><label className={lab}>{L === "title" ? "Presenter / date" : "Lead sentence"}</label><input className={inp} value={sl.body ?? ""} onChange={(e) => edit({ body: e.target.value })} /></>}
             {["bullets", "closing"].includes(L as string) && <><label className={lab}>{L === "closing" ? "Contact lines (one per line)" : "Bullets (one per line)"}</label>{field("b", lines(sl.bullets), (t) => edit({ bullets: unlines(t) }), 6)}</>}
