@@ -2,7 +2,8 @@
 // The small dashboard card in the Identity panel (Profile tab, right under "Agent cooperation").
 // It shows the live numbers of this chat's dashboard and opens the full dashboard.
 import { useState } from "react";
-import { ArrowRight, CalendarCheck, CheckCheck, Code2, Phone } from "lucide-react";
+import { CalendarCheck, CheckCheck, Code2, Phone } from "lucide-react";
+import { DashboardIcon } from "@/components/icons";
 import AgentDashboard, { DashboardStyles, useCount, useDashStats } from "@/components/dashboard/AgentDashboard";
 import type { AvatarColor } from "@/lib/bots";
 
@@ -61,6 +62,7 @@ export default function DashboardCard({ chatId, agentName, color, enabledHint }:
             <div style={{ fontSize: 15, fontWeight: 500 }}>Dashboard</div>
             <div className="vd-live" style={{ marginTop: 2 }}><i />Live · {stats.agent?.successPct == null ? "no judged tasks yet" : `${stats.agent.successPct}% success`}</div>
           </div>
+          <button type="button" className="vd-iconbtn" style={{ width: 46, height: 46, background: "var(--vd-accent)", color: "#fff", border: 0, boxShadow: "0 8px 20px rgba(91,63,219,.35)" }} onClick={() => setFull(true)} title="Open full dashboard" aria-label="Open full dashboard"><DashboardIcon size={21} /></button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
           <Tile label="Tasks done" value={k.tasks.value} delta={k.tasks.delta} icon={<CheckCheck size={14} />} />
@@ -69,7 +71,6 @@ export default function DashboardCard({ chatId, agentName, color, enabledHint }:
           <Tile label="Clients booked" value={k.bookings.value} delta={k.bookings.delta} icon={<CalendarCheck size={14} />} />
         </div>
         <div style={{ marginTop: 10 }}><Spark a={s.tasks} b={s.calls} /></div>
-        <button type="button" className="vd-cta" style={{ width: "100%", justifyContent: "center", padding: "13px 18px", fontSize: 14, marginTop: 8 }} onClick={() => setFull(true)}>Open full dashboard <ArrowRight size={17} /></button>
       </div>
       <AgentDashboard open={full} onClose={() => setFull(false)} chatId={chatId} agentName={agentName} color={color} />
     </div>
