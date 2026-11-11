@@ -5,6 +5,7 @@ import { AlertTriangle, Check, Copy, ImageOff, Info, Lightbulb } from "lucide-re
 import { hostOk, imgAllowed, useImageUrl } from "@/components/rich/image-url";
 import { Collage, RICH_LANGS, RICH_LOADING, RichFence } from "@/components/rich/RichBlocks";
 import VMapCard from "@/components/rich/VMapCard";
+import VLeadsCard from "@/components/rich/VLeadsCard";
 
 /* ------------------------------------------------------------------ */
 /* Images                                                              */
@@ -429,6 +430,10 @@ function FenceBlock({ lang, code, closed }: { lang: string; code: string; closed
   if (lang === "vmap") {
     if (!closed) return <Drawing what="Loading map…" />;
     return <VMapCard code={code} fallback={<CodeBlock code={code} lang="vmap (could not draw)" />} />;
+  }
+  if (lang === "vleads") {
+    if (!closed) return <Drawing what="Building lead list…" />;
+    return <VLeadsCard code={code} fallback={<CodeBlock code={code} lang="vleads (could not draw)" />} />;
   }
   if (RICH_LANGS.has(lang)) {
     if (!closed) return <Drawing what={RICH_LOADING[lang] ?? "Building…"} />;
