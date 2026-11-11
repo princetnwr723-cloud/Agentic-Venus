@@ -274,3 +274,24 @@ test('CSV: quoted, formula-safe, Excel-friendly', async () => {
   assert.match(lines[1], /^"Smile, Dental","\+91 98765 43210","a@b\.in"/);
   assert.match(lines[1], /openstreetmap\.org/);
 });
+
+// ---------------------------------------------------------------- /vmaps screen helpers
+
+test('screen helpers: tool answers are split into headline, details and a card block', async () => {
+  const { splitToolText, parseGeocodeLines, cleanArgs } = await import('../../lib/vmaps/ui.ts');
+  const text = '3 cafe within 1.0 km of CP, nearest first:\n1. A — 50 m (lat 1, lon 2)\n\nTo show this map in the chat, put the block below in your reply exactly as it is (do not edit it):\n```vmap\n{"title":"x","markers":[]}\n```';
+  const p = splitToolText(text);
+  assert.equal(p.summary, '3 cafe within 1.0 km of CP, nearest first:');
+  assert.equal(p.details, '1. A — 50 m (lat 1, lon 2)');
+  assert.deepEqual(p.block, { kind: 'vmap', code: '{"title":"x","markers":[]}' });
+  assert.equal(splitToolText('Nothing found.').block, null);
+
+  const g = parseGeocodeLines('Vmaps found 2 place(s) for "x":\n1. India Gate, New Delhi, India — lat 28.6129, lon 77.2295 [attraction]\n2. Gate (Old Fort, Delhi) — lat 28.61, lon 77.24');
+  assert.equal(g.length, 2);
+  assert.deepEqual([g[0].name, g[0].lat, g[0].lon], ['India Gate', 28.6129, 77.2295]);
+  assert.equal(g[1].name, 'Gate');
+  assert.deepEqual(parseGeocodeLines('1. Bad — lat 99, lon 10'), []);
+
+  assert.deepEqual(cleanArgs({ query: 'a', n: 3, ok: true, obj: { x: 1 }, 'Bad Key': 1, list: [1] }), { query: 'a', n: 3, ok: true });
+  assert.equal(cleanArgs({ q: 'x'.repeat(1000) }).q.length, 300);
+});
