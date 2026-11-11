@@ -4,6 +4,7 @@ import { useId, useState, type ReactNode } from "react";
 import { AlertTriangle, Check, Copy, ImageOff, Info, Lightbulb } from "lucide-react";
 import { hostOk, imgAllowed, useImageUrl } from "@/components/rich/image-url";
 import { Collage, RICH_LANGS, RICH_LOADING, RichFence } from "@/components/rich/RichBlocks";
+import VMapCard from "@/components/rich/VMapCard";
 
 /* ------------------------------------------------------------------ */
 /* Images                                                              */
@@ -425,6 +426,10 @@ function Drawing({ what }: { what: string }) {
 }
 
 function FenceBlock({ lang, code, closed }: { lang: string; code: string; closed: boolean }) {
+  if (lang === "vmap") {
+    if (!closed) return <Drawing what="Loading map…" />;
+    return <VMapCard code={code} fallback={<CodeBlock code={code} lang="vmap (could not draw)" />} />;
+  }
   if (RICH_LANGS.has(lang)) {
     if (!closed) return <Drawing what={RICH_LOADING[lang] ?? "Building…"} />;
     return <RichFence lang={lang} code={code} fallback={<CodeBlock code={code} lang={`${lang} (could not draw)`} />} />;
