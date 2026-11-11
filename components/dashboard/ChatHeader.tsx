@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   Brain,
@@ -12,6 +13,7 @@ import {
   Menu,
   Minimize2,
   Monitor,
+  MapPin,
   MoreHorizontal,
   Plug,
   User,
@@ -115,6 +117,7 @@ export default function ChatHeader({
   useAvatarStore();
   useDashFlag();
   const mobile = useIsMobile();
+  const router = useRouter();
   const shown = avatarFor(getActiveChat(), color);
   const working = busy || teamRunning;
 
@@ -163,6 +166,7 @@ export default function ChatHeader({
     { key: "code", label: "Venus Code", icon: <Code2 size={16} />, onClick: onCode },
     { key: "venus", label: "Venus Pro (video)", icon: <Film size={16} />, onClick: onVenus },
     { key: "decks", label: "Decks (presentations)", icon: <DeckIcon size={17} />, onClick: () => setDeckOpen(true), active: deckOpen },
+    { key: "vmaps", label: "Vmaps (maps & leads)", icon: <MapPin size={16} />, onClick: () => router.push("/vmaps") },
     { key: "skills", label: "Memory & Skills", icon: <Brain size={16} />, onClick: onSkills },
     { key: "runs", label: "Runs", icon: <Activity size={16} />, onClick: onRuns },
     { key: "vpassword", label: "vPassword", icon: <KeyRound size={16} />, onClick: onVpassword },
@@ -191,6 +195,7 @@ export default function ChatHeader({
     team: { label: "Team", hint: teamRunning ? "Working" : "Add teammates", tone: "violet" },
     routines: { label: "Routines", hint: hasRoutines ? "Active" : "Schedule tasks", tone: "gold" },
     runs: { label: "Runs", hint: "Background tasks", tone: "sky" },
+    vmaps: { label: "Vmaps", hint: "Maps & leads", tone: "teal" },
     code: { label: "Venus Code", hint: "Build & deploy", tone: "sky" },
     venus: { label: "Venus Pro", hint: "Video studio", tone: "violet" },
     decks: { label: "Decks", hint: "Make presentations", tone: "violet" },
@@ -200,7 +205,7 @@ export default function ChatHeader({
     profile: { label: "Profile & email", hint: "Avatar, role, inbox", tone: "gold" },
   };
   const groups: Array<{ title: string; keys: string[] }> = [
-    { title: "Work", keys: ["pc", "team", "routines", "runs"] },
+    { title: "Work", keys: ["pc", "team", "routines", "runs", "vmaps"] },
     { title: "Create", keys: ["code", "venus", "decks"] },
     { title: "Brain & access", keys: ["skills", "connectors", "vpassword"] },
     { title: "Agent", keys: ["profile"] },
