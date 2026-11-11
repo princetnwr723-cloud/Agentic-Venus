@@ -31,7 +31,15 @@ before(async () => {
     if (u.pathname === '/reverse') return json({ lat: '28.6139', lon: '77.2090', display_name: 'India Gate, New Delhi, India', name: 'India Gate' });
     if (u.pathname === '/overpass') {
       hits.overpass++;
-      await body(req);
+      const q = await body(req);
+      if (q.includes('contact%3Awebsite') || q.includes('contact:website')) {
+        // a contact-only search: the server has dropped places with no contact tag
+        return json({ elements: [
+          { type: 'node', lat: 28.6316, lon: 77.2168, tags: { amenity: 'dentist', name: 'Smile Dental', website: 'smiledental.example.in', phone: '+91 98765 43210' } },
+          { type: 'node', lat: 28.6320, lon: 77.2170, tags: { amenity: 'dentist', name: 'Evil Clinic', website: 'javascript:alert(1)', email: 'not an email', phone: '12' } },
+          { type: 'node', lat: 28.6330, lon: 77.2180, tags: { amenity: 'dentist', name: 'Quiet Clinic', 'contact:email': 'Hello@Quiet.example.in', 'contact:website': 'https://quiet.example.in/' } },
+        ] });
+      }
       return json({ elements: [
         { type: 'node', lat: 28.632, lon: 77.218, tags: { amenity: 'cafe', name: 'Far Cafe' } },
         { type: 'node', lat: 28.6316, lon: 77.2168, tags: { amenity: 'cafe' } },
@@ -160,4 +168,109 @@ test('offline mode with nothing configured explains what to do', async () => {
   delete process.env.VMAPS_PHOTON_URL;
   await assert.rejects(() => core.geocode('some brand new place'), /VMAPS_OFFLINE is on/);
   Object.assign(process.env, keep);
+});
+
+// ---------------------------------------------------------------- leads
+
+test('nearby: contact details are read from the map tags and cleaned', async () => {
+  const r = await core.searchNearby({ lat: 28.6315, lon: 77.2167 }, 'dental clinic', 2000, 10, { contactOnly: true });
+  assert.equal(r.label, 'dentist');
+  const by = Object.fromEntries(r.places.map((p) => [p.name, p]));
+  assert.equal(by['Smile Dental'].website, 'https://smiledental.example.in/');
+  assert.equal(by['Smile Dental'].phone, '+91 98765 43210');
+  assert.equal(by['Quiet Clinic'].email, 'hello@quiet.example.in');
+  assert.equal(by['Quiet Clinic'].website, 'https://quiet.example.in/');
+  // unsafe or broken values are dropped, and a place left with no contact is not a lead
+  assert.equal(by['Evil Clinic'], undefined);
+});
+
+test('contact value cleaners', () => {
+  assert.equal(core.cleanWebsite('javascript:alert(1)'), undefined);
+  assert.equal(core.cleanWebsite('ftp://x.example.com'), undefined);
+  assert.equal(core.cleanWebsite('http://user:pw@x.example.com'), undefined);
+  assert.equal(core.cleanWebsite('www.shop.example.in; https://other.example'), 'https://www.shop.example.in/');
+  assert.equal(core.cleanEmail('mailto:Info@Shop.IN;x@y.z'), 'info@shop.in');
+  assert.equal(core.cleanEmail('a b@c.com'), undefined);
+  assert.equal(core.cleanPhone('+91-98765 43210; 0141 2222'), '+91-98765 43210');
+  assert.equal(core.cleanPhone('123'), undefined);
+});
+
+const HOME = `<html><head><title>Smile Dental &amp; Implant Centre | Jaipur</title>
+<meta name='description' content="Family dentist in Jaipur: braces, implants and root canal. Open six days a week.">
+</head><body><a href="/contact-us">Contact</a><a href="tel:+911412222333">Call</a>
+<img src="logo@2x.png"> sentry@sentry.io you@example.com <a href="mailto:Care@smiledental.example.in?subject=hi">mail</a></body></html>`;
+
+test('parseSite: one line about the business, real emails only, phone and contact page', () => {
+  const r = core.parseSite(HOME, 'https://smiledental.example.in/');
+  assert.match(r.about, /^Family dentist in Jaipur/);
+  assert.deepEqual(r.emails, ['care@smiledental.example.in']);
+  assert.equal(r.phone, '+911412222333');
+  assert.equal(r.contactUrl, 'https://smiledental.example.in/contact-us');
+  const t = core.parseSite('<title>Acme Plumbing Services</title><h1>x</h1>', 'https://acme.example.com');
+  assert.equal(t.about, 'Acme Plumbing Services');
+  assert.deepEqual(t.emails, []);
+});
+
+test('enrichLeads: fills gaps, keeps map values, survives bad sites, caches', async () => {
+  const calls = [];
+  const fetcher = async (url) => {
+    calls.push(url);
+    if (url.includes('down.example')) throw new Error('HTTP 503');
+    if (url.endsWith('/contact')) return '<p>write to <a href="mailto:hello@later.example.in">us</a></p>';
+    if (url.includes('later.example')) return '<title>Later Law Associates, Jaipur</title><a href="/contact">Contact us</a>';
+    return HOME;
+  };
+  const leads = [
+    { name: 'A', lat: 1, lon: 1, website: 'https://a-site.example.in/', email: 'osm@a.example.in' },
+    { name: 'B', lat: 2, lon: 2, website: 'https://down.example.in/' },
+    { name: 'C', lat: 3, lon: 3, website: 'https://later.example.in/' },
+    { name: 'D', lat: 4, lon: 4 },
+  ];
+  const r = await core.enrichLeads(leads, fetcher);
+  assert.equal(r.read, 2);
+  assert.equal(r.failed, 1);
+  assert.equal(r.places[0].email, 'osm@a.example.in', 'the value from the map wins');
+  assert.match(r.places[0].about, /Family dentist/);
+  assert.equal(r.places[0].phone, '+911412222333');
+  assert.equal(r.places[1].about, undefined);
+  assert.equal(r.places[2].email, 'hello@later.example.in', 'found on the contact page');
+  assert.equal(r.places[3].website, undefined);
+  assert.equal(leads[0].about, undefined, 'input is not changed');
+  const before = calls.length;
+  await core.enrichLeads([leads[0], leads[2]], fetcher);
+  assert.equal(calls.length, before, 'second run is served from the cache');
+});
+
+test('leads block: valid JSON, short enough, cannot break out of its fence', () => {
+  const long = (i) => ({
+    name: `Clinic ${i} \`\`\` x`, lat: 28.6 + i / 1000, lon: 77.2, distM: 100 * i, address: 'A very long street name '.repeat(8), phone: `+91 98765 4321${i}`,
+    website: `https://clinic${i}.example.in/`, email: `care${i}@clinic${i}.example.in`, about: 'We do many things for many people in the city. '.repeat(6),
+  });
+  const f = core.vleadsFence('dentist leads near Jaipur', Array.from({ length: 12 }, (_, i) => long(i)));
+  assert.ok(f.length <= 3800, `fence is ${f.length} characters`);
+  const m = /^```vleads\n([\s\S]*)\n```$/.exec(f);
+  assert.ok(m);
+  const j = JSON.parse(m[1]);
+  assert.ok(j.leads.length >= 6);
+  assert.ok(!m[1].includes('`'));
+});
+
+test('new business categories are understood', async () => {
+  for (const w of ['advocate', 'chartered accountant', 'property dealer', 'coaching centre', 'diagnostic centre', 'factory']) {
+    await core.searchNearby({ lat: 28.6315, lon: 77.2167 }, w, 500, 1).catch((e) => assert.doesNotMatch(String(e.message), /do not know the category/));
+  }
+});
+
+test('CSV: quoted, formula-safe, Excel-friendly', async () => {
+  const { toCsv, csvCell } = await import('../../lib/vmaps/csv.ts');
+  assert.equal(csvCell('=HYPERLINK("http://evil")'), `"'=HYPERLINK(""http://evil"")"`);
+  assert.equal(csvCell('@SUM(A1)'), `"'@SUM(A1)"`);
+  assert.equal(csvCell('+91 98765 43210'), '"+91 98765 43210"');
+  assert.equal(csvCell('line\nbreak, "quoted"'), '"line break, ""quoted"""');
+  const csv = toCsv([{ name: 'Smile, Dental', lat: 1.5, lon: 2.5, phone: '+91 98765 43210', email: 'a@b.in', distM: 120 }]);
+  assert.ok(csv.startsWith('\uFEFF"Name","Phone"'));
+  const lines = csv.trim().split('\r\n');
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /^"Smile, Dental","\+91 98765 43210","a@b\.in"/);
+  assert.match(lines[1], /openstreetmap\.org/);
 });
