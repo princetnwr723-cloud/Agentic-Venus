@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Key, LogOut, Menu, Moon, Plus, Search, Settings, Sun, User, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Key, LogOut, MapPin, Menu, Moon, Plus, Search, Settings, Sun, User, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import { byRecent, type Chat } from "@/lib/chats";
@@ -37,6 +38,7 @@ export default function Sidebar({
   const label = shownName(profile, userLabel);
   const [q, setQ] = useState("");
   const drawer = useDrawer();
+  const router = useRouter();
   const touchX = useRef<number | null>(null);
   const busy = useAnyActivity();
   useAvatarStore();
@@ -118,6 +120,17 @@ export default function Sidebar({
               className="w-full bg-transparent text-[15px] text-ink placeholder:text-faint focus:outline-none md:text-sm"
             />
           </div>
+        </div>
+
+        <div className="px-4 pb-2">
+          <button
+            type="button"
+            onClick={() => { closeDrawer(); router.push("/vmaps"); }}
+            className="press flex w-full items-center gap-2.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-left text-sm text-ink md:rounded-lg md:border-line md:bg-bg md:py-2"
+          >
+            <MapPin size={15} className="text-avatar-teal" /> Vmaps
+            <span className="ml-auto text-[11px] text-faint">maps &amp; leads</span>
+          </button>
         </div>
 
         <nav key={drawer ? "open" : "closed"} className="flex-1 overflow-y-auto px-2 md:px-0">
