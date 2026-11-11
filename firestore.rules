@@ -34,6 +34,8 @@ service cloud.firestore {
     match /users/{uid}/venusStudio/{document=**}   { allow read, write: if isOwner(uid); }
     match /users/{uid}/traces/{document=**}        { allow read, write: if isOwner(uid); }
     match /users/{uid}/agents/{document=**}        { allow read, write: if isOwner(uid); }
+    // agent runs are written by the server only (Admin SDK); the owner may watch them live
+    match /users/{uid}/runs/{document=**}          { allow read: if isOwner(uid); allow write: if false; }
 
     // NOT listed on purpose (server only): users/{uid}/billing/*, vault, vpass, vpay, audit,
     // billingIndex, billingEvents, billingUnclaimed, and every other collection.
