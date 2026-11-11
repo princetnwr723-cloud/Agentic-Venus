@@ -1,8 +1,9 @@
 // Vmaps: free map tools for the agent (OpenStreetMap, no key, no billing). The work is done in lib/vmaps/core.ts.
 // Tools that find places or routes end their answer with a ```vmap block; the chat draws it as a real map card.
 import type { Def } from "./plugins";
+import { safeFetch } from "./net";
 import {
-  fmtDist, fmtMin, geocode, nearbyCategories, normMode, parseLatLon, resolvePlace, reverseGeocode, route, searchNearby, vmapFence,
+  enrichLeads, fmtDist, fmtMin, geocode, nearbyCategories, normMode, parseLatLon, resolvePlace, reverseGeocode, route, searchNearby, vleadsFence, vmapFence, vmapsConfig,
   type MapMarker, type Place,
 } from "@/lib/vmaps/core";
 
@@ -21,6 +22,28 @@ function asList(v: unknown): unknown[] {
 const SHOW = "To show this map in the chat, put the block below in your reply exactly as it is (do not edit it):";
 const stale = (on: boolean) => (on ? "\n(Note: the internet was not reachable, so this answer comes from saved results.)" : "");
 const where = (p: Place) => `${p.name}${p.address && !p.address.startsWith(p.name) ? `, ${p.address}` : p.address && p.address !== p.name ? ` (${p.address})` : ""}`;
+
+/** Reads one web page for lead enrichment. Website addresses come from map data (untrusted), so only public hosts are allowed. */
+async function getHtml(url: string): Promise<string> {
+  const res = await safeFetch(url, { headers: { "User-Agent": vmapsConfig().userAgent, Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "Accept-Language": "en" } }, 7_000);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const type = res.headers.get("content-type") ?? "";
+  if (type && !/html|text|xml/i.test(type)) throw new Error("not a web page");
+  const reader = res.body?.getReader();
+  if (!reader) return (await res.text()).slice(0, 300_000);
+  const dec = new TextDecoder();
+  let out = "", n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    out += dec.decode(value, { stream: true });
+    if (n > 300_000) { await reader.cancel().catch(() => undefined); break; } // a homepage never needs more
+  }
+  return out;
+}
+
+const contactLine = (p: Place) => [p.phone && `tel ${p.phone}`, p.email && `email ${p.email}`, p.website && `web ${p.website}`].filter(Boolean).join(" · ");
 
 async function centreOf(a: Record<string, unknown>): Promise<Place> {
   const lat = num(a.lat), lon = num(a.lon ?? a.lng);
@@ -70,13 +93,46 @@ export const VMAPS_TOOLS: Def[] = [
       if (!places.length) {
         return `Vmaps found no ${label} within ${fmtDist(radiusM)} of ${centre.name}. Try a bigger radius_m (up to 20000) or another spelling of the place.${stale(old)}`;
       }
-      const lines = places.map((p, i) => `${i + 1}. ${p.name} — ${fmtDist(p.distM ?? 0)}${p.address ? ` — ${p.address}` : ""}${p.extra ? ` — ${p.extra}` : ""} (lat ${p.lat}, lon ${p.lon})`);
+      const lines = places.map((p, i) => `${i + 1}. ${p.name} — ${fmtDist(p.distM ?? 0)}${p.address ? ` — ${p.address}` : ""}${p.extra ? ` — ${p.extra}` : ""}${contactLine(p) ? ` — ${contactLine(p)}` : ""} (lat ${p.lat}, lon ${p.lon})`);
       const markers: MapMarker[] = [
         { name: centre.name, lat: centre.lat, lon: centre.lon, role: "center", note: "search centre" },
-        ...places.map((p) => ({ name: p.name, lat: p.lat, lon: p.lon, note: [fmtDist(p.distM ?? 0), p.extra].filter(Boolean).join(" · ") })),
+        ...places.map((p) => ({ name: p.name, lat: p.lat, lon: p.lon, note: [fmtDist(p.distM ?? 0), p.phone, p.extra].filter(Boolean).join(" · ") })),
       ];
       return `${places.length} ${label} within ${fmtDist(radiusM)} of ${centre.name}, nearest first:\n${lines.join("\n")}${stale(old)}\n\n${SHOW}\n` +
         vmapFence({ title: `${label} near ${centre.name}`, markers });
+    },
+  },
+  {
+    name: "vmaps.leads",
+    description:
+      "Vmaps: build a LEAD LIST of local businesses (dentist, clinic, school, hotel, gym, lawyer, accountant, real estate, company, factory, restaurant, shop ...) around a place. " +
+      "Each lead has phone / website / email when the map or the business's own website has them, plus a one-line description read from the website. Shows a table, a map and a Download CSV button. " +
+      "Only businesses with some contact detail are listed unless contact_only is false.",
+    params: "category:string, near:string (city / area name or \"lat,lon\"), radius_m?:number (default 3000), limit?:number (default 10, max 12), enrich?:boolean (default true: read each website), contact_only?:boolean (default true)",
+    risk: "read",
+    run: async (a) => {
+      const centre = await centreOf(a);
+      const contactOnly = a.contact_only === undefined ? true : !/^(false|0|no)$/i.test(s(a.contact_only));
+      const doEnrich = a.enrich === undefined ? true : !/^(false|0|no)$/i.test(s(a.enrich));
+      const limit = Math.min(12, num(a.limit) ?? 10);
+      const found = await searchNearby(centre, s(a.category ?? a.type ?? a.kind), num(a.radius_m ?? a.radius) ?? 3000, limit, { contactOnly });
+      if (!found.places.length) {
+        return contactOnly
+          ? `Vmaps found no ${found.label} with a phone, website or email on the map within ${fmtDist(found.radiusM)} of ${centre.name}. Try contact_only:false (names and locations only), a bigger radius_m (up to 20000), or a bigger city name.${stale(found.stale)}`
+          : `Vmaps found no ${found.label} within ${fmtDist(found.radiusM)} of ${centre.name}. Try a bigger radius_m or another area.${stale(found.stale)}`;
+      }
+      let leads = found.places;
+      let read = 0, failed = 0;
+      if (doEnrich && leads.some((p) => p.website)) {
+        const r = await enrichLeads(leads, getHtml, { concurrency: 4, budgetMs: 25_000 });
+        leads = r.places; read = r.read; failed = r.failed;
+      }
+      const count = (f: (p: Place) => unknown) => leads.filter(f).length;
+      return `${leads.length} ${found.label} leads within ${fmtDist(found.radiusM)} of ${centre.name}: ${count((p) => p.phone)} with phone, ${count((p) => p.email)} with email, ${count((p) => p.website)} with website` +
+        (doEnrich ? ` (${read} websites read${failed ? `, ${failed} unreachable` : ""})` : "") + ".\n" +
+        "Data = OpenStreetMap tags + each business's own public website. It can be outdated or incomplete: check before outreach and follow spam / data-protection rules." +
+        `${stale(found.stale)}\n\n${SHOW}\nThe card has a table, a map and a Download CSV button. After the block, tell the user in 2-3 lines which leads look most useful.\n` +
+        vleadsFence(`${found.label} leads near ${centre.name}`, leads);
     },
   },
   {
