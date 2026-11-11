@@ -12,7 +12,11 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export type Place = { name: string; lat: number; lon: number; kind?: string; address?: string; distM?: number; extra?: string };
+export type Place = {
+  name: string; lat: number; lon: number; kind?: string; address?: string; distM?: number; extra?: string;
+  /** contact details: from OpenStreetMap tags, or (leads) read from the business's own website */
+  website?: string; email?: string; phone?: string; about?: string;
+};
 export type RouteMode = "driving" | "walking" | "cycling";
 export type RouteResult = {
   mode: RouteMode; km: number; min: number; coords: Array<[number, number]>; steps: string[]; from: Place; to: Place; stale?: boolean;
@@ -165,6 +169,11 @@ async function cached<T>(key: string, ttl: number, load: () => Promise<T | null>
   }
 }
 
+/** For other modules (lead enrichment): same disk cache, no stale flag. */
+export async function remember<T>(key: string, ttlMs: number, load: () => Promise<T | null>): Promise<T | null> {
+  return (await cached<T>(key, ttlMs, load)).value;
+}
+
 // ---------------------------------------------------------------- small geo helpers
 
 export function haversineM(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
@@ -195,6 +204,30 @@ export function parseLatLon(text: string): { lat: number; lon: number } | null {
 }
 
 const cleanText = (v: unknown, n = 140) => String(v ?? "").replace(/[\u0000-\u001f`]/g, " ").replace(/\s+/g, " ").trim().slice(0, n);
+
+/** Contact values come from OpenStreetMap tags or web pages: untrusted. Each helper returns a safe value or undefined. */
+export function cleanWebsite(v: unknown): string | undefined {
+  let t = String(v ?? "").split(/[;,\s]/)[0].trim();
+  if (!t) return undefined;
+  if (!/^https?:\/\//i.test(t)) { if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return undefined; t = `https://${t}`; }
+  try {
+    const u = new URL(t);
+    if (!/^https?:$/.test(u.protocol) || !u.hostname.includes(".") || u.username || u.password) return undefined;
+    const out = u.toString();
+    return out.length <= 200 ? out : undefined;
+  } catch { return undefined; }
+}
+
+export function cleanEmail(v: unknown): string | undefined {
+  const t = String(v ?? "").split(/[;,\s]/)[0].replace(/^mailto:/i, "").trim().toLowerCase();
+  return /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}$/.test(t) && t.length <= 120 ? t : undefined;
+}
+
+export function cleanPhone(v: unknown): string | undefined {
+  const t = String(v ?? "").split(";")[0].replace(/[^0-9+()\-\s]/g, "").replace(/\s+/g, " ").trim();
+  const digits = t.replace(/\D/g, "").length;
+  return digits >= 6 && digits <= 15 ? t.slice(0, 24) : undefined;
+}
 
 // ---------------------------------------------------------------- geocode / reverse
 
@@ -304,6 +337,14 @@ const CATEGORY_TAGS: Record<string, string> = {
   temple: "amenity=place_of_worship", mosque: "amenity=place_of_worship", church: "amenity=place_of_worship", "place of worship": "amenity=place_of_worship",
   gym: "leisure=fitness_centre|sports_centre", cinema: "amenity=cinema", library: "amenity=library", "post office": "amenity=post_office", museum: "tourism=museum",
   attraction: "tourism=attraction|viewpoint|museum", "water": "amenity=drinking_water", "car repair": "shop=car_repair", salon: "shop=hairdresser|beauty",
+  // business kinds people look for when they build lead lists
+  lawyer: "office=lawyer", accountant: "office=accountant", "real estate": "office=estate_agent", insurance: "office=insurance", architect: "office=architect",
+  company: "office=company|it|consulting", "it company": "office=it|company", ngo: "office=ngo|foundation", coaching: "amenity=prep_school|language_school|music_school|driving_school",
+  "driving school": "amenity=driving_school", clothes: "shop=clothes|boutique|fashion", electronics: "shop=electronics|mobile_phone|computer", "mobile shop": "shop=mobile_phone",
+  hardware: "shop=hardware|doityourself", furniture: "shop=furniture", jewellery: "shop=jewelry", optician: "shop=optician", veterinary: "amenity=veterinary", florist: "shop=florist",
+  "book shop": "shop=books|stationery", photographer: "craft=photographer|shop=photo|office=photographer", tailor: "craft=tailor|shop=tailor", "car dealer": "shop=car|car_repair",
+  laboratory: "healthcare=laboratory", factory: "man_made=works|industrial=factory", warehouse: "building=warehouse|industrial=warehouse", "travel agency": "shop=travel_agency|office=travel_agent",
+  "event venue": "amenity=events_venue|community_centre|social_centre", "wedding hall": "amenity=events_venue|community_centre|social_centre",
 };
 const ALIASES: Record<string, string> = {
   coffee: "cafe", "coffee shop": "cafe", cafes: "cafe", restaurants: "restaurant", food: "restaurant", eat: "restaurant", dhaba: "restaurant", "petrol pump": "fuel",
@@ -313,6 +354,10 @@ const ALIASES: Record<string, string> = {
   restroom: "toilet", "bus": "bus stop", "bus stand": "bus stop", "train station": "railway station", station: "railway station", metro: "metro station", "charging station": "ev charging",
   "ev charger": "ev charging", mandir: "temple", masjid: "mosque", gurudwara: "place of worship", gym: "gym", gyms: "gym", libraries: "library", "tourist": "attraction",
   "tourist attraction": "attraction", sightseeing: "attraction", "drinking water": "water", garage: "car repair", mechanic: "car repair", barber: "salon", parlour: "salon",
+  "dental clinic": "dentist", dentists: "dentist", advocate: "lawyer", advocates: "lawyer", lawyers: "lawyer", ca: "accountant", "chartered accountant": "accountant", accountants: "accountant",
+  "property dealer": "real estate", broker: "real estate", "coaching center": "coaching", "coaching centre": "coaching", tuition: "coaching", "software company": "it company",
+  companies: "company", office: "company", offices: "company", factories: "factory", "jewelry": "jewellery", "jewelry shop": "jewellery", "mobile": "mobile shop",
+  "travel agent": "travel agency", "banquet": "wedding hall", "marriage hall": "wedding hall", "lab": "laboratory", "diagnostic": "laboratory", "diagnostic centre": "laboratory",
 };
 
 export const nearbyCategories = () => Object.keys(CATEGORY_TAGS);
@@ -340,21 +385,29 @@ function fromOverpass(e: any, centre: { lat: number; lon: number }, label: strin
   const t = e.tags ?? {};
   const street = [t["addr:housenumber"], t["addr:street"]].filter(Boolean).join(" ");
   const address = [street, t["addr:suburb"] || t["addr:neighbourhood"], t["addr:city"]].filter(Boolean).join(", ");
-  const extra = [t.opening_hours && `open: ${t.opening_hours}`, (t.phone || t["contact:phone"]) && `tel: ${t.phone || t["contact:phone"]}`, t.cuisine && `cuisine: ${t.cuisine}`].filter(Boolean).join(" · ");
+  const extra = [t.opening_hours && `open: ${t.opening_hours}`, t.cuisine && `cuisine: ${t.cuisine}`].filter(Boolean).join(" · ");
   return {
     name: cleanText(t.name || t["name:en"] || t.brand || t.operator || "", 100) || `(${label}, no name on the map)`,
     lat: r5(lat), lon: r5(lon), kind: label, address: cleanText(address, 120), extra: cleanText(extra, 140), distM: Math.round(haversineM(centre, { lat, lon })),
+    website: cleanWebsite(t.website || t["contact:website"] || t.url),
+    email: cleanEmail(t.email || t["contact:email"]),
+    phone: cleanPhone(t.phone || t["contact:phone"] || t["contact:mobile"] || t.mobile),
   };
 }
 
+const hasContact = (p: Place) => !!(p.website || p.email || p.phone);
+
 export async function searchNearby(
-  centre: { lat: number; lon: number }, category: string, radiusM = 1000, limit = 8
+  centre: { lat: number; lon: number }, category: string, radiusM = 1000, limit = 8, opts: { contactOnly?: boolean } = {}
 ): Promise<{ places: Place[]; label: string; radiusM: number; stale: boolean }> {
   const { label, filter } = tagFilter(category);
   const radius = clamp(Math.round(radiusM) || 1000, 100, 20_000);
   const n = clamp(Math.round(limit) || 8, 1, 15);
-  const key = `near:${label}:${filter}:${centre.lat.toFixed(3)},${centre.lon.toFixed(3)}:${radius}:${n}`;
-  const q = `[out:json][timeout:20];nwr(around:${radius},${r5(centre.lat)},${r5(centre.lon)})${filter};out center ${Math.min(80, n * 6)};`;
+  const only = !!opts.contactOnly;
+  const key = `near:${label}:${filter}:${centre.lat.toFixed(3)},${centre.lon.toFixed(3)}:${radius}:${n}${only ? ":contact" : ""}`;
+  // contactOnly: let the server drop places that have no phone / website / email tag at all
+  const contactTag = only ? '[~"^(website|contact:website|url|email|contact:email|phone|contact:phone|contact:mobile|mobile)$"~"."]' : "";
+  const q = `[out:json][timeout:25];nwr(around:${radius},${r5(centre.lat)},${r5(centre.lon)})${filter}${contactTag};out center ${Math.min(only ? 150 : 80, n * (only ? 10 : 6))};`;
   const { value, stale } = await cached<Place[]>(key, 1 * DAY, async () => {
     const tries: Array<[string, () => Promise<Place[] | null>]> = overpassUrls().map((url) => [
       `overpass ${new URL(url).hostname}`,
@@ -362,7 +415,7 @@ export async function searchNearby(
         const j = await getJson(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `data=${encodeURIComponent(q)}` }, 25_000);
         const els = (j?.elements ?? []) as any[];
         if (!els.length && /error|timeout|too busy|rate/i.test(String(j?.remark ?? ""))) throw new Error(String(j.remark).slice(0, 80));
-        const all = els.map((e) => fromOverpass(e, centre, label)).filter((p): p is Place => !!p);
+        const all = els.map((e) => fromOverpass(e, centre, label)).filter((p): p is Place => !!p && (!only || hasContact(p)));
         // named places first (an unnamed bench is no use to a person), then nearest first
         all.sort((a, b) => Number(a.name.startsWith("(")) - Number(b.name.startsWith("(")) || (a.distM ?? 0) - (b.distM ?? 0));
         const seen = new Set<string>();
@@ -442,6 +495,107 @@ export async function route(from: Place, to: Place, modeIn: unknown = "driving")
   return { mode, ...value, from, to, stale };
 }
 
+// ---------------------------------------------------------------- lead enrichment: read a business's own website
+
+const ENT: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", rsquo: "'", lsquo: "'", ndash: "-", mdash: "-" };
+function decodeHtml(t: string): string {
+  return t.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e: string) => {
+    if (e[0] === "#") {
+      const n = e[1].toLowerCase() === "x" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(n) && n > 31 && n < 0x10ffff ? String.fromCodePoint(n) : " ";
+    }
+    return ENT[e.toLowerCase()] ?? m;
+  });
+}
+
+function metaContent(html: string, key: string): string | undefined {
+  const tag = new RegExp(`<meta[^>]+(?:name|property)=["']${key}["'][^>]*>`, "i").exec(html)?.[0];
+  if (!tag) return undefined;
+  const m = /content="([^"]*)"|content='([^']*)'/i.exec(tag);
+  return m ? decodeHtml(m[1] ?? m[2] ?? "") : undefined;
+}
+
+const JUNK_LOCAL = /^(example|sentry|wixpress|yourname|your\.?email|name|email|user|username|test|noreply|no-reply|donotreply|info@info)$/i;
+const JUNK_DOMAIN = /(^|\.)(example\.(com|org)|domain\.com|email\.com|sentry\.io|wixpress\.com|sentry-next\.wixpress\.com|yoursite\.com|yourdomain\.com)$/i;
+
+/** What a business homepage tells us: one line about it, public contact emails, a phone, and its contact page. */
+export function parseSite(html: string, base: string): { about?: string; emails: string[]; phone?: string; contactUrl?: string } {
+  const page = html.slice(0, 400_000);
+  const titleRaw = /<title[^>]*>([\s\S]{0,300}?)<\/title>/i.exec(page)?.[1];
+  const h1Raw = /<h1[^>]*>([\s\S]{0,300}?)<\/h1>/i.exec(page)?.[1];
+  const plain = (t?: string) => cleanText(decodeHtml((t ?? "").replace(/<[^>]*>/g, " ")), 160);
+  const about = [metaContent(page, "description"), metaContent(page, "og:description"), plain(titleRaw), plain(h1Raw)]
+    .map((x) => cleanText(x, 160)).find((x) => x.length >= 12 && !/^(home|welcome|index)\b.{0,12}$/i.test(x));
+
+  let host = "";
+  try { host = new URL(base).hostname.replace(/^www\./, "").toLowerCase(); } catch { /* base is checked by the caller */ }
+  const found = new Set<string>();
+  for (const m of page.matchAll(/[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,24}/gi)) {
+    const e = cleanEmail(m[0]);
+    if (!e) continue;
+    const [local, domain] = e.split("@");
+    if (JUNK_LOCAL.test(local) || JUNK_DOMAIN.test(domain) || /\.(png|jpe?g|gif|webp|svg|css|js|woff2?|ico)$/.test(domain)) continue;
+    found.add(e);
+  }
+  const sameSite = (e: string) => { const d = e.split("@")[1]; return !!host && (host === d || host.endsWith(`.${d}`) || d.endsWith(`.${host}`)); };
+  const emails = [...found].sort((a, b) => Number(sameSite(b)) - Number(sameSite(a))).slice(0, 2);
+
+  let phone: string | undefined;
+  const tel = /href=["']tel:([^"']+)["']/i.exec(page)?.[1];
+  if (tel) { try { phone = cleanPhone(decodeURIComponent(tel)); } catch { phone = cleanPhone(tel); } }
+
+  let contactUrl: string | undefined;
+  for (const m of page.matchAll(/href=["']([^"'#]*contact[^"']*)["']/gi)) {
+    try {
+      const u = new URL(decodeHtml(m[1]), base);
+      if (/^https?:$/.test(u.protocol) && u.hostname.replace(/^www\./, "").toLowerCase() === host && !/\.(pdf|jpe?g|png|zip)$/i.test(u.pathname)) { contactUrl = u.toString(); break; }
+    } catch { /* skip odd links */ }
+  }
+  return { about, emails, phone, contactUrl };
+}
+
+export type HtmlFetcher = (url: string) => Promise<string>;
+
+/**
+ * Fills about / email / phone for places that have a website. The page fetcher is passed in by the caller
+ * (the agent tool gives a fetcher that refuses private addresses), because website addresses come from untrusted map data.
+ * OpenStreetMap values win; the website only fills what is missing. Results are cached for 7 days.
+ */
+export async function enrichLeads(
+  places: Place[], getHtml: HtmlFetcher, opts: { concurrency?: number; budgetMs?: number } = {}
+): Promise<{ places: Place[]; read: number; failed: number }> {
+  const out = places.map((p) => ({ ...p }));
+  const deadline = Date.now() + (opts.budgetMs ?? 25_000);
+  let read = 0, failed = 0, next = 0;
+  type Info = { about?: string; emails: string[]; phone?: string };
+  const work = async () => {
+    while (next < out.length) {
+      const p = out[next++];
+      if (!p.website) continue;
+      if (Date.now() > deadline) { failed++; continue; }
+      const site = p.website;
+      try {
+        const info = await remember<Info>(`site:${site}`, 7 * DAY, async () => {
+          const r = parseSite(await getHtml(site), site);
+          const info: Info = { about: r.about, emails: r.emails, phone: r.phone };
+          if (!info.emails.length && r.contactUrl && Date.now() < deadline) {
+            try { const r2 = parseSite(await getHtml(r.contactUrl), r.contactUrl); info.emails = r2.emails; info.phone = info.phone ?? r2.phone; info.about = info.about ?? r2.about; } catch { /* the homepage is enough */ }
+          }
+          return info;
+        });
+        if (info) {
+          read++;
+          p.about = info.about ?? p.about;
+          p.email = p.email ?? info.emails[0];
+          p.phone = p.phone ?? info.phone;
+        }
+      } catch { failed++; }
+    }
+  };
+  await Promise.all(Array.from({ length: clamp(opts.concurrency ?? 4, 1, 8) }, work));
+  return { places: out, read, failed };
+}
+
 // ---------------------------------------------------------------- map card block for the chat (```vmap)
 
 export type MapMarker = { name: string; lat: number; lon: number; note?: string; role?: "center" | "start" | "end" };
@@ -454,6 +608,26 @@ export function vmapFence(opts: { title?: string; markers?: MapMarker[]; route?:
   const body: Record<string, unknown> = { title: cleanText(opts.title ?? "Map", 80), markers };
   if (opts.route) body.route = { coords: thin(opts.route.coords, 100), km: opts.route.km, min: opts.route.min, mode: opts.route.mode };
   return "```vmap\n" + JSON.stringify(body) + "\n```";
+}
+
+/** Block for the lead list card (```vleads): table + map + CSV download. Kept under ~3800 characters (tool results are cut at 6000). */
+export function vleadsFence(title: string, leads: Place[]): string {
+  const make = (items: Place[], aboutN: number, withAddr: boolean) => {
+    const rows = items.slice(0, 12).map((p) => ({
+      name: cleanText(p.name, 70), lat: r5(p.lat), lon: r5(p.lon), ...(p.distM !== undefined ? { distM: p.distM } : {}),
+      ...(withAddr && p.address ? { address: cleanText(p.address, 70) } : {}),
+      ...(p.phone ? { phone: p.phone } : {}), ...(p.website ? { website: p.website } : {}), ...(p.email ? { email: p.email } : {}),
+      ...(p.about ? { about: cleanText(p.about, aboutN) } : {}),
+    }));
+    return "```vleads\n" + JSON.stringify({ title: cleanText(title, 80), leads: rows }) + "\n```";
+  };
+  let items = leads.slice(0, 12);
+  for (const [aboutN, addr] of [[140, true], [90, true], [60, false]] as Array<[number, boolean]>) {
+    const f = make(items, aboutN, addr);
+    if (f.length <= 3800) return f;
+  }
+  while (items.length > 1) { items = items.slice(0, -1); const f = make(items, 60, false); if (f.length <= 3800) return f; }
+  return make(items, 60, false);
 }
 
 // ---------------------------------------------------------------- map tiles (what the map card shows)
