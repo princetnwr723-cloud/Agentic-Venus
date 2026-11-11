@@ -1,5 +1,6 @@
 import { webRead, webSearch } from "@/lib/web-tools-server";
 import { assertPublicUrl, http } from "./net";
+import { VMAPS_TOOLS } from "./vmaps";
 import type { Risk, ToolCtx } from "./types";
 
 type Run = (args: Record<string, unknown>, cred: string[], ctx?: ToolCtx) => Promise<string>;
@@ -69,6 +70,7 @@ export const FREE_TOOLS: Def[] = [
       return items.join("\n");
     },
   },
+  ...VMAPS_TOOLS, // free maps for the agent: geocode, nearby, route, show_map (see lib/tools/vmaps.ts)
 ];
 
 // ---------------- keyed plugins ----------------
