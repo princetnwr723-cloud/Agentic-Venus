@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { runAfter } from "@/lib/channels";
 import { claimRoutine, runClaimed, tickRoutines, type Trigger } from "@/lib/routines-server";
 import { cronDenied } from "@/lib/cron-auth";
+import { latchReason } from "@/lib/agent/latch-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -18,6 +19,9 @@ export async function POST(req: Request) {
   const b = (await req.json().catch(() => ({}))) as { uid?: string; id?: string; trigger?: string; payload?: string; depth?: number };
   try {
     if (b.uid && b.id) {
+      // Budget latch: when the owner's limit is used up, the routine is SKIPPED, not failed, and its occurrence is not consumed.
+      const held = await latchReason(String(b.uid));
+      if (held) return NextResponse.json({ ok: false, skipped: true, reason: held.text, until: held.until });
       const trigger = TRIGGERS.includes(b.trigger as Trigger) ? (b.trigger as Trigger) : "schedule";
       const c = await claimRoutine(String(b.uid), String(b.id), { trigger, payload: typeof b.payload === "string" ? b.payload.slice(0, 4000) : undefined, depth: Number(b.depth) || 0 });
       if (!c.ok) return NextResponse.json({ ok: false, reason: c.reason });
