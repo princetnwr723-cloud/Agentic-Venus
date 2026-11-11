@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, CheckCircle2, Copy, CornerUpLeft, Repeat, Reply, RotateCcw, Wrench, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowDown, Check, CheckCircle2, Copy, CornerUpLeft, Repeat, Reply, RotateCcw, Wrench, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ChatMessage } from "@/lib/chats";
 import Markdown from "@/components/Markdown";
@@ -94,11 +94,13 @@ export default function ChatThread({
   agentName?: string;
 }) {
   const [copied, setCopied] = useState<number | null>(null);
+  const [showDown, setShowDown] = useState(false); // true = the reader scrolled up, so the "scroll to latest" button is shown
 
   // ---- the chat always opens at its LATEST message, and follows new ones while you are at the bottom
   const root = useRef<HTMLDivElement>(null);
   const stick = useRef(true); // true = the reader is at (or near) the bottom, so new content keeps the view at the bottom
   const seen = useRef(0);
+  const smoothing = useRef(false); // true while the button's smooth scroll is running (so it is not mistaken for the reader scrolling up)
 
   const scroller = useCallback((): HTMLElement | null => {
     let el = root.current?.parentElement ?? null;
@@ -114,6 +116,17 @@ export default function ChatThread({
     if (el) el.scrollTop = el.scrollHeight;
   }, [scroller]);
 
+  // the round button: glide down to the latest message and follow new ones again
+  const goLatest = useCallback(() => {
+    const el = scroller();
+    if (!el) return;
+    stick.current = true;
+    smoothing.current = true;
+    setShowDown(false);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    window.setTimeout(() => { smoothing.current = false; if (stick.current) toBottom(); }, 600);
+  }, [scroller, toBottom]);
+
   // another chat was opened: jump to the bottom at once, and once more while cards, images and long replies finish drawing
   useIsoLayoutEffect(() => {
     stick.current = true;
@@ -128,7 +141,12 @@ export default function ChatThread({
   useEffect(() => {
     const el = scroller();
     if (!el) return;
-    const onScroll = () => { stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 140; };
+    const onScroll = () => {
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (!smoothing.current) stick.current = gap < 140;
+      setShowDown(smoothing.current ? false : gap > 240);
+    };
+    onScroll();
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, [chatId, scroller]);
@@ -136,7 +154,10 @@ export default function ChatThread({
   // the content grows after the first paint (markdown, cards, the live computer, the run bar): stay at the bottom while it does
   useEffect(() => {
     if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => { if (stick.current) toBottom(); });
+    const ro = new ResizeObserver(() => {
+      if (stick.current) toBottom();
+      else { const el = scroller(); if (el && !smoothing.current) setShowDown(el.scrollHeight - el.scrollTop - el.clientHeight > 240); }
+    });
     if (root.current) ro.observe(root.current);
     const wrap = scroller()?.firstElementChild;
     if (wrap) ro.observe(wrap);
@@ -298,6 +319,20 @@ export default function ChatThread({
 
       {/* The agent wants to pay: its message and the order card (product, card, total, Allow / Deny) right here in the chat */}
       {chatId && <PayCards chatId={chatId} agentName={agentName} />}
+
+      {/* "scroll to latest" button: sticks to the bottom of the chat window while the reader is up in older messages */}
+      <div className="pointer-events-none sticky bottom-2 z-10 !mt-0 h-0">
+        <button
+          type="button"
+          onClick={goLatest}
+          title="Scroll to latest"
+          aria-label="Scroll to latest message"
+          tabIndex={showDown ? 0 : -1}
+          className={`pointer-events-auto absolute bottom-0 left-1/2 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-line bg-panel2 text-ink shadow-panel transition-all duration-200 hover:border-gold hover:text-gold ${showDown ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0"}`}
+        >
+          <ArrowDown size={16} />
+        </button>
+      </div>
     </div>
   );
 }
