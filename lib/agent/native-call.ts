@@ -10,12 +10,15 @@ import { systemBlocks, wireMessages, wireTools } from "./caching.ts";
 import { parseArgs, parseLooseJson } from "./tool-repair.ts";
 import { ProviderError, parseRetryAfter } from "./provider-errors.ts";
 import type { NameMap } from "./tool-schema.ts";
+import { consume, type StreamKind } from "./stream.ts";
 
 export type NativeReq = {
   provider: ProviderId; apiKey: string; model: string;
   system: { stable: string; volatile: string };
   messages: AgentMsg[]; tools: ToolDef[]; maxTokens: number; names: NameMap;
   signal?: AbortSignal; cache?: boolean; longCache?: boolean;
+  /** when set, the answer is streamed and every new piece of visible text is passed here */
+  onText?: (delta: string) => void;
 };
 
 const OPENAI_URLS: Partial<Record<ProviderId, string>> = {
@@ -175,7 +178,64 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
   return data;
 }
 
+async function postStream(url: string, headers: Record<string, string>, body: unknown, kind: StreamKind, onText: (d: string) => void, signal?: AbortSignal): Promise<any> {
+  const timeout = AbortSignal.timeout(100_000);
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...headers }, body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  if (!res.ok) {
+    const data: any = await res.json().catch(() => ({}));
+    const msg = data?.error?.message || (typeof data?.error === "string" ? data.error : "") || data?.message || "request failed";
+    const ra = Number(res.headers.get("retry-after"));
+    throw new ProviderError(`${res.status}: ${msg}`, res.status, Number.isFinite(ra) && ra > 0 ? ra * 1000 : parseRetryAfter(String(msg)));
+  }
+  return consume(res, kind, onText);
+}
+
+/** A provider that answers 0 tokens in a stream (some OpenAI-compatible ones do) must not be billed as free: estimate from size. */
+export function withUsageEstimate(t: ModelTurn, sentChars: number): ModelTurn {
+  const u = t.usage;
+  if (u.inTok + u.outTok + u.cacheRead + u.cacheWrite > 0) return t;
+  const out = t.text.length + t.calls.reduce((n, c) => n + JSON.stringify(c.input ?? {}).length + c.name.length, 0);
+  return { ...t, usage: { inTok: Math.ceil(sentChars / 4), outTok: Math.ceil(out / 4), cacheRead: 0, cacheWrite: 0 } };
+}
+
+/** Only an HTTP-level refusal of streaming itself may fall back to a normal call (never after text was already shown). */
+export const streamUnsupported = (e: unknown) => e instanceof ProviderError && ((e.status === 400 && /\bstream/i.test(e.message) && !/stream_options|include_usage/i.test(e.message)) || e.status === 405 || e.status === 501);
+const wantsNoStreamOptions = (e: unknown) => e instanceof ProviderError && e.status === 400 && /stream_options|include_usage|unknown (parameter|field)|unrecognized/i.test(e.message);
+
+async function callStreaming(r: NativeReq): Promise<ModelTurn> {
+  const on = r.onText as (d: string) => void;
+  if (r.provider === "anthropic") {
+    const headers = { "x-api-key": r.apiKey, "anthropic-version": "2023-06-01" };
+    const go = (c: NativeReq) => postStream("https://api.anthropic.com/v1/messages", headers, { ...buildAnthropic(c), stream: true }, "anthropic", on, c.signal);
+    try { return parseAnthropic(await go(r), r.names.fromNative); }
+    catch (e) {
+      if (e instanceof ProviderError && e.status === 400 && /cache_control|ttl/i.test(e.message)) return parseAnthropic(await go({ ...r, cache: false }), r.names.fromNative);
+      throw e;
+    }
+  }
+  if (r.provider === "gemini") {
+    const body = buildGemini(r);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${r.model}:streamGenerateContent?alt=sse`;
+    return withUsageEstimate(parseGemini(await postStream(url, { "x-goog-api-key": r.apiKey }, body, "gemini", on, r.signal), r.names.fromNative), JSON.stringify(body).length);
+  }
+  const url = OPENAI_URLS[r.provider];
+  if (!url) throw new ProviderError(`No native tool endpoint for ${r.provider}`, 400);
+  const base = buildOpenAI(r);
+  const headers = { Authorization: `Bearer ${r.apiKey}` };
+  const size = JSON.stringify(base).length;
+  const go = (opts: boolean) => postStream(url, headers, { ...base, stream: true, ...(opts ? { stream_options: { include_usage: true } } : {}) }, "openai", on, r.signal);
+  try { return withUsageEstimate(parseOpenAI(await go(true), r.names.fromNative), size); }
+  catch (e) {
+    if (wantsNoStreamOptions(e)) return withUsageEstimate(parseOpenAI(await go(false), r.names.fromNative), size);
+    throw e;
+  }
+}
+
 export async function callNative(r: NativeReq): Promise<ModelTurn> {
+  if (r.onText) {
+    try { return await callStreaming(r); }
+    catch (e) { if (!streamUnsupported(e)) throw e; /* this provider or model refuses streaming: ask normally */ }
+  }
   if (r.provider === "anthropic") {
     const headers = { "x-api-key": r.apiKey, "anthropic-version": "2023-06-01" };
     try { return parseAnthropic(await post("https://api.anthropic.com/v1/messages", headers, buildAnthropic(r), r.signal), r.names.fromNative); }
