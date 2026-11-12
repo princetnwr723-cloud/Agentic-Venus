@@ -3,9 +3,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   deterministic-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       # Node 22 runs the unit tests directly on the .ts files (built-in type stripping).
