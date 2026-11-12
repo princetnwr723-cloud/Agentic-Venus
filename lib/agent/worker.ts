@@ -18,15 +18,17 @@ import { callProvider } from "@/lib/ai-providers-server";
 import type { ProviderId } from "@/lib/providers";
 import { createStore, type DbLike, type KeyRef, type RunDoc, type Store } from "./store.ts";
 import { createStrictBilling } from "./strict-billing.ts";
-import { DEFAULT_LOOP, newState, resolvePending, runLoop, type LoopDeps, type ToolOutcome } from "./loop.ts";
+import { DEFAULT_LOOP, newState, type LoopDeps, type ToolOutcome } from "./loop.ts";
+import { liveSink } from "./stream.ts";
 import { callNative, parseTextTurn, renderAsText, supportsNative, textProtocol } from "./native-call.ts";
 import { classifyError } from "./provider-errors.ts";
 import { HITL_TOOLS } from "./hitl.ts";
 import { buildNameMap, toolDef } from "./tool-schema.ts";
 import { SUMMARY_PROMPT, DEFAULT_COMPACT } from "./compaction.ts";
-import { contextWindow, describeLatch, latchActive } from "./budget.ts";
+import { contextWindow } from "./budget.ts";
+import { costCap } from "./slice.ts";
 import { planGate } from "./plan-gate.ts";
-import { requestTakeover } from "./takeover.ts";
+import { preflight, runSliceCore } from "./slice.ts";
 import { sweepMemories, touchMemories } from "./memory-sweep.ts";
 import type { AgentEvent, ModelTurn, ToolDef } from "./types.ts";
 
@@ -112,20 +114,8 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
   const cleanup = async () => { if (run.tempKey) await vaultDelete(uid, run.tempKey).catch(() => {}); };
 
   try {
-    if (run.slices > MAX_SLICES) {
-      await emit({ kind: "error", text: "This run used too many slices and was stopped." });
-      await finish({ status: "error", endedAt: Date.now(), error: { code: "too_long", message: "This run used too many slices and was stopped." } }, null);
-      await cleanup();
-      return { status: "error" };
-    }
-
-    const latch = await S.readLatch(uid);
-    if (latchActive(latch, startedAt)) {
-      const msg = describeLatch(latch, startedAt);
-      await emit({ kind: "latch", text: msg });
-      await finish({ status: "budget", error: { code: "latch", message: msg } }, { kind: "run", at: latch.until });
-      return { status: "budget" };
-    }
+    const stop = await preflight({ S, run, uid, runId, startedAt, emit, finish, cleanup, maxSlices: MAX_SLICES });
+    if (stop) return stop;
 
     // keys: only references are stored; the real keys are opened here, for this slice only
     const cands: Cand[] = [];
@@ -157,9 +147,11 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
       await touchMemories(uid, run.chatId, ids);
     })());
 
+    let round = 0;
+    const live = liveSink((t) => S.setLive(uid, runId, t, round));
     const callOne = async (c: Cand, req: Parameters<LoopDeps["callModel"]>[0]): Promise<ModelTurn> => {
       if (supportsNative(c.provider)) {
-        return callNative({ provider: c.provider, apiKey: c.apiKey, model: c.model, system: req.system, messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, names, longCache: false });
+        return callNative({ provider: c.provider, apiKey: c.apiKey, model: c.model, system: req.system, messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, names, longCache: false, onText: req.onText });
       }
       // Cohere / Perplexity: no native tools, a JSON protocol in the prompt
       const sys = `${req.system.stable}\n\n${req.system.volatile}\n\n${textProtocol(req.tools)}`;
@@ -167,6 +159,20 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
       const turn = parseTextTurn(text, String(req.round));
       const inTok = Math.ceil((sys.length + JSON.stringify(req.messages).length) / 4);
       return { ...turn, usage: { inTok, outTok: Math.ceil(text.length / 4), cacheRead: 0, cacheWrite: 0 } };
+    };
+
+    const callWithFallback = async (req: Parameters<LoopDeps["callModel"]>[0]): Promise<ModelTurn> => {
+      let last: unknown;
+      for (let i = 0; i < cands.length; i++) {
+        try { live.reset(); return await callOne(cands[i], req); }
+        catch (e) {
+          last = e;
+          const c = classifyError(e);
+          if (!c.switchProvider || i === cands.length - 1) throw e;
+          await emit({ kind: "info", text: `${cands[i].provider} failed (${c.code}). Switching to ${cands[i + 1].provider}.` });
+        }
+      }
+      throw last;
     };
 
     let stopAsked = false, stopCheckedAt = 0;
@@ -191,18 +197,11 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
         const c = cands[0];
         return callProvider({ provider: c.provider, apiKey: c.apiKey, model: c.model, maxTokens: 1500, messages: [{ role: "system", content: SUMMARY_PROMPT }, { role: "user", content: `PREVIOUS SUMMARY:\n${previous || "(none)"}\n\nTRANSCRIPT:\n${transcript}` }] });
       },
+      onText: (d) => live.push(d),
       callModel: async (req) => {
-        let last: unknown;
-        for (let i = 0; i < cands.length; i++) {
-          try { return await callOne(cands[i], req); }
-          catch (e) {
-            last = e;
-            const c = classifyError(e);
-            if (!c.switchProvider || i === cands.length - 1) throw e;
-            await emit({ kind: "info", text: `${cands[i].provider} failed (${c.code}). Switching to ${cands[i + 1].provider}.` });
-          }
-        }
-        throw last;
+        round = req.round; live.reset();
+        try { return await callWithFallback(req); }
+        finally { await live.flush().catch(() => {}); await S.clearLive(uid, runId); live.reset(); }
       },
       runTool: async (name, input, flags): Promise<ToolOutcome> => {
         const owner = brokenOwner(name, broken);
@@ -219,59 +218,20 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
 
     const window = contextWindow(run.model);
     const opts = {
-      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(),
+      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: costCap(run),
       compact: { ...DEFAULT_COMPACT, windowTokens: window }, fromNative: names.fromNative,
     };
 
-    if (state.pending && run.reply) {
-      await resolvePending(state, deps, run.reply);
-      await S.patchRun(uid, runId, { reply: null, takeover: null });
-    }
-    await emit({ kind: "start", text: state.round ? "Continuing" : "Started", data: { slice: run.slices } });
-
-    const res = await runLoop(state, deps, opts);
-    const now = Date.now();
-    const common = { round: state.round };
-
-    switch (res.status) {
-      case "done":
-      case "maxrounds": {
-        await finish({ ...common, status: "done", result: res.text.slice(0, 20_000), endedAt: now, pending: null, reply: null, error: null }, null);
-        await chatRef(uid, run.chatId).update({ messages: FieldValue.arrayUnion({ role: "assistant", content: res.text.slice(0, 20_000), at: now }) }).catch(() => {});
-        if (run.slices > 1 || now - run.createdAt > 60_000) runAfter(notifyOwner(uid, run.chatId, `Done: ${res.text.slice(0, 600)}`));
-        await cleanup();
-        runAfter(sweepMemories(uid, run.chatId));
-        return { status: "done" };
-      }
-      case "paused": {
-        const p = res.pending;
-        const wake = { kind: "expire" as const, at: p.expiresAt };
-        await finish({ ...common, status: "paused", pending: p, reply: null, ...(p.kind === "request_takeover" ? { takeover: requestTakeover(now) } : {}) }, wake);
-        const what = p.kind === "approve_tool" ? `Approve? ${p.summary}` : p.kind === "request_takeover" ? `Please take over the screen: ${p.summary}` : p.kind === "request_secret" ? `I need a secret: ${p.summary}` : p.summary;
-        runAfter(notifyOwner(uid, run.chatId, `Venus is waiting for you: ${what.slice(0, 500)}\n${o.origin}/agent`));
-        return { status: "paused" };
-      }
-      case "stopped":
-        await finish({ ...common, status: "stopped", endedAt: now, stopRequested: false }, null);
-        await cleanup();
-        return { status: "stopped" };
-      case "deadline":
-        await finish({ ...common, status: "queued" }, { kind: "run", at: now + 90_000 });
-        kick(uid, runId, run.chatId, o.origin);
-        return { status: "continue" };
-      case "budget": {
-        const shared = res.latch.kind !== "cost";
-        if (shared) await S.armLatch(uid, res.latch);
-        await emit({ kind: "latch", text: res.message });
-        await finish({ ...common, status: "budget", error: { code: res.latch.kind, message: res.message }, ...(shared ? {} : { endedAt: now }) }, shared ? { kind: "run", at: res.latch.until } : null);
-        if (!shared) await cleanup();
-        return { status: "budget" };
-      }
-      default:
-        await finish({ ...common, status: "error", endedAt: now, error: { code: res.code, message: res.message } }, null);
-        await cleanup();
-        return { status: "error" };
-    }
+    return await runSliceCore({
+      S, run, uid, runId, startedAt, state, deps, opts, emit, finish, cleanup,
+      io: {
+        postToChat: async (text, at) => { await chatRef(uid, run.chatId).update({ messages: FieldValue.arrayUnion({ role: "assistant", content: text, at }) }).catch(() => {}); },
+        notify: (text) => runAfter(notifyOwner(uid, run.chatId, text)),
+        kick: () => kick(uid, runId, run.chatId, o.origin),
+        afterDone: () => runAfter(sweepMemories(uid, run.chatId)),
+        link: `${o.origin}/dashboard`,
+      },
+    });
   } catch (e) {
     const c = classifyError(e);
     const message = e instanceof Error ? e.message.slice(0, 300) : "The run failed.";
