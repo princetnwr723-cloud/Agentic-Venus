@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import { cronDenied } from "@/lib/cron-auth";
 import { kick, store } from "@/lib/agent/worker";
 import { appBaseUrl } from "@/lib/voice-server";
-import { latchActive } from "@/lib/agent/budget";
-import { beat, endedBecause, handBack, nextCheck, takeoverSeconds, END_TEXT } from "@/lib/agent/takeover";
+import { planTick } from "@/lib/agent/actions";
 import type { Reply } from "@/lib/agent/types";
 
 export const runtime = "nodejs";
@@ -34,34 +33,19 @@ export async function POST(req: Request) {
         go();
       };
 
-      if (run.status === "queued" || run.status === "running") { await S.setQueue(q.uid, q.id, "run", now + 90_000); go(); out.resumed++; continue; }
-
-      if (run.status === "budget") {
-        const l = await S.readLatch(q.uid);
-        if (latchActive(l, now)) { await S.setQueue(q.uid, q.id, "run", l.until); out.waiting++; continue; }
-        await S.patchRun(q.uid, q.id, { status: "queued", error: null });
-        await S.setQueue(q.uid, q.id, "run", now + 90_000);
-        go(); out.resumed++; continue;
+      const plan = planTick(run, run.status === "budget" ? await S.readLatch(q.uid) : null, now);
+      switch (plan.do) {
+        case "clear": await S.clearQueue(q.id); out.cleared++; break;
+        case "resume": await S.setQueue(q.uid, q.id, "run", now + 90_000); go(); out.resumed++; break;
+        case "wait": await S.setQueue(q.uid, q.id, plan.kind, plan.at); out.waiting++; break;
+        case "requeue":
+          await S.patchRun(q.uid, q.id, { status: "queued", error: null });
+          await S.setQueue(q.uid, q.id, "run", now + 90_000);
+          go(); out.resumed++; break;
+        case "answer":
+          await answer(plan.reply, plan.takeover ? { takeover: plan.takeover } : {});
+          out[plan.counted]++; break;
       }
-
-      if (run.status === "paused" && run.pending) {
-        const t = run.takeover;
-        if (t?.status === "active") {
-          const why = endedBecause(t, now);
-          if (why) {
-            const ended = handBack(t, now, why);
-            await answer({ action: "takeover_done", seconds: takeoverSeconds(ended), note: `The screen was handed back because ${END_TEXT[why]}.`, reason: run.pending.summary.slice(0, 80) }, { takeover: ended });
-            out.handedBack++;
-          } else { await S.setQueue(q.uid, q.id, "takeover", nextCheck(beat(t, t.lastBeat ?? now))); out.waiting++; }
-          continue;
-        }
-        if (run.pending.expiresAt <= now) { await answer({ action: "timeout" }); out.timedOut++; continue; }
-        await S.setQueue(q.uid, q.id, "expire", run.pending.expiresAt);
-        out.waiting++;
-        continue;
-      }
-      await S.clearQueue(q.id);
-      out.cleared++;
     }
     return NextResponse.json({ ok: true, ...out });
   } catch (err) {
