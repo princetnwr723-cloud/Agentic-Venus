@@ -9,11 +9,13 @@ import { HITL_NAMES, isHitlName, pendingFromApproval, pendingFromHitl, resultFro
 import { checkArgs, repairMessage, resolveToolName } from "./tool-repair.ts";
 
 export type ToolOutcome = { ok: boolean; text: string; needsApproval?: { summary: string; risk: string }; flagged?: string[]; risk?: "read" | "write" };
-export type ModelReq = { system: { stable: string; volatile: string }; messages: AgentMsg[]; tools: ToolDef[]; maxTokens: number; round: number };
+export type ModelReq = { system: { stable: string; volatile: string }; messages: AgentMsg[]; tools: ToolDef[]; maxTokens: number; round: number; onText?: (delta: string) => void };
 export type StepRow = { round: number; model: string; ms: number; usage: Usage; costMicros: number; tools: string[]; stop: string };
 
 export type LoopDeps = {
   callModel: (req: ModelReq) => Promise<ModelTurn>;
+  /** new visible text of the answer that is being written (streaming); optional */
+  onText?: (delta: string) => void;
   runTool: (name: string, input: Record<string, unknown>, o: { approved: boolean; force: boolean }) => Promise<ToolOutcome>;
   summarize: Summarize;
   emit: (e: AgentEvent) => Promise<void> | void;
@@ -100,7 +102,7 @@ export async function runLoop(s: RunState, deps: LoopDeps, o: LoopOpts): Promise
       const reserved = estTokens(JSON.stringify(s.messages)) + estTokens(o.system.stable + o.system.volatile) + o.maxTokens;
       await deps.reserve?.(reserved);
       try {
-        const turn = await deps.callModel({ system: o.system, messages: s.messages, tools: o.tools, maxTokens: o.maxTokens, round: s.round });
+        const turn = await deps.callModel({ system: o.system, messages: s.messages, tools: o.tools, maxTokens: o.maxTokens, round: s.round, ...(deps.onText ? { onText: deps.onText } : {}) });
         const actual = turn.usage.inTok + turn.usage.outTok + turn.usage.cacheRead + turn.usage.cacheWrite;
         await deps.settle?.(reserved, actual);
         const c = costMicros(deps.model, turn.usage);
