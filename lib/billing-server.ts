@@ -10,6 +10,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { RequestError } from "@/lib/request";
 import { PLANS, fmtDuration, nextPlan, planById, type PlanDef, type PlanId } from "@/lib/plans";
+import { envFailOpen, guarded, type Lost, type Mode } from "@/lib/billing-policy";
 
 const db = () => getAdminDb();
 const base = (uid: string) => db().collection("users").doc(uid).collection("billing");
@@ -96,14 +97,13 @@ async function tx<T>(uid: string, fn: (c: Ctx) => T): Promise<T> {
   });
 }
 
-/** Limit errors are shown to the user. Any other billing failure never blocks the product (fail open). */
-async function failOpen<T>(p: Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await p;
-  } catch (e) {
-    if (e instanceof RequestError) throw e;
-    return fallback;
-  }
+/**
+ * Limit errors (402) are shown to the user. A broken billing database is handled by lib/billing-policy.ts:
+ * checks before work FAIL CLOSED (503, "try again"), writes after work are retried and, if they still fail, recorded in billingLost.
+ */
+const lost = (l: Lost) => db().collection("billingLost").add(l);
+function guard<T>(mode: Mode, kind: string, uid: string, run: () => Promise<T>, fallback: T, detail?: unknown): Promise<T> {
+  return guarded(run, { mode, kind, uid, fallback, detail, failOpen: envFailOpen(), onLost: lost, unavailable: () => new RequestError("Billing is temporarily unavailable, so this could not be started. Please try again in a moment.", 503) });
 }
 
 function limitError(what: string, c: Ctx) {
@@ -117,7 +117,7 @@ function limitError(what: string, c: Ctx) {
 
 // ---------------- tokens ----------------
 export const assertTokens = (uid: string) =>
-  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : failOpen(
+  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : guard("gate", "assertTokens", uid, () =>
     tx(uid, (c) => {
       if (c.plan.tokens !== null && c.n.tokens >= c.plan.tokens) throw limitError("AI token", c);
     }),
@@ -125,17 +125,18 @@ export const assertTokens = (uid: string) =>
   );
 
 export const addTokens = (uid: string, tokens: number) =>
-  failOpen(
+  guard("meter", "addTokens", uid, () =>
     tx(uid, (c) => {
       c.n.tokens += Math.max(0, Math.round(tokens));
       c.dirty = true;
     }),
-    undefined
+    undefined,
+    { tokens: Math.max(0, Math.round(tokens)) }
   );
 
 // ---------------- computer time ----------------
 export const assertPcAllowed = (uid: string) =>
-  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : failOpen(
+  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : guard("gate", "assertPcAllowed", uid, () =>
     tx(uid, (c) => {
       if (c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds) throw limitError("Computer agent time", c);
     }),
@@ -148,7 +149,8 @@ export const pcExhausted = async (uid: string): Promise<boolean> => {
   if (isUnlimitedTestUser(uid)) return false;
   const hit = notExhaustedAt.get(uid);
   if (hit && Date.now() - hit < 20_000) return false;
-  const r = await failOpen(tx(uid, (c) => c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds), false);
+  // a poll that can end a job that is already running: a database blip must not kill it (starting a job is gated by assertPcAllowed)
+  const r = await guard("meter", "pcExhausted", uid, () => tx(uid, (c) => c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds), false);
   if (!r) {
     if (notExhaustedAt.size > 500) notExhaustedAt.clear();
     notExhaustedAt.set(uid, Date.now());
@@ -158,11 +160,12 @@ export const pcExhausted = async (uid: string): Promise<boolean> => {
 
 export const openPcJob = (uid: string, jobId: string, sandboxId: string) => {
   notExhaustedAt.delete(uid);
-  return failOpen(
+  return guard("meter", "openPcJob", uid, () =>
     tx(uid, (c) => {
       c.patch.pcOpen = { [jobId]: { sandboxId, since: c.now, seen: c.now } };
     }),
-    undefined
+    undefined,
+    { jobId }
   );
 };
 
@@ -174,19 +177,20 @@ export const touchPcSeen = async (uid: string, jobId: string): Promise<void> => 
   if (now - (lastTouch.get(k) ?? 0) < 25_000) return;
   if (lastTouch.size > 500) lastTouch.clear();
   lastTouch.set(k, now);
-  await failOpen(
+  await guard("meter", "touchPcSeen", uid, () =>
     tx(uid, (c) => {
       const o = c.n.pcOpen[jobId];
       if (o) c.patch.pcOpen = { [jobId]: { ...o, seen: c.now } };
     }),
-    undefined
+    undefined,
+    { jobId }
   );
 };
 
 /** Idempotent: closing a job twice adds its time only once. */
 export const settlePcJob = (uid: string, jobId: string, endMs: number) => {
   notExhaustedAt.delete(uid);
-  return failOpen(
+  return guard("meter", "settlePcJob", uid, () =>
     tx(uid, (c) => {
       const o = c.n.pcOpen[jobId];
       if (!o) return;
@@ -195,7 +199,8 @@ export const settlePcJob = (uid: string, jobId: string, endMs: number) => {
       c.patch.pcOpen = { [jobId]: FieldValue.delete() };
       c.dirty = true;
     }),
-    undefined
+    undefined,
+    { jobId, endMs }
   );
 };
 
@@ -224,7 +229,7 @@ const FREE_REPEATS = 3;
 export async function consumeFeature(uid: string, kind: Feature, key: string): Promise<void> {
   if (!uid || isUnlimitedTestUser(uid)) return;
   const id = String(key || "default").slice(0, 120);
-  await failOpen(
+  await guard("gate", "consumeFeature:" + kind, uid, () =>
     db().runTransaction(async (t) => {
       const [ps, us] = await Promise.all([t.get(planRef(uid)), t.get(usageRef(uid))]);
       const now = Date.now();
