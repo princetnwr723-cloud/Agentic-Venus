@@ -1,19 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { agentApi, usd, watchEvents, watchRun, type RunEvent, type RunView } from "@/lib/agent/client";
+import { agentApi, usd, watchEvents, watchLive, watchRun, type RunEvent, type RunView } from "@/lib/agent/client";
 
 const tone: Record<string, string> = { queued: "bg-gold", running: "bg-gold", paused: "bg-avatar-teal", done: "bg-avatar-teal", error: "bg-red-400", stopped: "bg-faint", budget: "bg-red-400" };
 
-export default function AgentRunPanel({ uid, runId }: { uid: string; runId: string }) {
+export default function AgentRunPanel({ uid, runId, compact = false }: { uid: string; runId: string; compact?: boolean }) {
   const [run, setRun] = useState<RunView | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [typing, setTyping] = useState<{ text: string; round: number } | null>(null);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const beatRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => { const a = watchRun(uid, runId, setRun), b = watchEvents(uid, runId, setEvents); return () => { a(); b(); }; }, [uid, runId]);
+  useEffect(() => { const a = watchRun(uid, runId, setRun), b = watchEvents(uid, runId, setEvents, compact ? 6 : 80), c = watchLive(uid, runId, setTyping); return () => { a(); b(); c(); }; }, [uid, runId, compact]);
 
   const pending = run?.status === "paused" ? run.pending : null;
   const taking = pending?.kind === "request_takeover" && run?.takeover?.status === "active";
@@ -88,7 +89,11 @@ export default function AgentRunPanel({ uid, runId }: { uid: string; runId: stri
       {run.status === "done" && run.result && <div className="mx-3 mt-3 whitespace-pre-wrap rounded-md border border-line p-3 text-sm text-ink">{run.result}</div>}
       {err && <div className="mx-3 mt-2 text-xs text-red-400">{err}</div>}
 
-      <div className="max-h-72 space-y-1 overflow-auto px-4 py-3">
+      {typing && typing.text && (run.status === "running" || run.status === "queued") && (
+        <div className="mx-3 mt-3 whitespace-pre-wrap rounded-md border border-line bg-bg p-3 text-sm text-ink">{typing.text}<span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-gold align-middle" /></div>
+      )}
+
+      <div className={`${compact ? "max-h-28" : "max-h-72"} space-y-1 overflow-auto px-4 py-3`}>
         {events.length === 0 && <div className="text-xs text-faint">Waiting for the first step…</div>}
         {events.map((e) => <div key={e.id} className="text-[12px] text-muted"><span className="mr-2 text-faint">{new Date(e.t).toLocaleTimeString()}</span><span className="mr-1 text-ink">{e.kind}</span>{e.text}</div>)}
       </div>
