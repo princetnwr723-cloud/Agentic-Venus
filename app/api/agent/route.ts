@@ -7,6 +7,7 @@ import { kick, startRun, store } from "@/lib/agent/worker";
 import { latchReason } from "@/lib/agent/latch-server";
 import { summarizeRuns } from "@/lib/agent/budget";
 import { beat, handBack, nextCheck, startTakeover, takeoverSeconds, decline } from "@/lib/agent/takeover";
+import { replyFor } from "@/lib/agent/actions";
 import type { Reply } from "@/lib/agent/types";
 import type { RunDoc } from "@/lib/agent/store";
 
@@ -94,7 +95,9 @@ export async function POST(req: Request) {
       if (run.status !== "budget") throw new RequestError("Only a run that was paused by a limit can be continued.", 409);
       const l = await latchReason(uid);
       if (l) return NextResponse.json({ ok: false, latched: true, until: l.until, error: l.text }, { status: 429 });
-      await S.patchRun(uid, runId, { status: "queued", error: null, stopRequested: false });
+      // a run stopped by its own cost cap would hit the same cap again at once: every "Continue" grants one more allowance
+      const capped = run.error?.code === "cost";
+      await S.patchRun(uid, runId, { status: "queued", error: null, stopRequested: false, ...(capped ? { costExtra: (run.costExtra ?? 0) + 1 } : {}) });
       await S.setQueue(uid, runId, "run", Date.now() + 90_000);
       go();
       return NextResponse.json({ ok: true });
@@ -106,20 +109,9 @@ export async function POST(req: Request) {
 
     if (action === "reply") {
       const card = needCard();
-      const act = String(body.reply || "");
-      let reply: Reply;
-      if (card.kind === "request_secret") {
-        if (act === "secret") {
-          const value = String(body.value ?? "");
-          if (!value || value.length > 8000) throw new RequestError("Enter the value.", 400);
-          const name = `agent.${run.chatId.toLowerCase().replace(/[^a-z0-9]/g, "")}.${card.secretName ?? "secret"}`.slice(0, 90);
-          await vaultPut(uid, name, value); // straight into the encrypted vault: it is never written to the run, the chat or the model
-          reply = { action: "secret", name };
-        } else reply = { action: "deny" };
-      } else if (card.kind === "ask_user") reply = act === "answer" ? { action: "answer", text: str(body.text, 4000) } : { action: "deny" };
-      else if (card.kind === "request_takeover") { await S.patchRun(uid, runId, { takeover: decline(run.takeover ?? undefined, Date.now()) }); reply = { action: "deny" }; }
-      else reply = act === "approve" ? { action: "approve" } : { action: "deny", note: str(body.note, 300) };
-      await resume(reply);
+      const ans = replyFor(card, body, run.chatId);
+      if (ans.secret) await vaultPut(uid, ans.secret.name, ans.secret.value); // straight into the encrypted vault: never written to the run, the chat or the model
+      await resume(ans.reply, ans.declineTakeover ? { takeover: decline(run.takeover ?? undefined, Date.now()) } : {});
       return NextResponse.json({ ok: true });
     }
 
