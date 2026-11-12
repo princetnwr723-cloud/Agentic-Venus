@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
-      - name: Call every tick endpoint (routines, background jobs, missions, proactive)
+      - name: Call every tick endpoint (routines, agent runs, background jobs, missions, proactive)
         env:
           APP_URL: ${{ secrets.APP_URL }}
           RUNNER_SECRET: ${{ secrets.ROUTINE_RUNNER_SECRET }}
@@ -35,7 +35,7 @@ jobs:
           APP_URL=$(printf '%s' "$APP_URL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           RUNNER_SECRET=$(printf '%s' "$RUNNER_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           fail=0
-          for path in routines/run runner/tick missions/tick proactive/tick; do
+          for path in routines/run agent/tick runner/tick missions/tick proactive/tick; do
             url="${APP_URL%/}/api/${path}"
             code=$(curl -sS -o out.txt -w "%{http_code}" -X POST "$url" \
               -H "Authorization: Bearer $RUNNER_SECRET" -H "Content-Type: application/json" -d '{}' \
