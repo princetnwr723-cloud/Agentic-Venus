@@ -3,6 +3,7 @@
 //   users/{uid}/runs/{id}                run document (status, pending card, usage, lease ...)
 //   users/{uid}/runs/{id}/chunks/{v_i}   the run state as JSON, cut in pieces (one document is limited to 1 MB)
 //   users/{uid}/runs/{id}/events/{t_r}   what the owner sees live
+//   users/{uid}/runs/{id}/live/now       the answer being typed right now (streaming)
 //   users/{uid}/runs/{id}/steps/{n}      one row per model call: tokens, cost, ms, tools
 //   agentQueue/{id}                      who has to be woken up (expired lease, takeover timer, pending card timeout)
 //   users/{uid}/billing/latch            the budget latch
@@ -30,6 +31,8 @@ export type RunDoc = {
   stateVer: number; stateChunks: number;
   result?: string; error?: { code: string; message: string } | null;
   maxRounds: number; slices: number; origin?: string; routineId?: string;
+  /** how many extra cost allowances the owner granted with "Continue" after the per-run cost cap stopped the run */
+  costExtra?: number;
 };
 
 export const CHUNK_CHARS = 180_000;
@@ -77,6 +80,9 @@ export function createStore(db: DbLike) {
     const key = `${String(now).padStart(13, "0")}_${Math.random().toString(36).slice(2, 6)}`;
     await run(uid, id).collection("events").doc(key).set({ t: now, kind: e.kind, text: e.text.slice(0, 1500), ...(e.data ? { data: JSON.parse(JSON.stringify(e.data)) } : {}) });
   };
+  /** The answer while it is being written. One small document, replaced about once a second; deleted when the model call ends. */
+  const setLive = async (uid: string, id: string, text: string, round: number) => { await run(uid, id).collection("live").doc("now").set({ text, round, at: Date.now() }); };
+  const clearLive = async (uid: string, id: string) => { await run(uid, id).collection("live").doc("now").delete().catch(() => {}); };
   const addStep = async (uid: string, id: string, row: StepRow) => { await run(uid, id).collection("steps").doc(String(row.round).padStart(4, "0") + "_" + Math.random().toString(36).slice(2, 5)).set({ ...row, at: Date.now() }); };
 
   const setQueue = async (uid: string, id: string, kind: "run" | "takeover" | "expire", wakeAt: number) => { await queue().doc(id).set({ uid, kind, wakeAt }); };
@@ -116,6 +122,6 @@ export function createStore(db: DbLike) {
   const armLatch = async (uid: string, l: Latch) => { await latchDoc(uid).set(l); };
   const clearLatch = async (uid: string) => { await latchDoc(uid).delete().catch(() => {}); };
 
-  return { createRun, getRun, patchRun, saveState, loadState, addEvent, addStep, setQueue, clearQueue, dueQueue, claimLease, release, listRuns, readLatch, armLatch, clearLatch };
+  return { createRun, getRun, patchRun, saveState, loadState, addEvent, addStep, setLive, clearLive, setQueue, clearQueue, dueQueue, claimLease, release, listRuns, readLatch, armLatch, clearLatch };
 }
 export type Store = ReturnType<typeof createStore>;
