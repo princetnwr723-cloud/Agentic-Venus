@@ -13,7 +13,7 @@ import { listCustomAgents, createCustomAgent, type CustomAgent } from "@/lib/age
 import { listRoutinesForChat, createRoutine, setRoutineEnabled, deleteRoutine, recordManualRun, type Routine } from "@/lib/routines";
 import { setModelPref } from "@/lib/model-pref";
 import { PRESET_AGENTS, type AvatarColor } from "@/lib/bots";
-import type { ProviderId } from "@/lib/providers";
+import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { addMemory, brainPrompt, forgetMemory, loadBrain, rankSkills, reflect, setRole, type Brain, type Verdict } from "@/lib/brain";
 import { runCodeAgent, type CodeHooks } from "@/lib/code-agent";
 import { getCodeProject, newCodeProject, saveCodeProject } from "@/lib/code-store";
@@ -58,6 +58,8 @@ import FirstKeyGate from "@/components/dashboard/FirstKeyGate";
 import TeamPanel from "@/components/dashboard/TeamPanel";
 import ConnectorsModal from "@/components/dashboard/ConnectorsModal";
 import PcPanel, { type AgentRequest, type RequestReply } from "@/components/dashboard/PcPanel";
+import AgentDock from "@/components/agent/AgentDock";
+import { startServerRun, type RunView } from "@/lib/agent/client";
 
 const toRequest = (p: PcPending): AgentRequest =>
   p.kind === "login" ? { kind: "login", site: p.site ?? "" }
@@ -635,6 +637,40 @@ export default function DashboardPage() {
   }
 
   // ---- Models: router + fallback + streaming ----
+
+  // ---- Server agent: the work continues on the server, so closing this tab does not stop it ----
+  // On by default. A person (or a test) can switch it off with localStorage "venus.serverAgent" = "off": the old in-browser loop then runs.
+  function serverAgentOn(): boolean {
+    try { return typeof window === "undefined" || window.localStorage.getItem("venus.serverAgent") !== "off"; } catch { return true; }
+  }
+
+  /** Starts a server run for this request. true = the server has it (or told the owner why not); false = start the old browser loop. */
+  async function handOverToServer(chat: Chat, task: string, base: ChatMessage[]): Promise<boolean> {
+    if (!user) return false;
+    const key = apiKeys[chat.provider];
+    if (!key) return false;
+    try {
+      const fallbacks = (Object.keys(apiKeys) as ProviderId[])
+        .filter((p) => p !== chat.provider && apiKeys[p])
+        .slice(0, 2)
+        .map((p) => ({ provider: p, model: PROVIDERS.find((x) => x.id === p)?.models[0] ?? "", apiKey: String(apiKeys[p]) }))
+        .filter((f) => f.model);
+      await startServerRun(user.uid, { chatId: chat.id, task, provider: chat.provider, model: chat.model, apiKey: key, fallbacks });
+      patchChat(chat.id, { messages: base }); // the streamed first draft goes away: the live answer now comes from the server run (shown above the message box)
+      return true;
+    } catch (err) {
+      const e = err as { latched?: boolean; status?: number; message?: string };
+      // a limit, a budget stop or "too many tasks" is an answer, not a reason to run the same work in the browser around it
+      if (e.latched || e.status === 429 || e.status === 402) { say(chat.id, `⚠️ ${e.message ?? "The background agent could not start."}`); return true; }
+      return false;
+    }
+  }
+
+  /** A server run ended: learn from it like from any other answer. */
+  function onServerRunDone(run: RunView) {
+    if (!activeChat || run.chatId !== activeChat.id || run.status !== "done") return;
+    void fetch("/api/learn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chatId: run.chatId, user: run.task, reply: String(run.result ?? "").slice(0, 1500) }) }).then(() => loadChatBrain(run.chatId)).catch(() => {});
+  }
 
   async function callLLM(chat: Chat, system: string, prompt: string, history: Array<{ role: "user" | "assistant"; content: string }> = [], role: Role = "act"): Promise<string> {
     const run = async (pick: ReturnType<typeof pickModel>) => {
@@ -1693,6 +1729,10 @@ export default function DashboardPage() {
         replyOut = await streamLLM(chat, system, `${userPrompt}\n(The photo could not be shown to this model. Say so, and work from the file name and the owner's words.)`, history, showText);
       }
 
+      // The first answer asks for tools: that is real work. It continues on the server (it survives a closed tab, can ask for approval,
+      // secrets and screen control, and shows its answer as it is written). Switched off or unreachable: the loop below runs in the browser as before.
+      if (serverAgentOn() && extractToolCalls(replyOut).calls.length > 0 && (await handOverToServer(chat, text + extra, base))) return;
+
       let convo: Array<{ role: "user" | "assistant"; content: string }> = [...history, { role: "user", content: userPrompt }];
       let tainted = false;
       let planActive = planNote.length > 0;
@@ -1844,6 +1884,8 @@ export default function DashboardPage() {
               </div>
               {/* only the dock slot of the Progress panel stays above the message box (no run cards there any more) */}
               <RunBars venusRun={null} codeRun={null} teamRun={null} />
+              {/* background agent: live answer, steps and the cards (approve / question / secret / take over) of this chat's server runs */}
+              <AgentDock uid={user.uid} chatId={activeChat.id} onDone={onServerRunDone} />
               <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
               <ChatComposer
                 draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
