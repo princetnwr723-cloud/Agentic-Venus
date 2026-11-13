@@ -3,7 +3,7 @@
 //   - when the provider or the plan says "no more", a latch is armed until the reset time: scheduled routines and new runs
 //     SKIP (they stay due, nothing fails, nothing is lost) instead of failing again and again.
 import type { Latch, Usage } from "./types.ts";
-import type { Classified } from "./provider-errors.ts";
+import { userMessage, type Classified } from "./provider-errors.ts";
 
 export const emptyUsage = (): Usage => ({ inTok: 0, outTok: 0, cacheRead: 0, cacheWrite: 0 });
 export const addUsage = (a: Usage, b: Usage): Usage => ({ inTok: a.inTok + b.inTok, outTok: a.outTok + b.outTok, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite });
@@ -31,8 +31,8 @@ export const latchActive = (l: Latch | null | undefined, now: number): l is Latc
 
 /** A latch from a provider error. Only errors that stay true for a while arm it. */
 export function latchFromError(c: Classified, now: number): Latch | null {
-  if (c.code === "usage_limit") return { kind: "provider", reason: c.message.slice(0, 200), armedAt: now, until: now + Math.max(c.retryAfterMs ?? 0, THIRTY_MIN) };
-  if (c.code === "rate_limited" && (c.retryAfterMs ?? 0) >= 10 * 60_000) return { kind: "provider", reason: "The provider is rate limiting this key for a long time.", armedAt: now, until: now + (c.retryAfterMs ?? THIRTY_MIN) };
+  if (c.code === "usage_limit") return { kind: "provider", reason: userMessage(c), armedAt: now, until: now + Math.max(c.retryAfterMs ?? 0, THIRTY_MIN) };
+  if (c.code === "rate_limited" && (c.retryAfterMs ?? 0) >= 10 * 60_000) return { kind: "provider", reason: "The AI provider is limiting this key for a while.", armedAt: now, until: now + (c.retryAfterMs ?? THIRTY_MIN) };
   return null;
 }
 
@@ -41,7 +41,9 @@ export const latchFromCost = (now: number, costMicrosNow: number, capMicros: num
 
 export const describeLatch = (l: Latch, now: number): string => {
   const mins = Math.max(1, Math.ceil((l.until - now) / 60_000));
-  return `Paused until the limit resets (about ${mins >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`}): ${l.reason}`;
+  const when = mins >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`;
+  const what = l.kind === "plan" ? "Your plan's AI allowance is used up for now." : "The AI provider is limiting requests right now.";
+  return `${what} This task continues by itself in about ${when}.`;
 };
 
 /** Window end of the plan's token window (same maths as billing-server). */
