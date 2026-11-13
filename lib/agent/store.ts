@@ -33,6 +33,10 @@ export type RunDoc = {
   maxRounds: number; slices: number; origin?: string; routineId?: string;
   /** how many extra cost allowances the owner granted with "Continue" after the per-run cost cap stopped the run */
   costExtra?: number;
+  /** Automatic mode: the agent does not ask before ordinary actions (autopilot.ts) */
+  autoApprove?: boolean;
+  /** when a paused-by-limit run goes on by itself (the scheduler and the open panel both wake it) */
+  resumeAt?: number | null;
 };
 
 export const CHUNK_CHARS = 180_000;
