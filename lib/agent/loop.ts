@@ -7,6 +7,7 @@ import { DEFAULT_COMPACT, compactMessages, totalTokens, estTokens, buildHead, re
 import { backoffMs, classifyError, userMessage, type Classified } from "./provider-errors.ts";
 import { HITL_NAMES, isHitlName, pendingFromApproval, pendingFromHitl, resultFromReply } from "./hitl.ts";
 import { checkArgs, repairMessage, resolveToolName } from "./tool-repair.ts";
+import { AUTO_APPROVED_TEXT, autoDecision } from "./autopilot.ts";
 
 export type ToolOutcome = { ok: boolean; text: string; needsApproval?: { summary: string; risk: string }; flagged?: string[]; risk?: "read" | "write" };
 export type ModelReq = { system: { stable: string; volatile: string }; messages: AgentMsg[]; tools: ToolDef[]; maxTokens: number; round: number; onText?: (delta: string) => void };
@@ -36,6 +37,8 @@ export type LoopOpts = {
   tools: ToolDef[]; system: { stable: string; volatile: string };
   maxRounds: number; maxToolsPerRound: number; maxNudges: number; maxTokens: number;
   deadline: number; maxCostMicros: number; compact: CompactOpts; toolOutputChars: number; fromNative?: (n: string) => string | undefined;
+  /** Automatic mode: ordinary approvals are given by the system (see autopilot.ts) */
+  autoApprove?: boolean;
 };
 export const DEFAULT_LOOP: Omit<LoopOpts, "tools" | "system" | "deadline"> = {
   maxRounds: 40, maxToolsPerRound: 8, maxNudges: 6, maxTokens: 8192, maxCostMicros: 3_000_000, compact: DEFAULT_COMPACT, toolOutputChars: 12_000,
@@ -159,6 +162,12 @@ export async function runLoop(s: RunState, deps: LoopDeps, o: LoopOpts): Promise
       s.queue = s.queue.filter((c) => c.id !== call.id);
       return null;
     }
+    if (name === "request_approval" && o.autoApprove && autoDecision(name, String(call.input.summary ?? ""), s.tainted) === "approve") {
+      s.turnResults.push(resultBlock(call.id, AUTO_APPROVED_TEXT));
+      s.queue = s.queue.filter((c) => c.id !== call.id);
+      await deps.emit({ kind: "info", text: "Approved automatically", data: { auto: true } });
+      return null;
+    }
     if (isHitlName(name)) return pendingFromHitl({ id: call.id, name, input: call.input }, deps.now(), s.tainted);
     const def = toolByName.get(name)!;
     const { args, errors } = checkArgs(def.schema, call.input);
@@ -173,6 +182,13 @@ export async function runLoop(s: RunState, deps: LoopDeps, o: LoopOpts): Promise
     try { r = await deps.runTool(name, args, { approved: false, force: s.tainted }); }
     catch (e) { r = { ok: false, text: e instanceof Error ? e.message : "Tool crashed." }; }
     s.inflight = null;
+    if (r.needsApproval && o.autoApprove && autoDecision(name, r.needsApproval.summary, s.tainted, args) === "approve") {
+      s.inflight = call.id; await deps.save(s);
+      await deps.emit({ kind: "info", text: "Approved automatically", data: { auto: true, name } });
+      try { r = await deps.runTool(name, args, { approved: true, force: s.tainted }); }
+      catch (e) { r = { ok: false, text: e instanceof Error ? e.message : "Tool crashed." }; }
+      s.inflight = null;
+    }
     if (r.needsApproval) return pendingFromApproval({ id: call.id, name, input: args }, r.needsApproval.summary, deps.now(), s.tainted);
     if (r.flagged?.length) { s.tainted = true; await deps.emit({ kind: "info", text: `"${name}" returned text that tries to give orders (${r.flagged.join(", ")}). Write actions now need your approval.` }); }
     s.turnResults.push(resultBlock(call.id, clip(r.text, o.toolOutputChars), !r.ok));
