@@ -1,80 +1,81 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  ArrowRight, Brain, Check, ChevronRight, Clock, Code2, Copy, Film, GitBranch, KeyRound, Layers, Menu, MessageSquare,
-  Minus, Monitor, Phone, Plug, Rocket, Search, ShieldCheck, Sparkles, Users, X,
+  ArrowLeft, ArrowRight, ArrowUp, BookOpen, Brain, Check, ChevronDown, ChevronRight, Clock, Code2, Copy, Film, GitBranch,
+  KeyRound, Layers, Link2, MapPin, Menu, MessageSquare, Minus, Monitor, Phone, Plug, Rocket, Search, ShieldCheck, Sparkles,
+  Tag as TagIcon, Users, X,
 } from "lucide-react";
 import Logo from "@/components/Logo";
+import { PLANS } from "@/lib/plans";
 import {
-  AGENTS, BEST_AT, ENV_VARS, FAQ, FEATURES, HELPS, LIMITS, MATRIX, PRODUCT, RATINGS, type Cell, type IconKey,
+  AGENTS, GROUPS, MATRIX, PRODUCT, RATINGS, TOTAL_SECTIONS, type Cell, type IconKey, type Sec, type Tag,
 } from "@/lib/docs-content";
 
 const ICONS: Record<IconKey, ReactNode> = {
-  monitor: <Monitor size={17} />, code: <Code2 size={17} />, film: <Film size={17} />, users: <Users size={17} />,
-  brain: <Brain size={17} />, plug: <Plug size={17} />, key: <KeyRound size={17} />, phone: <Phone size={17} />,
-  rocket: <Rocket size={17} />, clock: <Clock size={17} />, shield: <ShieldCheck size={17} />, check: <Check size={17} />,
-  message: <MessageSquare size={17} />, git: <GitBranch size={17} />, sparkles: <Sparkles size={17} />, layers: <Layers size={17} />,
+  monitor: <Monitor size={16} />, code: <Code2 size={16} />, film: <Film size={16} />, users: <Users size={16} />,
+  brain: <Brain size={16} />, plug: <Plug size={16} />, key: <KeyRound size={16} />, phone: <Phone size={16} />,
+  rocket: <Rocket size={16} />, clock: <Clock size={16} />, shield: <ShieldCheck size={16} />, check: <Check size={16} />,
+  message: <MessageSquare size={16} />, git: <GitBranch size={16} />, sparkles: <Sparkles size={16} />, layers: <Layers size={16} />,
+  map: <MapPin size={16} />, book: <BookOpen size={16} />, tag: <TagIcon size={16} />,
 };
 
-type NavItem = { id: string; group: string; title: string; kw: string };
-const NAV: NavItem[] = [
-  { id: "overview", group: "Start", title: "Overview", kw: "intro what is agenticvenus" },
-  { id: "quickstart", group: "Start", title: "Quick start", kw: "setup install begin first chat keys" },
-  { id: "agent", group: "The agent", title: "Meet your agent", kw: "chief persona role identity" },
-  { id: "routing", group: "The agent", title: "How it decides", kw: "intent understand route commands slash" },
-  { id: "different", group: "The agent", title: "What makes it different", kw: "unique advantage why" },
-  { id: "features", group: "Features", title: "All features", kw: "list capabilities" },
-  { id: "computer", group: "Features", title: "Computer agent", kw: "browser desktop e2b recipes screen" },
-  { id: "code", group: "Features", title: "Venus Code", kw: "coding github clone push deploy" },
-  { id: "video", group: "Features", title: "Venus Pro (video)", kw: "remotion storyboard reel" },
-  { id: "team", group: "Features", title: "Team & specialists", kw: "chief planner parallel roster" },
-  { id: "memory", group: "Features", title: "Memory & skills", kw: "learn remember skill trial" },
-  { id: "connectors", group: "Features", title: "Connectors & channels", kw: "mcp oauth telegram whatsapp slack gmail" },
-  { id: "voice", group: "Features", title: "Voice & missions", kw: "phone call twilio mission routine schedule" },
-  { id: "verification", group: "Trust", title: "Verification", kw: "leads verified contract evidence csv" },
-  { id: "security", group: "Trust", title: "Security model", kw: "vault vpassword injection shield approval" },
-  { id: "compare", group: "Compare", title: "Comparison & ratings", kw: "openclaw hermes grok openai rating score" },
-  { id: "best", group: "Compare", title: "Where it is best", kw: "strengths" },
-  { id: "help", group: "Compare", title: "How it helps you", kw: "use cases founders developers" },
-  { id: "architecture", group: "Reference", title: "Architecture", kw: "firebase vercel supabase e2b runner tick" },
-  { id: "env", group: "Reference", title: "Environment variables", kw: "config env vercel secrets" },
-  { id: "limits", group: "Reference", title: "Honest limitations", kw: "weakness known issues beta" },
-  { id: "faq", group: "Reference", title: "FAQ", kw: "questions answers" },
-];
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-// ---------- small building blocks ----------
-function Section({ id, eyebrow, title, children }: { id: string; eyebrow: string; title: string; children: ReactNode }) {
-  return (
-    <section id={id} className="scroll-mt-24 border-b border-line py-12 last:border-0">
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-gold">{eyebrow}</p>
-      <h2 className="mb-5 text-2xl font-semibold tracking-tight text-ink md:text-[1.7rem]">{title}</h2>
-      <div className="space-y-4 text-[15px] leading-relaxed text-muted">{children}</div>
-    </section>
-  );
+type Flat = { id: string; n: number; group: string; groupId: string; sec: Sec; hay: string };
+
+// ---------- flatten every section once, give it a stable number and a unique id ----------
+const FLAT: Flat[] = (() => {
+  const seen = new Set<string>();
+  let n = 0;
+  const out: Flat[] = [];
+  for (const g of GROUPS) {
+    for (const sec of g.items) {
+      n += 1;
+      let id = slug(sec.t) || `section-${n}`;
+      if (seen.has(id)) id = `${id}-${n}`;
+      seen.add(id);
+      const hay = [sec.t, sec.kw, sec.p, sec.note, sec.warn, sec.code, ...(sec.pts ?? []), ...(sec.steps ?? []), ...(sec.table ?? []).flat(), g.title]
+        .filter(Boolean).join(" ").toLowerCase();
+      out.push({ id, n, group: g.title, groupId: g.id, sec, hay });
+    }
+  }
+  return out;
+})();
+
+// ---------- inline markup: **bold** and `code` ----------
+function rich(text: string): ReactNode {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((p, i) => {
+    if (p.startsWith("**") && p.endsWith("**")) return <b key={i} className="font-medium text-ink">{p.slice(2, -2)}</b>;
+    if (p.startsWith("`") && p.endsWith("`")) return <code key={i} className="rounded bg-panel2 px-1.5 py-0.5 text-[12.5px] text-gold">{p.slice(1, -1)}</code>;
+    return <Fragment key={i}>{p}</Fragment>;
+  });
 }
-const H3 = ({ children }: { children: ReactNode }) => <h3 className="mt-6 text-base font-semibold text-ink">{children}</h3>;
-const B = ({ children }: { children: ReactNode }) => <b className="font-medium text-ink">{children}</b>;
-const Pill = ({ children }: { children: ReactNode }) => (
-  <code className="rounded bg-panel2 px-1.5 py-0.5 text-[12.5px] text-gold">{children}</code>
-);
 
-function Callout({ tone = "info", title, children }: { tone?: "info" | "warn"; title: string; children: ReactNode }) {
+const TAG_STYLE: Record<Tag, string> = {
+  Now: "border-avatar-teal/40 text-avatar-teal",
+  Beta: "border-gold/50 text-gold",
+  Soon: "border-line text-muted",
+  Planned: "border-line text-faint",
+};
+
+// ---------- building blocks ----------
+function Callout({ tone, children }: { tone: "info" | "warn"; children: ReactNode }) {
   return (
-    <div className={`rounded-xl border p-4 text-sm ${tone === "warn" ? "border-gold/40 bg-goldSoft/40" : "border-line bg-panel"}`}>
-      <p className="mb-1 font-medium text-ink">{title}</p>
-      <div className="leading-relaxed text-muted">{children}</div>
+    <div className={`rounded-xl border p-3.5 text-[13.5px] leading-relaxed ${tone === "warn" ? "border-gold/40 bg-goldSoft/40 text-ink" : "border-line bg-panel text-muted"}`}>
+      <span className="mr-1.5 font-semibold text-ink">{tone === "warn" ? "Important." : "Note."}</span>{children}
     </div>
   );
 }
 
-function Code({ children, label }: { children: string; label?: string }) {
+function CodeBlock({ children, label }: { children: string; label?: string }) {
   const [done, setDone] = useState(false);
   return (
     <div className="overflow-hidden rounded-xl border border-line bg-panel">
-      <div className="flex items-center justify-between border-b border-line px-3.5 py-2 text-[11px] text-faint">
-        <span>{label ?? "shell"}</span>
+      <div className="flex items-center justify-between border-b border-line px-3.5 py-1.5 text-[11px] text-faint">
+        <span>{label ?? "example"}</span>
         <button
           onClick={() => { navigator.clipboard?.writeText(children); setDone(true); setTimeout(() => setDone(false), 1200); }}
           className="flex items-center gap-1 hover:text-ink"
@@ -87,32 +88,22 @@ function Code({ children, label }: { children: string; label?: string }) {
   );
 }
 
-function Steps({ items }: { items: Array<[string, ReactNode]> }) {
+function Table({ rows }: { rows: string[][] }) {
+  const [head, ...body] = rows;
   return (
-    <ol className="space-y-3">
-      {items.map(([t, body], i) => (
-        <li key={t} className="flex gap-3.5">
-          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-goldSoft text-xs font-semibold text-gold">{i + 1}</span>
-          <div><p className="font-medium text-ink">{t}</p><div className="text-sm">{body}</div></div>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function CardGrid({ items }: { items: Array<{ title: string; body: string; icon?: IconKey; tag?: string }> }) {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {items.map((f) => (
-        <div key={f.title} className="rounded-xl border border-line bg-panel p-4 transition-colors hover:border-gold/50">
-          <div className="mb-2 flex items-center gap-2.5">
-            {f.icon && <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-panel2 text-gold">{ICONS[f.icon]}</span>}
-            <p className="text-sm font-medium text-ink">{f.title}</p>
-            {f.tag && <span className="ml-auto rounded-full border border-line px-2 py-0.5 text-[10px] text-faint">{f.tag}</span>}
-          </div>
-          <p className="text-[13px] leading-relaxed text-muted">{f.body}</p>
-        </div>
-      ))}
+    <div className="overflow-x-auto rounded-xl border border-line">
+      <table className="w-full min-w-[420px] text-left text-[13px]">
+        <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint">
+          <tr>{head.map((h) => <th key={h} className="px-4 py-2.5 font-medium">{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {body.map((r, i) => (
+            <tr key={i} className="border-t border-line align-top">
+              {r.map((c, j) => <td key={j} className={`px-4 py-2.5 ${j === 0 ? "font-medium text-ink" : ""}`}>{rich(c)}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -152,14 +143,11 @@ function Ratings() {
             ))}
             <tr className="border-t border-line bg-panel">
               <td className="px-4 py-3 font-medium text-ink">Total (out of {max})</td>
-              {totals.map((t, i) => (
-                <td key={i} className={`px-3 py-3 text-center text-base font-semibold ${i === 0 ? "text-gold" : "text-ink"}`}>{t}</td>
-              ))}
+              {totals.map((t, i) => <td key={i} className={`px-3 py-3 text-center text-base font-semibold ${i === 0 ? "text-gold" : "text-ink"}`}>{t}</td>)}
             </tr>
           </tbody>
         </table>
       </div>
-
       <div className="overflow-x-auto rounded-xl border border-line">
         <table className="w-full min-w-[720px] text-left text-[13px]">
           <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint">
@@ -187,360 +175,312 @@ function Ratings() {
   );
 }
 
+function Plans() {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      {PLANS.map((p) => (
+        <div key={p.id} className={`rounded-xl border bg-panel p-4 ${p.badge ? "border-gold/50" : "border-line"}`}>
+          <div className="flex items-baseline justify-between">
+            <p className="text-sm font-semibold text-ink">{p.name}</p>
+            <p className="text-sm text-gold">{p.price === 0 ? "Free" : `$${p.price}/mo`}</p>
+          </div>
+          <p className="mb-2 text-[12px] text-faint">{p.tagline}{p.badge ? ` · ${p.badge}` : ""}</p>
+          <ul className="space-y-1 text-[12.5px] text-muted">
+            {p.perks.map((x) => <li key={x} className="flex gap-2"><Check size={13} className="mt-0.5 shrink-0 text-avatar-teal" />{x}</li>)}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SectionView({ f, onCopy, copied }: { f: Flat; onCopy: (id: string) => void; copied: string }) {
+  const s = f.sec;
+  return (
+    <article id={f.id} className="group scroll-mt-24 border-b border-line py-8 last:border-0">
+      <div className="mb-3 flex flex-wrap items-center gap-2.5">
+        <span className="rounded-md bg-panel2 px-2 py-0.5 font-mono text-[11px] text-faint">§{String(f.n).padStart(3, "0")}</span>
+        <h3 className="text-xl font-semibold tracking-tight text-ink">{s.t}</h3>
+        {s.tag && <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${TAG_STYLE[s.tag]}`}>{s.tag}</span>}
+        <button
+          onClick={() => onCopy(f.id)} aria-label="Copy link to this section"
+          className="ml-auto flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-faint opacity-0 transition-opacity hover:text-ink focus:opacity-100 group-hover:opacity-100"
+        >
+          {copied === f.id ? <Check size={12} /> : <Link2 size={12} />} {copied === f.id ? "Link copied" : "Link"}
+        </button>
+      </div>
+      <div className="space-y-3.5 text-[15px] leading-relaxed text-muted">
+        {s.p && <p>{rich(s.p)}</p>}
+        {s.pts && (
+          <ul className="space-y-1.5">
+            {s.pts.map((x) => <li key={x} className="flex gap-2.5"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-gold" /><span>{rich(x)}</span></li>)}
+          </ul>
+        )}
+        {s.steps && (
+          <ol className="space-y-2.5">
+            {s.steps.map((x, i) => (
+              <li key={x} className="flex gap-3">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-goldSoft text-xs font-semibold text-gold">{i + 1}</span>
+                <span className="text-[14.5px]">{rich(x)}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        {s.table && <Table rows={s.table} />}
+        {s.code && <CodeBlock label={s.codeLabel}>{s.code}</CodeBlock>}
+        {s.widget === "ratings" && <Ratings />}
+        {s.widget === "plans" && <Plans />}
+        {s.note && <Callout tone="info">{rich(s.note)}</Callout>}
+        {s.warn && <Callout tone="warn">{rich(s.warn)}</Callout>}
+      </div>
+    </article>
+  );
+}
+
 // ---------- page ----------
 export default function DocsView() {
   const [q, setQ] = useState("");
-  const [active, setActive] = useState("overview");
+  const [active, setActive] = useState(FLAT[0]?.id ?? "");
   const [open, setOpen] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [top, setTop] = useState(false);
+  const [copied, setCopied] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const search = useRef<HTMLInputElement>(null);
 
-  const shown = useMemo(() => {
-    const n = q.trim().toLowerCase();
-    return n ? NAV.filter((x) => `${x.title} ${x.kw} ${x.group}`.toLowerCase().includes(n)) : NAV;
-  }, [q]);
-  const groups = useMemo(() => Array.from(new Set(shown.map((x) => x.group))), [shown]);
+  const needle = q.trim().toLowerCase();
+  const shown = useMemo(() => (needle ? FLAT.filter((x) => x.hay.includes(needle)) : FLAT), [needle]);
+  const shownGroups = useMemo(() => GROUPS.filter((g) => shown.some((x) => x.groupId === g.id)), [shown]);
+
+  const activeIdx = FLAT.findIndex((x) => x.id === active);
+  const prev = activeIdx > 0 ? FLAT[activeIdx - 1] : null;
+  const next = activeIdx >= 0 && activeIdx < FLAT.length - 1 ? FLAT[activeIdx + 1] : null;
 
   useEffect(() => {
-    const els = NAV.map((n) => document.getElementById(n.id)).filter(Boolean) as HTMLElement[];
+    const els = FLAT.map((x) => document.getElementById(x.id)).filter(Boolean) as HTMLElement[];
     const io = new IntersectionObserver(
-      (entries) => { const v = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]; if (v) setActive(v.target.id); },
-      { rootMargin: "-90px 0px -65% 0px" }
+      (entries) => {
+        const v = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (v) setActive(v.target.id);
+      },
+      { rootMargin: "-90px 0px -70% 0px" }
     );
     els.forEach((e) => io.observe(e));
     return () => io.disconnect();
   }, []);
 
   useEffect(() => {
-    const on = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); search.current?.focus(); } };
+    const onScroll = () => {
+      const h = document.documentElement;
+      const max = h.scrollHeight - h.clientHeight;
+      setProgress(max > 0 ? Math.min(100, (h.scrollTop / max) * 100) : 0);
+      setTop(h.scrollTop > 900);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); search.current?.focus(); }
+    };
     window.addEventListener("keydown", on);
     return () => window.removeEventListener("keydown", on);
   }, []);
 
-  function go(id: string) { setOpen(false); document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }); history.replaceState(null, "", "#" + id); }
+  useEffect(() => {
+    const hash = window.location.hash.slice(1);
+    if (hash) setTimeout(() => document.getElementById(hash)?.scrollIntoView(), 80);
+  }, []);
+
+  function go(id: string) {
+    setOpen(false);
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
+    history.replaceState(null, "", "#" + id);
+  }
+  function copyLink(id: string) {
+    const url = `${window.location.origin}${window.location.pathname}#${id}`;
+    navigator.clipboard?.writeText(url);
+    setCopied(id);
+    setTimeout(() => setCopied(""), 1400);
+    history.replaceState(null, "", "#" + id);
+  }
 
   const sidebar = (
-    <nav className="space-y-6 pb-10">
-      {groups.map((g) => (
-        <div key={g}>
-          <p className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">{g}</p>
-          {shown.filter((x) => x.group === g).map((x) => (
+    <nav className="space-y-2 pb-10">
+      {shownGroups.map((g) => {
+        const items = shown.filter((x) => x.groupId === g.id);
+        const isOpen = needle ? true : !collapsed[g.id];
+        const hasActive = items.some((x) => x.id === active);
+        return (
+          <div key={g.id}>
             <button
-              key={x.id} onClick={() => go(x.id)}
-              className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${active === x.id ? "bg-panel2 font-medium text-ink" : "text-muted hover:bg-panel hover:text-ink"}`}
+              onClick={() => setCollapsed((c) => ({ ...c, [g.id]: !c[g.id] }))}
+              className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[13px] font-medium transition-colors hover:bg-panel ${hasActive ? "text-ink" : "text-muted"}`}
             >
-              {x.title}{active === x.id && <ChevronRight size={13} className="text-gold" />}
+              <span className={hasActive ? "text-gold" : "text-faint"}>{ICONS[g.icon]}</span>
+              <span className="flex-1">{g.title}</span>
+              <span className="text-[10px] text-faint">{items.length}</span>
+              <ChevronDown size={13} className={`text-faint transition-transform ${isOpen ? "" : "-rotate-90"}`} />
             </button>
-          ))}
-        </div>
-      ))}
+            {isOpen && (
+              <div className="ml-4 border-l border-line pl-2">
+                {items.map((x) => (
+                  <button
+                    key={x.id} onClick={() => go(x.id)}
+                    className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1 text-left text-[12.5px] leading-snug transition-colors ${active === x.id ? "bg-panel2 font-medium text-ink" : "text-muted hover:text-ink"}`}
+                  >
+                    <span className="w-6 shrink-0 font-mono text-[10px] text-faint">{x.n}</span>
+                    <span className="flex-1">{x.sec.t}</span>
+                    {active === x.id && <ChevronRight size={12} className="text-gold" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
       {shown.length === 0 && <p className="px-3 text-sm text-faint">Nothing matches “{q}”.</p>}
     </nav>
   );
 
   return (
     <div className="min-h-screen bg-bg">
+      <div className="fixed left-0 top-0 z-50 h-0.5 bg-gold transition-[width] duration-150" style={{ width: `${progress}%` }} />
+
       <header className="sticky top-0 z-40 border-b border-line bg-bg/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 md:px-6">
-          <button className="rounded-lg p-1.5 text-muted hover:bg-panel md:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={18} /></button>
+        <div className="mx-auto flex h-14 max-w-[88rem] items-center gap-3 px-4 md:px-6">
+          <button className="rounded-lg p-1.5 text-muted hover:bg-panel lg:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={18} /></button>
           <Link href="/" className="flex items-center gap-2"><Logo size={18} /></Link>
-          <span className="hidden rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted sm:inline">Docs</span>
+          <span className="hidden rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted sm:inline">Docs · {TOTAL_SECTIONS} sections</span>
           <div className="ml-auto flex w-full max-w-xs items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5">
             <Search size={14} className="text-faint" />
             <input
               ref={search} value={q} onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && shown[0]) { go(shown[0].id); } }}
-              placeholder="Search docs…" className="w-full bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none"
+              onKeyDown={(e) => { if (e.key === "Enter" && shown[0]) go(shown[0].id); if (e.key === "Escape") setQ(""); }}
+              placeholder="Search all sections…" className="w-full bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none"
             />
-            <kbd className="hidden rounded border border-line px-1.5 text-[10px] text-faint sm:block">⌘K</kbd>
+            {q ? <button onClick={() => setQ("")} aria-label="Clear"><X size={13} className="text-faint" /></button>
+              : <kbd className="hidden rounded border border-line px-1.5 text-[10px] text-faint sm:block">⌘K</kbd>}
           </div>
           <Link href="/dashboard" className="hidden rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-bg hover:opacity-90 sm:block">Open app</Link>
         </div>
       </header>
 
       {open && (
-        <div className="fixed inset-0 z-50 md:hidden">
+        <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-black/70" onClick={() => setOpen(false)} />
-          <div className="absolute inset-y-0 left-0 w-72 overflow-y-auto border-r border-line bg-panel p-4">
-            <button className="mb-3 rounded-lg p-1.5 text-muted hover:bg-panel2" onClick={() => setOpen(false)}><X size={18} /></button>
+          <div className="absolute inset-y-0 left-0 w-80 max-w-[88vw] overflow-y-auto border-r border-line bg-panel p-4">
+            <button className="mb-3 rounded-lg p-1.5 text-muted hover:bg-panel2" onClick={() => setOpen(false)} aria-label="Close menu"><X size={18} /></button>
             {sidebar}
           </div>
         </div>
       )}
 
-      <div className="mx-auto flex max-w-7xl gap-10 px-4 md:px-6">
-        <aside className="sticky top-14 hidden h-[calc(100vh-3.5rem)] w-60 shrink-0 overflow-y-auto py-8 md:block">{sidebar}</aside>
+      <div className="mx-auto flex max-w-[88rem] gap-10 px-4 md:px-6">
+        <aside className="sticky top-14 hidden h-[calc(100vh-3.5rem)] w-72 shrink-0 overflow-y-auto py-8 lg:block">{sidebar}</aside>
 
         <main className="min-w-0 max-w-3xl flex-1 pb-24">
           {/* hero */}
           <div className="relative overflow-hidden border-b border-line py-14">
-            <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-gold/[0.07] blur-3xl" />
+            <div className="pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full bg-gold/[0.08] blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-32 left-10 h-64 w-64 rounded-full bg-avatar-teal/[0.06] blur-3xl" />
             <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel px-3 py-1 text-xs text-muted"><span className="h-1.5 w-1.5 rounded-full bg-gold" /> Documentation · Beta</span>
             <h1 className="mt-5 text-4xl font-semibold leading-[1.08] tracking-tight text-ink md:text-5xl">{PRODUCT.name}<br /><span className="text-gold">{PRODUCT.tagline}</span></h1>
             <p className="mt-5 max-w-xl text-base leading-relaxed text-muted">{PRODUCT.intro}</p>
             <div className="mt-7 flex flex-wrap gap-3">
-              <button onClick={() => go("quickstart")} className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90">Quick start <ArrowRight size={15} /></button>
-              <button onClick={() => go("compare")} className="rounded-full border border-line px-5 py-2.5 text-sm text-ink hover:bg-panel">See the comparison</button>
+              <button onClick={() => go("create-your-account")} className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90">Quick start <ArrowRight size={15} /></button>
+              <button onClick={() => go("the-mission-do-the-work")} className="rounded-full border border-line px-5 py-2.5 text-sm text-ink hover:bg-panel">What Agent Works means</button>
+            </div>
+            <div className="mt-9 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {[[String(TOTAL_SECTIONS), "sections"], [String(GROUPS.length), "chapters"], ["63", "specialists"], ["11", "model providers"]].map(([n, l]) => (
+                <div key={l} className="rounded-xl border border-line bg-panel p-3.5"><p className="text-2xl font-semibold text-gold">{n}</p><p className="text-xs text-muted">{l}</p></div>
+              ))}
             </div>
           </div>
 
-          <Section id="overview" eyebrow="Start" title="Overview">
-            <p>AgenticVenus is a web app where each <B>chat is an AI teammate</B>. A teammate has a name, a role you give it, its own memory and skills, its own connected tools, and — when the job needs it — its own cloud computer.</p>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {[["11", "model providers"], ["63", "specialist roles"], ["4", "work modes: computer · code · video · team"]].map(([n, l]) => (
-                <div key={l} className="rounded-xl border border-line bg-panel p-4"><p className="text-2xl font-semibold text-gold">{n}</p><p className="text-xs text-muted">{l}</p></div>
-              ))}
+          {/* chapter cards */}
+          {!needle && (
+            <div className="grid gap-3 border-b border-line py-10 sm:grid-cols-2">
+              {GROUPS.map((g) => {
+                const first = FLAT.find((x) => x.groupId === g.id);
+                return (
+                  <button
+                    key={g.id} onClick={() => first && go(first.id)}
+                    className="rounded-xl border border-line bg-panel p-4 text-left transition-colors hover:border-gold/50"
+                  >
+                    <div className="mb-1.5 flex items-center gap-2.5">
+                      <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-panel2 text-gold">{ICONS[g.icon]}</span>
+                      <p className="text-sm font-medium text-ink">{g.title}</p>
+                      <span className="ml-auto rounded-full border border-line px-2 py-0.5 text-[10px] text-faint">{g.items.length}</span>
+                    </div>
+                    <p className="text-[12.5px] leading-relaxed text-muted">{g.blurb}</p>
+                  </button>
+                );
+              })}
             </div>
-            <p>The stack is Next.js 14 on Vercel, Firebase (auth + Firestore), Supabase Storage for large files, and E2B desktop sandboxes for computers. Everything uses <B>your own accounts and keys</B>.</p>
-          </Section>
+          )}
 
-          <Section id="quickstart" eyebrow="Start" title="Quick start">
-            <Steps items={[
-              ["Create an account", <>Sign up with email or Google. Connect <B>one AI provider</B> key — Claude, OpenAI, Gemini, whichever you have.</>],
-              ["Start a chat", <>Press <Pill>+</Pill> and pick a teammate (Chief, Sales Outbound, Inbox Manager…) or create your own.</>],
-              ["Give it a role", <>Say <Pill>you are my head of sales</Pill>. The role is pinned in memory for this chat only.</>],
-              ["Add a computer (optional)", <>Paste an <B>E2B key</B> under API keys. Computer, Code, Video and Team modes unlock.</>],
-              ["Hand over a task", <>Plain language works. Examples below.</>],
-            ]} />
-            <Code label="examples">{`Find 25 verified HVAC companies in Austin and give me a CSV
-/code build a landing page for my dental clinic
-/video 30s reel on how AI agents change work, 9:16
-/team find leads, write outreach emails and a landing page
-/clone owner/repo     ...then...     push all changes`}</Code>
-          </Section>
+          {needle && (
+            <p className="border-b border-line py-4 text-sm text-muted">
+              {shown.length} {shown.length === 1 ? "section matches" : "sections match"} “{q}”. Press Enter to open the first.
+            </p>
+          )}
 
-          <Section id="agent" eyebrow="The agent" title="Meet your agent">
-            <p>Every chat is an agent with five layers:</p>
-            <CardGrid items={[
-              { title: "Identity", body: "Name, colour, role (\"you are my CEO\"), and an optional own email inbox for sign-ups and verification codes.", icon: "sparkles" },
-              { title: "Brain", body: "Per-chat memory (facts, preferences, lessons, owner profile) and skills (reusable procedures with a win/fail record).", icon: "brain" },
-              { title: "Hands", body: "Tools from connectors, MCP servers and APIs, plus the computer, Venus Code and Venus Pro.", icon: "plug" },
-              { title: "Guardrails", body: "Approvals for every write, prompt-injection shield, vault, vPassword and audit log.", icon: "shield" },
-              { title: "Reach", body: "Dashboard chat, Telegram, WhatsApp, SMS, Slack DM and phone calls — same brain everywhere.", icon: "message" },
-              { title: "Initiative", body: "At most one proactive 💡 message a day: a next step, a reminder or one question to know you better.", icon: "rocket" },
-            ]} />
-            <p>The default <B>Chief</B> is a chief of staff: it plans, picks specialists, tracks progress and reports back in one message.</p>
-          </Section>
+          {/* chapters */}
+          {GROUPS.map((g) => {
+            const items = FLAT.filter((x) => x.groupId === g.id && (!needle || x.hay.includes(needle)));
+            if (!items.length) return null;
+            return (
+              <section key={g.id} id={`chapter-${g.id}`} className="scroll-mt-24">
+                <div className="mt-12 flex items-center gap-3 border-b border-gold/30 pb-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-goldSoft text-gold">{ICONS[g.icon]}</span>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-gold">Chapter</p>
+                    <h2 className="text-2xl font-semibold tracking-tight text-ink">{g.title}</h2>
+                  </div>
+                </div>
+                <p className="mt-3 text-sm text-muted">{g.blurb}</p>
+                {items.map((f) => <SectionView key={f.id} f={f} onCopy={copyLink} copied={copied} />)}
+              </section>
+            );
+          })}
 
-          <Section id="routing" eyebrow="The agent" title="How it decides what to do">
-            <p>Before acting, the agent runs an <B>“understand first”</B> step with your chat’s own model. It chooses one intent and only starts heavy work when you really asked for it.</p>
-            <div className="overflow-x-auto rounded-xl border border-line">
-              <table className="w-full min-w-[520px] text-left text-[13px]">
-                <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint"><tr><th className="px-4 py-2.5">Intent</th><th className="px-4 py-2.5">When</th><th className="px-4 py-2.5">Runs on</th></tr></thead>
-                <tbody>
-                  {[
-                    ["chat", "Questions, writing, advice, and anything a connected tool can do in a call (email, Sheets, GitHub files)", "Model + tools"],
-                    ["pc", "Live websites, lists of leads, scraping, forms, downloads, terminal work", "Visible computer"],
-                    ["code", "Software must be written or changed", "Venus Code (own computer)"],
-                    ["video", "Motion-graphics video or reel", "Venus Pro (own computer)"],
-                    ["team", "One goal that needs 2+ areas", "Chief + specialists"],
-                    ["set_role / assemble / remember / forget", "Setup and memory commands — nothing is started", "Memory only"],
-                  ].map(([a, b, c]) => <tr key={a} className="border-t border-line"><td className="px-4 py-2.5 text-gold">{a}</td><td className="px-4 py-2.5 text-ink">{b}</td><td className="px-4 py-2.5">{c}</td></tr>)}
-                </tbody>
-              </table>
+          {/* prev / next */}
+          {!needle && (prev || next) && (
+            <div className="mt-8 grid gap-3 sm:grid-cols-2">
+              {prev ? (
+                <button onClick={() => go(prev.id)} className="rounded-xl border border-line bg-panel p-4 text-left hover:border-gold/50">
+                  <p className="mb-1 flex items-center gap-1 text-[11px] text-faint"><ArrowLeft size={12} /> Previous · §{prev.n}</p>
+                  <p className="text-sm font-medium text-ink">{prev.sec.t}</p>
+                </button>
+              ) : <span />}
+              {next && (
+                <button onClick={() => go(next.id)} className="rounded-xl border border-line bg-panel p-4 text-right hover:border-gold/50">
+                  <p className="mb-1 flex items-center justify-end gap-1 text-[11px] text-faint">Next · §{next.n} <ArrowRight size={12} /></p>
+                  <p className="text-sm font-medium text-ink">{next.sec.t}</p>
+                </button>
+              )}
             </div>
-            <Callout title="Deterministic safety nets">A work order like “find 100 leads” can never be answered as plain chat (that is how fake lists appear) — it is forced to the computer. And “send these 5 emails” can never open the computer — it uses the Gmail tool.</Callout>
-            <p>Slash commands skip the guessing: <Pill>/code</Pill> <Pill>/video</Pill> <Pill>/team</Pill> <Pill>/deploy</Pill> <Pill>/recipe</Pill> <Pill>/clone</Pill> <Pill>/push</Pill> <Pill>/remember</Pill> <Pill>/forget</Pill></p>
-          </Section>
+          )}
 
-          <Section id="different" eyebrow="The agent" title="What makes it different">
-            <ul className="space-y-3">
-              {[
-                ["Results are checked by code", "Lists are verified (site live, company on page, mail-capable domain) and the final CSV is generated by the runner, so the model cannot inflate it."],
-                ["Secrets the model never sees", "vPassword types logins, 2FA codes and approved card details straight into the page. The model only sees names."],
-                ["Each job has its own computer", "Chat, Venus Code and Venus Pro use separate sandboxes, so a video render never blocks a coding job. Idle computers are paused automatically."],
-                ["Honest reporting", "Failed or skipped team steps are never reported as done. A verifier gives pass / partial / fail, and fails closed."],
-                ["Self-improvement with brakes", "New skills start on trial, prove themselves in 2 wins, get paused after repeated failures, and keep the previous version for rollback."],
-                ["Model-agnostic", "11 providers, fallback chain on rate limits, and a router that uses strong models to plan and fast ones to report."],
-              ].map(([t, b]) => (
-                <li key={t} className="flex gap-3"><Check size={17} className="mt-1 shrink-0 text-avatar-teal" /><span><B>{t}.</B> {b}</span></li>
-              ))}
-            </ul>
-          </Section>
-
-          <Section id="features" eyebrow="Features" title="Everything in the box">
-            <CardGrid items={FEATURES} />
-          </Section>
-
-          <Section id="computer" eyebrow="Features" title="Computer agent">
-            <p>A private Linux desktop per chat. The agent works on the <B>visible screen</B>: a real Chrome window (driven over CDP, so it still sees numbered elements), a real terminal, real mouse and keyboard.</p>
-            <ul className="list-disc space-y-1.5 pl-5">
-              <li>Toolbelt: Chrome, VS Code, LibreOffice, GIMP, Inkscape, ffmpeg, pandoc, tesseract, Python data stack.</li>
-              <li>Browser ops: click, type, select, check, upload, tabs, downloads; cookie banners are dismissed automatically.</li>
-              <li><B>Take control:</B> switch the panel from watch-only to your own mouse and keyboard at any time.</li>
-              <li><B>Proof of work:</B> the screen is recorded and a 6-hour replay link is posted with the result.</li>
-              <li><B>Recipes:</B> finished tasks are saved as label-based steps and replayed with <B>no AI model</B>. If a site changes, only the broken step is re-learned.</li>
-              <li><B>Auto-off:</B> when the work ends, the computer is paused to save credits; files and logins are kept.</li>
-            </ul>
-          </Section>
-
-          <Section id="code" eyebrow="Features" title="Venus Code">
-            <p>A coding agent that runs <B>inside the computer</B> as a background worker, so it keeps going if you close the tab.</p>
-            <CardGrid items={[
-              { title: "Quality gates", body: "Plan first for big tasks, read-before-edit, diagnostics after every edit, project tests/build on finish." },
-              { title: "Independent review", body: "A second pass reviews the git diff for bugs, missing requirements, placeholders and secrets before it can finish." },
-              { title: "Parallel writers", body: "Up to 3 writer sub-agents in separate git worktrees on disjoint files, merged back; read-only explorers in parallel." },
-              { title: "Safe by default", body: "Destructive commands blocked, .env/keys unreadable, permission modes: plan · strict · auto, project hooks in .venus/hooks.json." },
-              { title: "Long projects", body: "Milestone-based fresh context with saved state, stuck detection and a compute budget." },
-              { title: "Ship it", body: "Instant HTML preview, live dev server on port 3000, /deploy to Vercel, GitHub clone/push to a new branch with a PR link." },
-            ]} />
-          </Section>
-
-          <Section id="video" eyebrow="Features" title="Venus Pro (video)">
-            <p>A timeline editor with a live animatic, plus a Remotion render pipeline on its own studio computer.</p>
-            <Steps items={[
-              ["Storyboard", "The model chooses scene count dynamically from duration, story complexity, and pace; it also creates a topic-specific palette, typography, camera moves, transitions, and sound cues."],
-              ["Design", "Every scene is custom code-rendered motion graphics. Scene code is syntax-checked, repaired when possible, and paired with optional generated sound effects synchronized to scene beats."],
-              ["Assets, voice, music", "Stock photos/footage (Pexels), OpenAI voice-over per scene, generated ambient music bed."],
-              ["Review & render", "A contact sheet of frames is reviewed by the model, fixes are applied, then 720p or 1080p is rendered and uploaded."],
-            ]} />
-            <p>Edit afterwards: razor-split, trim, reorder, change palette/fonts, or ask the in-editor agent (“make this punchier”).</p>
-          </Section>
-
-          <Section id="team" eyebrow="Features" title="Team & specialists">
-            <p>Say “assemble a team” to pick a roster (nothing starts), or give a goal and Chief builds the <B>smallest</B> team, then plans up to 7 steps with dependencies. Independent steps run in parallel; steps that share one computer run one after another.</p>
-            <div className="flex flex-wrap gap-2">
-              {["Leadership", "Research", "Sales", "Marketing", "Content", "Engineering", "Design & Video", "Data", "Operations", "Finance & People"].map((c) => (
-                <span key={c} className="rounded-full border border-line bg-panel px-3 py-1 text-xs text-ink">{c}</span>
-              ))}
-            </div>
-            <p>Each member maps to a tool: computer, Venus Code, Venus Pro, web research, writing, or email drafts. You can open any member’s thread and talk to them directly, and watch the team feed live.</p>
-          </Section>
-
-          <Section id="memory" eyebrow="Features" title="Memory & skills">
-            <p>Everything is <B>scoped to one chat</B>. The agent learns quietly: owner profile facts, preferences and lessons — never passwords, keys or card data.</p>
-            <CardGrid items={[
-              { title: "Skills you install", body: "Paste a SKILL.md link, a GitHub repo, an `npx skills add` command or text. Suspicious instruction-like skills are installed paused." },
-              { title: "Skills it creates", body: "After a multi-step success it writes a trial skill, which is promoted after 2 wins." },
-              { title: "Skills it repairs", body: "On failure it explains the cause, rewrites the skill as a new version and keeps the previous one for rollback." },
-              { title: "Recall", body: "Searches earlier chat messages, missions and call summaries with BM25 ranking." },
-            ]} />
-          </Section>
-
-          <Section id="connectors" eyebrow="Features" title="Connectors & channels">
-            <p>Connect once per chat. The agent’s tool list is rebuilt on every message, and an “Agent updated” note explains what it can now do.</p>
-            <ul className="list-disc space-y-1.5 pl-5">
-              <li><B>OAuth:</B> Google (Gmail, Sheets, Drive, Calendar), Microsoft 365, Slack, GitHub, Notion, Linear, HubSpot, Asana, Zoom, Figma, Webflow, Dropbox.</li>
-              <li><B>MCP:</B> search a service name (popular list + official registry) or paste a remote MCP URL; servers that need login use automatic OAuth sign-in.</li>
-              <li><B>REST API:</B> base URL + key; GET is free, writes ask for approval.</li>
-              <li><B>Chat apps:</B> Telegram, WhatsApp and SMS (Twilio), Slack DM, email (Resend). Only your own ID or number is answered.</li>
-              <li><B>Batch tools:</B> <Pill>gmail.send_many</Pill>, <Pill>github.put_files</Pill> etc. send many items in one approved call and report each success/failure.</li>
-            </ul>
-          </Section>
-
-          <Section id="voice" eyebrow="Features" title="Voice, missions & routines">
-            <H3>Phone calls</H3>
-            <p>Paste a Twilio key once; number, webhooks and permissions are set up automatically. On a call the agent says it is an AI first, may use read-only tools, and adds <Pill>[[TODO]]</Pill> items for anything that changes data. Voices: free built-in, OpenAI, Gemini, ElevenLabs or Deepgram.</p>
-            <H3>Missions</H3>
-            <p>Long jobs run server-side in 40-second slices with notes as memory: find leads → verify → call one by one → update a sheet → report on every connected channel. Limits you set: number of calls, whether writes need approval, step cap.</p>
-            <H3>Routines</H3>
-            <p>Repeat a task every hour, day or week through a scheduler you control (GitHub Actions ping every 5 minutes). Failures are posted in chat.</p>
-          </Section>
-
-          <Section id="verification" eyebrow="Trust" title="Verification engine">
-            <p>When a request looks like “N items”, it becomes a <B>contract</B> that the runner enforces.</p>
-            <Steps items={[
-              ["Collect candidates", "About 1.6× the quota from real pages, each with its source URL."],
-              ["Verify with code", <><Pill>verify.leads</Pill> checks: website live and not parked, company/person found on the page, email syntax + MX/A record, duplicates.</>],
-              ["Gate the finish", "The agent cannot finish below quota (up to 8 gate rounds). Rejected items cannot be edited to pass."],
-              ["Deliver from code", "A CSV of verified rows and a CSV of rejects are built by the runner. The summary starts with VERIFIED: X of N requested."],
-            ]} />
-            <Callout tone="warn" title="What it cannot prove">A mailbox cannot be proven to exist without sending mail. The report says so explicitly.</Callout>
-          </Section>
-
-          <Section id="security" eyebrow="Trust" title="Security model">
-            <CardGrid items={[
-              { title: "Vault", body: "AES-256-GCM, ciphertext bound to user + slot. The browser only holds vault:… placeholders. Key rotation via VAULT_KEY_OLD." },
-              { title: "vPassword", body: "Host-matched logins, TOTP 2FA, saved sessions and cards with limits. Secrets can never be read back through the app." },
-              { title: "Job tokens", body: "Sandboxes get a short-lived signed token, never your connector tokens. Tokens are kept in memory only." },
-              { title: "Injection shield", body: "Outside content is wrapped as <untrusted>, scanned for hijack patterns, and taints the run so writes need a human." },
-              { title: "Network safety", body: "SSRF-safe fetch re-checks every redirect hop; private IPs and local hostnames are blocked, including in the headless browser." },
-              { title: "Audit trail", body: "Tool writes, vault changes, voice calls and missions are logged server-side." },
-            ]} />
-          </Section>
-
-          <Section id="compare" eyebrow="Compare" title="Comparison & ratings">
-            <p>How AgenticVenus compares with <B>OpenClaw</B>, <B>Hermes Agent</B>, <B>Grok-based bots</B> and <B>OpenAI agents</B>. Scores are 0–10, indicative and subjective.</p>
-            <Callout tone="warn" title="Read this first">
-              AgenticVenus scores come from this repository. Competitor scores come from general public knowledge and move fast — check each project’s own docs before deciding. The comparison is by category, so a lower score is not a flaw in a product built for a different job.
-            </Callout>
-            <Ratings />
-            <H3>Reading the numbers</H3>
-            <ul className="list-disc space-y-1.5 pl-5">
-              <li><B>OpenClaw</B> and <B>Hermes</B> are strongest in self-hosting, community and chat reach, and Hermes in self-learning. They win on maturity.</li>
-              <li><B>Grok bots</B> and <B>OpenAI agents</B> win on easy setup and polish, but you cannot bring your own models or self-host.</li>
-              <li><B>AgenticVenus</B> leads on verified output, a visible computer per job, team orchestration and the number of built-in studios — and loses on maturity and setup effort.</li>
-            </ul>
-          </Section>
-
-          <Section id="best" eyebrow="Compare" title="Where AgenticVenus is best">
-            <CardGrid items={BEST_AT} />
-          </Section>
-
-          <Section id="help" eyebrow="Compare" title="How it helps you">
-            <CardGrid items={HELPS.map((h) => ({ title: h.who, body: h.body }))} />
-            <p>A typical day: you describe the goal in chat (or Telegram) → the agent plans → it works on its own computer → you get one report with evidence, a replay link and any “needs you” items.</p>
-          </Section>
-
-          <Section id="architecture" eyebrow="Reference" title="Architecture">
-            <Code label="diagram">{`Browser (Next.js app)
-  ├─ Firebase Auth + Firestore (chats, memory, projects, jobs)
-  ├─ /api/*  (Vercel, Node runtime, 60 s limit)
-  │     vault · tools · chat · runner · voice · channels · missions
-  ├─ Supabase Storage (videos, proofs, backups)
-  └─ E2B sandboxes (one per chat per slot: pc / code / studio)
-        └─ detached runner (pc-runner / runner) ── job token ──> /api/*
-
-GitHub Actions every 5 min → /api/routines/run
-                           → /api/runner/tick   (finish unattended jobs, pause idle computers)
-                           → /api/missions/tick (keep missions moving)
-                           → /api/proactive/tick`}</Code>
-            <p>Why this shape: serverless functions are short, so anything long runs inside the sandbox or in 40-second mission slices, and the scheduler is the safety net.</p>
-          </Section>
-
-          <Section id="env" eyebrow="Reference" title="Environment variables">
-            <div className="overflow-x-auto rounded-xl border border-line">
-              <table className="w-full min-w-[560px] text-left text-[13px]">
-                <thead className="bg-panel text-[11px] uppercase tracking-wider text-faint"><tr><th className="px-4 py-2.5">Name</th><th className="px-4 py-2.5">Need</th><th className="px-4 py-2.5">Purpose</th></tr></thead>
-                <tbody>
-                  {ENV_VARS.map((e) => (
-                    <tr key={e.name} className="border-t border-line">
-                      <td className="px-4 py-2.5 font-mono text-[12px] text-ink">{e.name}</td>
-                      <td className={`px-4 py-2.5 ${e.need === "required" ? "text-gold" : "text-faint"}`}>{e.need}</td>
-                      <td className="px-4 py-2.5">{e.note}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p>GitHub Actions needs two repository secrets: <Pill>APP_URL</Pill> and <Pill>ROUTINE_RUNNER_SECRET</Pill>. Firestore will print a link to create any missing collection-group index the first time a tick runs.</p>
-          </Section>
-
-          <Section id="limits" eyebrow="Reference" title="Honest limitations">
-            <ul className="space-y-2.5">
-              {LIMITS.map((l) => <li key={l} className="flex gap-3"><Minus size={16} className="mt-1 shrink-0 text-gold" /><span>{l}</span></li>)}
-            </ul>
-          </Section>
-
-          <Section id="faq" eyebrow="Reference" title="FAQ">
-            <div className="space-y-2">
-              {FAQ.map((f) => (
-                <details key={f.q} className="group rounded-xl border border-line bg-panel px-4 py-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-medium text-ink">
-                    {f.q}<ChevronRight size={15} className="text-faint transition-transform group-open:rotate-90" />
-                  </summary>
-                  <p className="mt-2 text-sm leading-relaxed text-muted">{f.a}</p>
-                </details>
-              ))}
-            </div>
-          </Section>
-
-          <div className="mt-6 rounded-2xl border border-line bg-panel p-6 text-center">
+          <div className="mt-10 rounded-2xl border border-line bg-panel p-6 text-center">
             <p className="text-lg font-semibold text-ink">Ready to hand something off?</p>
-            <p className="mt-1 text-sm text-muted">Start with one teammate and one real task.</p>
+            <p className="mt-1 text-sm text-muted">Start with one teammate and one real task. Let it do the work.</p>
             <Link href="/dashboard" className="mt-4 inline-flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-bg hover:opacity-90">Open the app <ArrowRight size={15} /></Link>
           </div>
         </main>
       </div>
+
+      {top && (
+        <button
+          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Back to top"
+          className="fixed bottom-5 right-5 z-40 rounded-full border border-line bg-panel p-3 text-ink shadow-lg hover:border-gold/50"
+        >
+          <ArrowUp size={16} />
+        </button>
+      )}
     </div>
   );
 }
