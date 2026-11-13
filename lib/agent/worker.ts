@@ -28,6 +28,7 @@ import { SUMMARY_PROMPT, DEFAULT_COMPACT } from "./compaction.ts";
 import { contextWindow } from "./budget.ts";
 import { costCap } from "./slice.ts";
 import { planGate } from "./plan-gate.ts";
+import { AUTO_NOTE } from "./autopilot.ts";
 import { preflight, runSliceCore } from "./slice.ts";
 import { sweepMemories, touchMemories } from "./memory-sweep.ts";
 import type { AgentEvent, ModelTurn, ToolDef } from "./types.ts";
@@ -53,7 +54,7 @@ export function kick(uid: string, runId: string, chatId: string, origin: string)
   runAfter(fetch(`${origin}/api/agent/step`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ runId }) }));
 }
 
-export type StartInput = { chatId: string; task: string; provider: ProviderId; model: string; keyRef: string; fallbacks?: KeyRef[]; tempKey?: string; maxRounds?: number; origin: string; routineId?: string };
+export type StartInput = { chatId: string; task: string; provider: ProviderId; model: string; keyRef: string; fallbacks?: KeyRef[]; tempKey?: string; maxRounds?: number; origin: string; routineId?: string; autoApprove?: boolean };
 
 /** The last chat messages as context, then the new request. */
 async function taskWithHistory(uid: string, chatId: string, task: string): Promise<string> {
@@ -73,7 +74,7 @@ export async function startRun(uid: string, a: StartInput): Promise<string> {
     id, chatId: a.chatId, task: a.task.slice(0, 4000), provider: a.provider, model: a.model, keyRef: a.keyRef, fallbacks: (a.fallbacks ?? []).slice(0, 3),
     ...(a.tempKey ? { tempKey: a.tempKey } : {}), status: "queued", round: 0, createdAt: now, updatedAt: now, lease: null, pending: null, reply: null,
     usage: { inTok: 0, outTok: 0, cacheRead: 0, cacheWrite: 0 }, costMicros: 0, calls: 0, compactions: 0, tainted: false, stateVer: 0, stateChunks: 0,
-    maxRounds: a.maxRounds ?? DEFAULT_LOOP.maxRounds, slices: 0, origin: a.origin, ...(a.routineId ? { routineId: a.routineId } : {}),
+    maxRounds: a.maxRounds ?? DEFAULT_LOOP.maxRounds, slices: 0, origin: a.origin, ...(a.routineId ? { routineId: a.routineId } : {}), ...(a.autoApprove ? { autoApprove: true } : {}),
   };
   await S.createRun(uid, doc);
   await S.saveState(uid, id, newState(task));
@@ -137,7 +138,7 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
 
     // system prompt: stable (persona, rules, memory: cached) and volatile (clock, broken connectors)
     const brain = await brainContext(uid, run.chatId, run.task).catch(() => ({ role: "", mem: "" }));
-    const stable = [SYSTEM_RULES, cs?.agentName ? `Your name: ${cs.agentName}.` : "", brain.role ? `YOUR ROLE: ${brain.role}` : "", brain.mem].filter(Boolean).join("\n\n");
+    const stable = [SYSTEM_RULES, run.autoApprove ? AUTO_NOTE : "", cs?.agentName ? `Your name: ${cs.agentName}.` : "", brain.role ? `YOUR ROLE: ${brain.role}` : "", brain.mem].filter(Boolean).join("\n\n");
     const volatile = [`Now: ${new Date().toISOString()} (UTC).`, broken.length ? `Saved logins that cannot be read right now: ${broken.join(", ")}. Tell the owner to reconnect them if you need them.` : "", cat.errors.length ? `Tool catalog notes: ${cat.errors.slice(0, 5).join(" | ")}` : ""].filter(Boolean).join("\n");
 
     // recall counts as use: memories that match this task stay alive (see decay.ts)
@@ -218,7 +219,7 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
 
     const window = contextWindow(run.model);
     const opts = {
-      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: costCap(run),
+      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: costCap(run), autoApprove: Boolean(run.autoApprove),
       compact: { ...DEFAULT_COMPACT, windowTokens: window }, fromNative: names.fromNative,
     };
 
