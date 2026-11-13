@@ -28,12 +28,12 @@ export function platform({ script = [], tools = {}, sliceMs = 40_000, capBase, m
   const P = { S, data, clock: 1_700_000_000_000, chat: [], notes: [], kicks: 0, vault: new Map(), toolLog: [], calls: [], queue: [...script], events: [], runId: "r1", hangOn: null, extraTime: 0 };
   P.at = (ms) => { P.clock += ms; };
 
-  P.start = async (task = "do the job") => {
+  P.start = async (task = "do the job", extra = {}) => {
     const now = P.clock;
     await S.createRun(UID, {
       id: P.runId, chatId: "c1", task, provider: "anthropic", model: "claude-sonnet-4-5", keyRef: "vault:k", fallbacks: [], status: "queued", round: 0, createdAt: now, updatedAt: now,
       lease: null, pending: null, reply: null, usage: { inTok: 0, outTok: 0, cacheRead: 0, cacheWrite: 0 }, costMicros: 0, calls: 0, compactions: 0, tainted: false,
-      stateVer: 0, stateChunks: 0, maxRounds, slices: 0, origin: "https://x",
+      stateVer: 0, stateChunks: 0, maxRounds, slices: 0, origin: "https://x", ...extra,
     });
     await S.saveState(UID, P.runId, newState(task));
     await S.setQueue(UID, P.runId, "run", now + 100_000);
@@ -79,7 +79,7 @@ export function platform({ script = [], tools = {}, sliceMs = 40_000, capBase, m
             return t ? t(input, flags) : { ok: true, text: `ok:${name}` };
           },
         };
-        const opts = { ...DEFAULT_LOOP, tools: TOOLS, system: { stable: "S", volatile: "V" }, maxRounds: run.maxRounds, deadline: startedAt + sliceMs, maxCostMicros: costCap(run, capBase), compact: { ...DEFAULT_COMPACT, windowTokens } };
+        const opts = { ...DEFAULT_LOOP, tools: TOOLS, system: { stable: "S", volatile: "V" }, maxRounds: run.maxRounds, deadline: startedAt + sliceMs, maxCostMicros: costCap(run, capBase), autoApprove: Boolean(run.autoApprove), compact: { ...DEFAULT_COMPACT, windowTokens } };
         return await runSliceCore({
           S, run, uid: UID, runId: P.runId, startedAt, state, deps, opts, emit, finish, cleanup,
           io: { postToChat: async (t, at) => { P.chat.push({ t, at }); }, notify: (t) => P.notes.push(t), kick: () => { P.kicks++; }, afterDone: () => {}, link: "https://x/dashboard" },
