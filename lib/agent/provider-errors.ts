@@ -2,7 +2,7 @@
 // retry, switch provider, shrink the context, stop for the day, or tell the owner exactly what is wrong.
 
 export type ErrorCode =
-  | "context_exceeded" | "usage_limit" | "unauthorized" | "model_not_found" | "rate_limited"
+  | "context_exceeded" | "no_credit" | "usage_limit" | "unauthorized" | "model_not_found" | "rate_limited"
   | "overloaded" | "timeout" | "network" | "refused" | "bad_request" | "aborted" | "unknown";
 
 export type Classified = {
@@ -31,7 +31,10 @@ export class ProviderError extends Error {
 const RULES: Array<[ErrorCode, RegExp]> = [
   ["aborted", /\b(aborted|abort(ed)?error|cancell?ed by user)\b/i],
   ["context_exceeded", /(context[_ ]length|context window|maximum context|prompt is too long|input is too long|too many tokens|exceeds? the (model'?s )?(maximum|context)|request too large|reduce the length)/i],
-  ["usage_limit", /(insufficient[_ ]quota|credit balance|out of credits?|billing|quota exceeded|exceeded your current quota|usage limit|payment required|\b402\b|spend limit|monthly limit)/i],
+  // the account has no money left: waiting does not help, only the owner (or another provider) can
+  ["no_credit", /(insufficient[_ ](quota|balance|funds)|credit balance|out of credits?|no credits?|balance is (too )?low|payment required|\b402\b)/i],
+  // a limit that resets by itself
+  ["usage_limit", /(billing|quota exceeded|exceeded your current quota|usage limit|spend limit|monthly limit)/i],
   ["unauthorized", /(\b401\b|\b403\b|invalid[_ ]api[_ ]key|invalid x-api-key|incorrect api key|authentication|unauthori[sz]ed|permission[_ ]denied|api key not valid|forbidden)/i],
   ["model_not_found", /(\b404\b|model[^.]{0,40}(not found|does not exist|not available|deprecated)|not_found_error|unknown model|no such model)/i],
   ["rate_limited", /(\b429\b|rate[_ -]?limit|too many requests|requests per (minute|second)|tokens per minute|resource[_ ]exhausted)/i],
@@ -44,6 +47,7 @@ const RULES: Array<[ErrorCode, RegExp]> = [
 
 const TABLE: Record<ErrorCode, Omit<Classified, "code" | "message" | "retryAfterMs">> = {
   context_exceeded: { retryable: false, switchProvider: false, permanent: false },
+  no_credit: { retryable: false, switchProvider: true, permanent: true },
   usage_limit: { retryable: false, switchProvider: true, permanent: true },
   unauthorized: { retryable: false, switchProvider: true, permanent: true },
   model_not_found: { retryable: false, switchProvider: true, permanent: true },
@@ -79,7 +83,8 @@ export function classifyError(err: unknown, status?: number): Classified {
 /** What the owner reads. Short, says what to do. */
 export function userMessage(c: Classified): string {
   switch (c.code) {
-    case "usage_limit": return "The AI provider says the account is out of credit or quota. Add credit at the provider, or pick another provider in Settings.";
+    case "no_credit": return "Your AI provider account has no credit left. Add credit at the provider (or pick another provider in Settings), then send the task again.";
+    case "usage_limit": return "The AI provider's usage limit is reached. This task continues by itself when the limit resets.";
     case "unauthorized": return "The AI provider rejected the API key. Open Settings and save a valid key for this provider.";
     case "model_not_found": return "This model is not available on your provider account. Pick another model for this chat.";
     case "context_exceeded": return "The conversation is too long for this model even after trimming. Start a new chat or use a model with a bigger context.";
