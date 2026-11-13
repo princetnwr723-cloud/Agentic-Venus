@@ -9,8 +9,8 @@ export type RunView = {
   round: number; createdAt: number; updatedAt: number; endedAt: number | null;
   pending: null | { id: string; kind: "approve_tool" | "ask_user" | "request_approval" | "request_secret" | "request_takeover"; name: string; summary: string; question?: string; options?: string[]; secretName?: string; args?: Record<string, unknown>; tainted?: boolean; expiresAt: number };
   takeover: null | { status: string; startedAt?: number; lastBeat?: number };
-  usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-  costMicros: number; calls: number; compactions: number; tainted: boolean; result: string | null; error: { code: string; message: string } | null; model: string; provider: string;
+  usage: { inTok: number; outTok: number; cacheRead?: number; cacheWrite?: number };
+  costMicros: number; calls: number; compactions: number; tainted: boolean; result: string | null; error: { code: string; message: string } | null; model: string; provider: string; autoApprove?: boolean; resumeAt?: number | null;
 };
 export type RunEvent = { id: string; t: number; kind: string; text: string };
 
@@ -47,7 +47,7 @@ export function watchChatRuns(uid: string, chatId: string, on: (r: RunView[]) =>
 
 export const isActiveRun = (r: Pick<RunView, "status">) => r.status === "queued" || r.status === "running" || r.status === "paused" || r.status === "budget";
 
-export type StartInput = { chatId: string; task: string; provider: string; model: string; apiKey: string; fallbacks?: Array<{ provider: string; model: string; apiKey: string }>; maxRounds?: number };
+export type StartInput = { chatId: string; task: string; provider: string; model: string; apiKey: string; fallbacks?: Array<{ provider: string; model: string; apiKey: string }>; maxRounds?: number; autoApprove?: boolean };
 /** Starts a run on the server. `apiKey` is the vault placeholder the app already keeps (never a plain key when one is saved). */
 export async function startServerRun(uid: string, i: StartInput): Promise<string> {
   const d = await agentApi<{ runId: string }>(uid, { action: "start", ...i });
