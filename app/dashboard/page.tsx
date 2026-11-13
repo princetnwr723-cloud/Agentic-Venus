@@ -59,7 +59,7 @@ import TeamPanel from "@/components/dashboard/TeamPanel";
 import ConnectorsModal from "@/components/dashboard/ConnectorsModal";
 import PcPanel, { type AgentRequest, type RequestReply } from "@/components/dashboard/PcPanel";
 import AgentDock from "@/components/agent/AgentDock";
-import { startServerRun, type RunView } from "@/lib/agent/client";
+import { agentApi, startServerRun, type RunView } from "@/lib/agent/client";
 
 const toRequest = (p: PcPending): AgentRequest =>
   p.kind === "login" ? { kind: "login", site: p.site ?? "" }
@@ -644,6 +644,17 @@ export default function DashboardPage() {
     try { return typeof window === "undefined" || window.localStorage.getItem("venus.serverAgent") !== "off"; } catch { return true; }
   }
 
+  // Automatic (default) or Manual. Automatic: the agent does ordinary work without asking (it still asks for money, deletions and untrusted content).
+  const [autoMode, setAutoMode] = useState(true);
+  useEffect(() => { try { if (window.localStorage.getItem("venus.autoMode") === "off") setAutoMode(false); } catch { /* ignore */ } }, []);
+  function toggleAuto() {
+    const next = !autoMode;
+    setAutoMode(next);
+    try { window.localStorage.setItem("venus.autoMode", next ? "on" : "off"); } catch { /* ignore */ }
+    // tasks that are already running in this chat switch too (a waiting ordinary approval is answered right away)
+    if (user && activeChat) void agentApi(user.uid, { action: "set_mode", chatId: activeChat.id, autoApprove: next }).catch(() => {});
+  }
+
   /** Starts a server run for this request. true = the server has it (or told the owner why not); false = start the old browser loop. */
   async function handOverToServer(chat: Chat, task: string, base: ChatMessage[]): Promise<boolean> {
     if (!user) return false;
@@ -655,7 +666,7 @@ export default function DashboardPage() {
         .slice(0, 2)
         .map((p) => ({ provider: p, model: PROVIDERS.find((x) => x.id === p)?.models[0] ?? "", apiKey: String(apiKeys[p]) }))
         .filter((f) => f.model);
-      await startServerRun(user.uid, { chatId: chat.id, task, provider: chat.provider, model: chat.model, apiKey: key, fallbacks });
+      await startServerRun(user.uid, { chatId: chat.id, task, provider: chat.provider, model: chat.model, apiKey: key, fallbacks, autoApprove: autoMode });
       patchChat(chat.id, { messages: base }); // the streamed first draft goes away: the live answer now comes from the server run (shown above the message box)
       return true;
     } catch (err) {
@@ -1893,7 +1904,7 @@ export default function DashboardPage() {
                 attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
                 mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
                 replyTo={replyTo} onClearReply={() => setReplyTo(null)}
-                chatId={activeChat.id}
+                chatId={activeChat.id} autoMode={autoMode} onToggleAuto={toggleAuto}
               />
             </>
           )}
