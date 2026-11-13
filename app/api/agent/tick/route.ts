@@ -39,7 +39,7 @@ export async function POST(req: Request) {
         case "resume": await S.setQueue(q.uid, q.id, "run", now + 90_000); go(); out.resumed++; break;
         case "wait": await S.setQueue(q.uid, q.id, plan.kind, plan.at); out.waiting++; break;
         case "requeue":
-          await S.patchRun(q.uid, q.id, { status: "queued", error: null });
+          await S.patchRun(q.uid, q.id, { status: "queued", error: null, resumeAt: null });
           await S.setQueue(q.uid, q.id, "run", now + 90_000);
           go(); out.resumed++; break;
         case "answer":
