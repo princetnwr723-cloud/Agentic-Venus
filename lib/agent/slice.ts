@@ -16,6 +16,8 @@ type Common = {
 };
 
 /** A run that was stopped by the cost cap and continued by the owner gets one more allowance per continue. */
+/** how many times Automatic mode may raise the per-run cost cap on its own */
+export const AUTO_EXTENSIONS = 3;
 export const costCap = (run: Pick<RunDoc, "costExtra">, base = DEFAULT_LOOP.maxCostMicros) => base * (1 + Math.max(0, run.costExtra ?? 0));
 
 /** Slice limit and budget latch. Returns a result when the slice must not run the loop. */
@@ -31,7 +33,7 @@ export async function preflight(a: Common & { maxSlices: number }): Promise<{ st
   if (latchActive(latch, startedAt)) {
     const msg = describeLatch(latch, startedAt);
     await a.emit({ kind: "latch", text: msg });
-    await a.finish({ status: "budget", error: { code: "latch", message: msg } }, { kind: "run", at: latch!.until });
+    await a.finish({ status: "budget", resumeAt: latch!.until, error: { code: "latch", message: msg } }, { kind: "run", at: latch!.until });
     return { status: "budget" };
   }
   return null;
@@ -84,9 +86,16 @@ export async function runSliceCore(a: Common & { state: RunState; deps: LoopDeps
       return { status: "continue" };
     case "budget": {
       const shared = res.latch.kind !== "cost";
+      // Automatic mode: the per-run spending cap is raised by itself, up to 3 times, instead of asking for a Continue
+      if (!shared && run.autoApprove && (run.costExtra ?? 0) < AUTO_EXTENSIONS) {
+        await a.emit({ kind: "info", text: "Spending cap raised automatically" });
+        await a.finish({ ...common, status: "queued", costExtra: (run.costExtra ?? 0) + 1, error: null }, { kind: "run", at: now + 90_000 });
+        io.kick();
+        return { status: "continue" };
+      }
       if (shared) await S.armLatch(uid, res.latch);
       await a.emit({ kind: "latch", text: res.message });
-      await a.finish({ ...common, status: "budget", error: { code: res.latch.kind, message: res.message }, ...(shared ? {} : { endedAt: now }) }, shared ? { kind: "run", at: res.latch.until } : null);
+      await a.finish({ ...common, status: "budget", error: { code: res.latch.kind, message: res.message }, ...(shared ? { resumeAt: res.latch.until } : { endedAt: now }) }, shared ? { kind: "run", at: res.latch.until } : null);
       if (!shared) await a.cleanup();
       return { status: "budget" };
     }
