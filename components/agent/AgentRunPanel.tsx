@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { agentApi, usd, watchEvents, watchLive, watchRun, type RunEvent, type RunView } from "@/lib/agent/client";
+import { friendlyError, statusText, visibleEvents } from "@/lib/agent/friendly";
 
 const tone: Record<string, string> = { queued: "bg-gold", running: "bg-gold", paused: "bg-avatar-teal", done: "bg-avatar-teal", error: "bg-red-400", stopped: "bg-faint", budget: "bg-red-400" };
 
@@ -12,6 +13,7 @@ export default function AgentRunPanel({ uid, runId, compact = false }: { uid: st
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [details, setDetails] = useState(false);
   const beatRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { const a = watchRun(uid, runId, setRun), b = watchEvents(uid, runId, setEvents, compact ? 6 : 80), c = watchLive(uid, runId, setTyping); return () => { a(); b(); c(); }; }, [uid, runId, compact]);
@@ -26,6 +28,14 @@ export default function AgentRunPanel({ uid, runId, compact = false }: { uid: st
     beatRef.current = setInterval(send, 20_000);
     return () => { if (beatRef.current) clearInterval(beatRef.current); };
   }, [taking, pending?.id, uid, runId]);
+
+  // A run held by a limit that resets by itself goes on without a click: the scheduler wakes it, and this open panel does too.
+  const resumeAt = run?.status === "budget" && run.error?.code !== "cost" ? run.resumeAt ?? null : null;
+  useEffect(() => {
+    if (!resumeAt) return;
+    const t = setTimeout(() => { void agentApi(uid, { action: "continue", runId }).catch(() => {}); }, Math.max(0, resumeAt - Date.now()) + 3000);
+    return () => clearTimeout(t);
+  }, [resumeAt, uid, runId]);
 
   async function act(body: Record<string, unknown>) {
     setBusy(true); setErr("");
@@ -45,10 +55,10 @@ export default function AgentRunPanel({ uid, runId, compact = false }: { uid: st
         <span className={`h-2 w-2 shrink-0 rounded-full ${tone[run.status]}`} />
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm text-ink">{run.task}</div>
-          <div className="text-[11px] text-faint">{run.status} · step {run.round} · {run.model} · ~{usd(run.costMicros)} · {(run.usage.input + run.usage.output).toLocaleString()} tokens{run.compactions ? ` · compacted ${run.compactions}×` : ""}{run.tainted ? " · untrusted content seen" : ""}</div>
+          <div className="text-[11px] text-faint">{statusText(run.status, run.round, run.error, run.resumeAt)}{run.autoApprove ? " · Auto" : ""}</div>
         </div>
         {(live || run.status === "paused") && <button className={btn} disabled={busy} onClick={() => act({ action: "stop" })}>Stop</button>}
-        {run.status === "budget" && <button className={primary} disabled={busy} onClick={() => act({ action: "continue" })}>Continue</button>}
+        {run.status === "budget" && run.error?.code === "cost" && <button className={primary} disabled={busy} onClick={() => act({ action: "continue" })}>Allow more</button>}
       </div>
 
       {pending && (
@@ -84,8 +94,8 @@ export default function AgentRunPanel({ uid, runId, compact = false }: { uid: st
         </div>
       )}
 
-      {run.status === "budget" && run.error && <div className="mx-3 mt-3 rounded-md border border-red-400/50 p-3 text-xs text-red-400">{run.error.message}</div>}
-      {run.status === "error" && run.error && <div className="mx-3 mt-3 rounded-md border border-red-400/50 p-3 text-xs text-red-400">{run.error.message}</div>}
+      {run.status === "budget" && run.error && <div className="mx-3 mt-3 rounded-md border border-line p-3 text-xs text-muted">{friendlyError(run.error.code, run.error.message)}</div>}
+      {run.status === "error" && run.error && <div className="mx-3 mt-3 rounded-md border border-red-400/50 p-3 text-xs text-red-400">{friendlyError(run.error.code, run.error.message)}</div>}
       {run.status === "done" && run.result && <div className="mx-3 mt-3 whitespace-pre-wrap rounded-md border border-line p-3 text-sm text-ink">{run.result}</div>}
       {err && <div className="mx-3 mt-2 text-xs text-red-400">{err}</div>}
 
@@ -94,8 +104,18 @@ export default function AgentRunPanel({ uid, runId, compact = false }: { uid: st
       )}
 
       <div className={`${compact ? "max-h-28" : "max-h-72"} space-y-1 overflow-auto px-4 py-3`}>
-        {events.length === 0 && <div className="text-xs text-faint">Waiting for the first step…</div>}
-        {events.map((e) => <div key={e.id} className="text-[12px] text-muted"><span className="mr-2 text-faint">{new Date(e.t).toLocaleTimeString()}</span><span className="mr-1 text-ink">{e.kind}</span>{e.text}</div>)}
+        {(() => {
+          const lines = visibleEvents(events, compact ? 3 : 8);
+          return lines.length === 0 ? <div className="text-xs text-faint">{live ? "Working on it…" : ""}</div>
+            : lines.map((l) => <div key={l.id} className="text-[12px] text-muted">{l.text}</div>);
+        })()}
+        <button className="pt-1 text-[11px] text-faint underline-offset-2 hover:underline" onClick={() => setDetails((v) => !v)}>{details ? "Hide details" : "Details"}</button>
+        {details && (
+          <div className="mt-1 space-y-1 rounded-md border border-line bg-bg p-2">
+            <div className="text-[11px] text-faint">{run.model} · ~{usd(run.costMicros)} · {Math.max(0, Number(run.usage?.inTok) || 0) + Math.max(0, Number(run.usage?.outTok) || 0)} tokens · {run.calls} model calls</div>
+            {events.map((e) => <div key={e.id} className="break-words text-[11px] text-faint"><span className="mr-1">{e.kind}</span>{e.text}</div>)}
+          </div>
+        )}
       </div>
     </div>
   );
