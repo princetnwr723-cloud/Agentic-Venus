@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   AlertCircle, ArrowUp, AtSign, Check, CornerUpLeft, File as FileIcon, FileArchive, FileCode2, FileSpreadsheet, FileText,
-  Film, Image as ImageIcon, Loader2, Music, Paperclip, Presentation, UploadCloud, X,
+  Film, Hand, Image as ImageIcon, Loader2, Music, Paperclip, Presentation, UploadCloud, X, Zap,
 } from "lucide-react";
 import { MAX_ATTACH_FILES, badgeOf, humanSize, shortName, type Attachment, type AttachKind } from "@/lib/attachments";
 import CallButton from "@/components/dashboard/CallButton";
@@ -146,7 +146,7 @@ function SendButton({ canSend, uploading, overall, sending }: { canSend: boolean
 
 export default function ChatComposer({
   draft, setDraft, onSubmit, sending, agentName, attach, onPickFiles, onRemoveAttach,
-  mentionables, onMention, replyTo, onClearReply, chatId,
+  mentionables, onMention, replyTo, onClearReply, chatId, autoMode, onToggleAuto,
 }: {
   draft: string; setDraft: (v: string) => void; onSubmit: (e: React.FormEvent) => void; sending: boolean; agentName: string;
   attach: Attachment[]; onPickFiles: (f: File[]) => void; onRemoveAttach: (id: string) => void;
@@ -154,6 +154,9 @@ export default function ChatComposer({
   replyTo: { at: number; preview: string } | null; onClearReply: () => void;
   /** Optional: when given, the call button rings exactly this chat's agent. Without it the agent is found by its name. */
   chatId?: string;
+  /** Automatic (true) or Manual (false): Automatic never asks before ordinary actions. Without onToggleAuto no button is shown. */
+  autoMode?: boolean;
+  onToggleAuto?: () => void;
   /** @deprecated The computer and template buttons no longer live beside the message box. Kept so older callers still compile. */
   hasComputerKey?: boolean;
   /** @deprecated see hasComputerKey */
@@ -428,6 +431,21 @@ export default function ChatComposer({
             <SendButton canSend={canSend} uploading={uploading} overall={overall} sending={sending} />
           </div>
         </div>
+
+        {onToggleAuto && (
+          <div className="pb-2">
+            <button
+              type="button"
+              onClick={onToggleAuto}
+              aria-pressed={Boolean(autoMode)}
+              title={autoMode ? "Automatic: the agent does the work without asking. It still asks before spending money, deleting things, or acting on untrusted web content. Click for Manual." : "Manual: the agent asks before sending, posting or changing things. Click for Automatic."}
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors active:scale-95 sm:h-9 ${autoMode ? "border-gold/60 bg-gold/15 text-gold" : "border-line bg-panel text-muted hover:text-ink"}`}
+            >
+              {autoMode ? <Zap size={14} /> : <Hand size={14} />}
+              <span>{autoMode ? "Auto" : "Manual"}</span>
+            </button>
+          </div>
+        )}
       </form>
 
       {!draft && !attach.length && !replyTo && (
