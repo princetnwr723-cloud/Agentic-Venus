@@ -6,6 +6,7 @@ import { appBaseUrl } from "@/lib/voice-server";
 import { kick, startRun, store } from "@/lib/agent/worker";
 import { latchReason } from "@/lib/agent/latch-server";
 import { summarizeRuns } from "@/lib/agent/budget";
+import { autoDecision } from "@/lib/agent/autopilot";
 import { beat, handBack, nextCheck, startTakeover, takeoverSeconds, decline } from "@/lib/agent/takeover";
 import { replyFor } from "@/lib/agent/actions";
 import type { Reply } from "@/lib/agent/types";
@@ -22,7 +23,7 @@ const str = (v: unknown, n: number) => String(v ?? "").slice(0, n);
 const view = (r: RunDoc) => ({
   id: r.id, chatId: r.chatId, task: r.task, status: r.status, round: r.round, createdAt: r.createdAt, updatedAt: r.updatedAt, endedAt: r.endedAt ?? null,
   pending: r.pending, takeover: r.takeover ?? null, usage: r.usage, costMicros: r.costMicros, calls: r.calls, compactions: r.compactions, tainted: r.tainted,
-  result: r.result ?? null, error: r.error ?? null, model: r.model, provider: r.provider,
+  result: r.result ?? null, error: r.error ?? null, model: r.model, provider: r.provider, autoApprove: Boolean(r.autoApprove), resumeAt: r.resumeAt ?? null,
 });
 
 const origin = (req: Request) => { try { return appBaseUrl(req); } catch { return new URL(req.url).origin; } };
@@ -58,7 +59,7 @@ export async function POST(req: Request) {
       const fallbacks = (Array.isArray(raw.fallbacks) ? (raw.fallbacks as Array<Record<string, unknown>>) : [])
         .filter((f) => PROVIDER_IDS.has(String(f?.provider)) && isPlaceholder(f?.apiKey) && typeof f?.model === "string")
         .slice(0, 3).map((f) => ({ provider: String(f.provider), model: str(f.model, 120), keyRef: String(f.apiKey) }));
-      const runId = await startRun(uid, { chatId, task, provider: provider as ProviderId, model, keyRef, fallbacks, tempKey, origin: origin(req), maxRounds: Math.min(80, Math.max(5, Number(body.maxRounds) || 40)) });
+      const runId = await startRun(uid, { chatId, task, provider: provider as ProviderId, model, keyRef, fallbacks, tempKey, origin: origin(req), maxRounds: Math.min(80, Math.max(5, Number(body.maxRounds) || 40)), autoApprove: body.autoApprove === true });
       return NextResponse.json({ ok: true, runId });
     }
 
@@ -68,6 +69,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, report: summarizeRuns(rows, Date.now(), Math.min(60, Math.max(1, Number(body.days) || 7))), note: "Costs are estimates from list prices, not a bill." });
     }
     if (action === "latch_clear") { await S.clearLatch(uid); return NextResponse.json({ ok: true }); }
+
+    // Automatic / Manual switch for every running task of a chat. Turning Automatic on also answers a card that is waiting
+    // right now, when the action is an ordinary one (autopilot.ts decides).
+    if (action === "set_mode") {
+      const chatId = str(body.chatId, 200), on = body.autoApprove === true;
+      if (!chatId) throw new RequestError("chatId is required.", 400);
+      let changed = 0;
+      for (const r of await S.listRuns(uid, 20)) {
+        if (r.chatId !== chatId || ["done", "error", "stopped"].includes(r.status)) continue;
+        await S.patchRun(uid, r.id, { autoApprove: on }); changed++;
+        const p = r.pending;
+        if (on && r.status === "paused" && p && (p.kind === "approve_tool" || p.kind === "request_approval") && autoDecision(p.name, p.summary, Boolean(p.tainted), p.args) === "approve") {
+          await S.patchRun(uid, r.id, { reply: { action: "approve" } });
+          await S.setQueue(uid, r.id, "run", Date.now() + 90_000);
+          kick(uid, r.id, r.chatId, r.origin || origin(req));
+        }
+      }
+      return NextResponse.json({ ok: true, changed });
+    }
 
     // ---------- everything below is about one run ----------
     const runId = str(body.runId, 40);
