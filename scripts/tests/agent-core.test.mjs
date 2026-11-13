@@ -13,8 +13,10 @@ import { wireMessages, wireTools, systemBlocks, countBreakpoints } from "../../l
 test("classifies the common provider errors", () => {
   assert.equal(classifyError(new Error("Anthropic 429: rate_limit_error")).code, "rate_limited");
   assert.equal(classifyError(new Error("529 overloaded_error")).code, "overloaded");
-  assert.equal(classifyError(new Error("Your credit balance is too low")).code, "usage_limit");
-  assert.equal(classifyError(new Error("429 You exceeded your current quota (insufficient_quota)")).code, "usage_limit");
+  assert.equal(classifyError(new Error("Your credit balance is too low")).code, "no_credit");
+  assert.equal(classifyError(new Error("429 You exceeded your current quota (insufficient_quota)")).code, "no_credit");
+  assert.equal(classifyError(new Error("402: Insufficient Balance (request_id: abc)")).code, "no_credit");
+  assert.equal(classifyError(new Error("monthly limit reached")).code, "usage_limit");
   assert.equal(classifyError(new Error("invalid x-api-key")).code, "unauthorized");
   assert.equal(classifyError(new Error("prompt is too long: 250000 tokens > 200000 maximum")).code, "context_exceeded");
   assert.equal(classifyError(new Error("model: gpt-9 does not exist")).code, "model_not_found");
@@ -189,7 +191,8 @@ test("cost uses real token counts and cache discounts", () => {
 test("only lasting errors arm the latch", () => {
   const t0 = 1_000_000;
   assert.equal(latchFromError(classifyError(new Error("429 rate limit")), t0), null);
-  const l = latchFromError(classifyError(new Error("insufficient_quota")), t0);
+  assert.equal(latchFromError(classifyError(new Error("insufficient_quota")), t0), null);
+  const l = latchFromError(classifyError(new Error("monthly limit reached")), t0);
   assert.equal(l.kind, "provider");
   assert.ok(latchActive(l, t0 + 1000));
   assert.ok(!latchActive(l, l.until + 1));

@@ -271,8 +271,13 @@ test("a bad key is reported at once, no retries", async () => {
   assert.equal(h.log.calls.length, 1);
 });
 
-test("provider out of credit arms the latch instead of failing again and again", async () => {
-  const h = harness({ script: [new ProviderError("402: Your credit balance is too low", 402)] });
+test("provider out of credit is a clean error (waiting would not help), a monthly limit arms the latch", async () => {
+  const e = harness({ script: [new ProviderError("402: Insufficient Balance (request_id: x1)", 402)] });
+  const er = await runLoop(newState("t"), e.deps, e.opts);
+  assert.equal(er.status, "error");
+  assert.equal(er.code, "no_credit");
+  assert.doesNotMatch(er.message, /request_id|402/);
+  const h = harness({ script: [new ProviderError("429: monthly limit reached", 429)] });
   const r = await runLoop(newState("t"), h.deps, h.opts);
   assert.equal(r.status, "budget");
   assert.equal(r.latch.kind, "provider");
