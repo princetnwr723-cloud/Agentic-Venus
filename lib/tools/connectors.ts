@@ -22,11 +22,11 @@ export async function resolveConnectorsSafe(uid: string, stored: Record<string, 
 export const vaultNameFor = (chatId: string, key: string) => `conn.${chatId.toLowerCase()}.${key.toLowerCase().replace(/[^a-z0-9:]+/g, "_")}`;
 
 /** Lets a tool save something for this chat (token refresh, the agent's inbox login, a connector the owner asked for in the chat) into the encrypted vault. */
-export function makeCtx(uid: string, chatId: string, site?: { baseUrl?: string; origin?: string }): ToolCtx {
+export function makeCtx(uid: string, chatId: string, site?: { baseUrl?: string; origin?: string; model?: { provider: string; model: string } }): ToolCtx {
   const chatRef = getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
   return {
     uid, chatId,
-    baseUrl: site?.baseUrl, origin: site?.origin,
+    baseUrl: site?.baseUrl, origin: site?.origin, model: site?.model,
     save: async (key, value) => {
       const ph = await vaultPut(uid, vaultNameFor(chatId, key), value);
       await chatRef.update({ [`connectors.${key}`]: ph });
