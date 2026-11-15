@@ -60,6 +60,7 @@ import ConnectorsModal from "@/components/dashboard/ConnectorsModal";
 import PcPanel, { type AgentRequest, type RequestReply } from "@/components/dashboard/PcPanel";
 import AgentDock from "@/components/agent/AgentDock";
 import { agentApi, startServerRun, type RunView } from "@/lib/agent/client";
+import { isVenusActive, startVenusServer, watchVenusRuns } from "@/lib/venus-run-client";
 
 const toRequest = (p: PcPending): AgentRequest =>
   p.kind === "login" ? { kind: "login", site: p.site ?? "" }
@@ -259,6 +260,15 @@ export default function DashboardPage() {
   }, [user]);
 
   const activeChat = useMemo(() => chats.find((c) => c.id === activeId) ?? null, [chats, activeId]);
+  // a video that the server is making for the open chat (it goes on with the tab closed; this only shows its progress)
+  const [serverVenus, setServerVenus] = useState<{ title: string; label: string; value: number | null } | null>(null);
+  useEffect(() => {
+    if (!user || !activeChat?.id) { setServerVenus(null); return; }
+    return watchVenusRuns(user.uid, activeChat.id, (rs) => {
+      const a = rs.find(isVenusActive);
+      setServerVenus(a ? { title: a.title, label: a.label || "Working…", value: a.value } : null);
+    });
+  }, [user, activeChat?.id]);
 
   // The other agents the @ menu can offer (every other chat of this account).
   const mentionables = useMemo<Mentionable[]>(
@@ -1165,7 +1175,7 @@ export default function DashboardPage() {
     try {
       const all = await listProjects(user.uid);
       for (const p0 of all) {
-        if (p0.origin !== "chat" || p0.status !== "running" || !p0.chatId) continue;
+        if (p0.origin !== "chat" || p0.status !== "running" || !p0.chatId || p0.server) continue;
         const chat = chatsRef.current.find((c) => c.id === p0.chatId);
         if (!chat || venusBusyRef.current.has(chat.id) || !apiKeys[chat.provider]) continue;
         const alive = Math.max(p0.updatedAt ?? 0, await lastBeat(user.uid, p0.id));
@@ -1250,6 +1260,17 @@ export default function DashboardPage() {
           : { mode: "make" as const }),
         ...(tpl ? { templateJson: JSON.stringify(tpl), templateName: tpl.name } : {}),
       };
+      // Background mode (default): the SERVER makes the video. This tab, the phone, the laptop can be closed; the finished video is
+      // posted to this chat. Only when the server cannot be reached at all does the video run in this browser, as before.
+      if (serverAgentOn()) {
+        const started = await startVenusServer(user.uid, chat.id, project);
+        if (started.ok) {
+          const note = "🌙 It runs on the server now: you can close this tab. The finished video lands in this chat. Progress shows above the message box while you are here.";
+          if (!opts.silent) say(chat.id, note);
+          return "The video was started in the background.";
+        }
+        if (started.status !== 0 && started.status < 500) return out(`⚠️ ${started.error}`);
+      }
       const env: PipelineEnv = { uid: user.uid, token: () => user.getIdToken(), e2bKey, apiKeys, pexels: Boolean(cfg?.pexels) };
       const final = await runPipeline(env, venusHooks(chat.id), project, "studio");
       if (final.status === "done" && final.finalPath) {
@@ -1890,7 +1911,7 @@ export default function DashboardPage() {
                     replyingAt={replyTo?.at ?? null}
                   />
                   {/* the one run bar: a short generic line + timer, right under the last message (video / code / team runs and normal work all use it) */}
-                  {(activeWork || venusRun || codeRun || teamRun) && <RunBar key={activeChat.id} work={activeWork ?? null} venusRun={venusRun} codeRun={codeRun} teamRun={teamRun} />}
+                  {(activeWork || venusRun || serverVenus || codeRun || teamRun) && <RunBar key={activeChat.id} work={activeWork ?? null} venusRun={venusRun ?? serverVenus} codeRun={codeRun} teamRun={teamRun} />}
                 </div>
               </div>
               {/* only the dock slot of the Progress panel stays above the message box (no run cards there any more) */}
