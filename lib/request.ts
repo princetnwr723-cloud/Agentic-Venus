@@ -1,4 +1,4 @@
-import { authFromRequest } from "@/lib/job-token";
+import { authFromRequest, verifyJobToken } from "@/lib/job-token";
 import { resolveDeep } from "@/lib/vault";
 
 const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -56,7 +56,8 @@ async function readBoundedText(req: Request, maxBytes: number): Promise<string> 
  * - FALLBACK provider keys are resolved one by one: a fallback key that can no longer be opened is dropped,
  *   it never breaks the whole request (the main key still fails loudly, with its name).
  */
-export async function readBody(req: Request, opts: { allowJob?: boolean; maxBytes?: number } = {}): Promise<any> {
+/** `allowJob`: true = any background-job token; a string = only job tokens whose job id starts with it (Venus Pro runs use "vpro"). */
+export async function readBody(req: Request, opts: { allowJob?: boolean | string; maxBytes?: number } = {}): Promise<any> {
   const rawText = await readBoundedText(req, opts.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
   let raw: unknown = {};
   if (rawText.trim()) {
@@ -76,6 +77,10 @@ export async function readBody(req: Request, opts: { allowJob?: boolean; maxByte
     throw new RequestError(message, status);
   }
   if (auth.job && !opts.allowJob) throw new RequestError("Background-job tokens are not accepted on this endpoint.", 403);
+  if (auth.job && typeof opts.allowJob === "string") {
+    const j = verifyJobToken((req.headers.get("authorization") || "").replace(/^Bearer\s+/i, ""));
+    if (!j || !j.jobId.startsWith(opts.allowJob)) throw new RequestError("This background-job token is not accepted on this endpoint.", 403);
+  }
 
   const fallbacks = Array.isArray(input.fallbacks) ? (input.fallbacks as unknown[]) : null;
   const rest: Record<string, unknown> = { ...input };
