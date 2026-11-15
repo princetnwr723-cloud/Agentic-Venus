@@ -49,7 +49,7 @@ async function codeStateWithRepair(sb: Box): Promise<SetupState> {
 
 export async function POST(req: Request) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, { allowJob: "vpro" }); // Venus Pro server runs call this with their own job token
     const uid = String(body.uid);
     const action = String(body.action || "");
 
