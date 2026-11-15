@@ -1,10 +1,9 @@
 "use client";
 
-// The background agent inside the chat screen. Shows every run of this chat that is still going or waiting for the owner:
-// the answer as it is being typed, the steps, and the cards (approve / question / secret / take over). Nothing shows when idle.
+// The background agent inside the chat screen. It shows nothing itself: it only watches the runs of this chat and reports
+// a run that has just ended (the dashboard learns from it).
 import { useEffect, useRef, useState } from "react";
 import { isActiveRun, watchChatRuns, type RunView } from "@/lib/agent/client";
-import AgentRunPanel from "./AgentRunPanel";
 
 export default function AgentDock({ uid, chatId, onDone }: { uid: string; chatId: string; onDone?: (run: RunView) => void }) {
   const [runs, setRuns] = useState<RunView[]>([]);
@@ -19,11 +18,5 @@ export default function AgentDock({ uid, chatId, onDone }: { uid: string; chatId
     }
   }, [runs, onDone]);
 
-  const active = runs.filter(isActiveRun);
-  if (!active.length) return null;
-  return (
-    <div className="mx-auto w-full max-w-2xl space-y-2 px-6 pb-2">
-      {active.map((r) => <AgentRunPanel key={r.id} uid={uid} runId={r.id} compact />)}
-    </div>
-  );
+  return null;
 }
