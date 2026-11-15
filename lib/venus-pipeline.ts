@@ -709,7 +709,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         // ---------- a long video (up to one hour): chapter plan first, then every chapter is written on its own ----------
         say(`✍️ Planning a ${Math.round(run.p.seconds / 6) / 10}-minute video in chapters…`);
         hooks.progress({ label: "Chapter plan", value: null });
-        const ctx = memory + (tpl ? "" : aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}.`) + assetsNote;
+        const ctx = memory + (tpl ? "" : aiOwn ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject): ${style[0]} — ${style[1]}. Variation seed ${rndSeed(env)}.` : `\n\nVISUAL STYLE FOR THIS VIDEO: ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed(env)}.`) + assetsNote;
         const ob = { kind: "outline", brief: scriptInfo ? `${scriptInfo.instructions}\nTopic of the script: ${scriptInfo.script.slice(0, 600)}` : run.p.brief, seconds: run.p.seconds, aspect: run.p.aspect, theme: run.p.theme, voice: voiceArg !== false, context: ctx, template: tplNote || undefined, docu };
         let o = await aiCall(env, run.p, ob).catch((e) => ({ error: (e as Error).message }));
         if (!o.chapters) { say("First attempt failed — trying again…"); o = await aiCall(env, run.p, ob); }
@@ -787,8 +787,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const context =
           memory +
           (tpl ? "" : aiOwn
-            ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject, and it must not look like a template video): ${style[0]} — ${style[1]}. Variation seed ${rndSeed()}.`
-            : `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed()}. Pick a palette that matches this style.`) +
+            ? `\n\nOPTIONAL INSPIRATION (ignore it completely if the brief states a style or you have a better idea; the look must come from YOUR concept for this subject, and it must not look like a template video): ${style[0]} — ${style[1]}. Variation seed ${rndSeed(env)}.`
+            : `\n\nVISUAL STYLE FOR THIS VIDEO (follow it closely; the result must look clearly different from typical template videos): ${style[0]} — ${style[1]}. ${twist} Variation seed ${rndSeed(env)}. Pick a palette that matches this style.`) +
           assetsNote;
         const body = {
           kind: "storyboard", brief: scriptInfo ? scriptInfo.instructions || "A video that shows the script." : run.p.brief, seconds: Math.min(90, run.p.seconds), aspect: run.p.aspect, theme: run.p.theme,
