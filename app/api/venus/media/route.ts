@@ -24,7 +24,7 @@ const safeName = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+
 
 export async function POST(req: Request) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, { allowJob: "vpro" }); // Venus Pro server runs call this with their own job token
     const uid = String(body.uid);
 
     if (body.action === "url") {
