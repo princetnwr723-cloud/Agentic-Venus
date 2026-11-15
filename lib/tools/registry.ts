@@ -10,6 +10,7 @@ import { ROUTINE_TOOLS } from "./routine";
 import { LEARNING_TOOLS } from "./learning";
 import { REPO_TOOLS } from "./repo";
 import { VISUAL_TOOLS } from "./visual";
+import { VENUS_TOOLS } from "./venus-video";
 import { MAIL_TOOLS } from "./mail";
 import { PLAN_TOOLS } from "./plan";
 import { GMAIL_TOOLS } from "./gmail";
@@ -33,7 +34,7 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...VENUS_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS];
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
