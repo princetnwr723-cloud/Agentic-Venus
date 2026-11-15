@@ -129,7 +129,7 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
     const stored: Record<string, string> = {};
     for (const [k, v] of Object.entries(cs?.connectors ?? {})) if (typeof v === "string") stored[k] = v;
     const { connectors, broken } = await resolveConnectorsSafe(uid, stored);
-    const ctx = makeCtx(uid, run.chatId, { baseUrl: o.origin, origin: o.origin });
+    const ctx = makeCtx(uid, run.chatId, { baseUrl: o.origin, origin: o.origin, model: { provider: run.provider, model: run.model } });
     const cat = await buildCatalog(connectors, ctx);
     const tools: ToolDef[] = [...cat.specs.map(toolDef), ...HITL_TOOLS];
     const names = buildNameMap(tools.map((t) => t.name));
