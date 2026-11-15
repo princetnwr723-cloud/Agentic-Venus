@@ -10,6 +10,7 @@ import { safeId } from "@/lib/tools/catalog";
 import { brainContext, readMem } from "@/lib/learning";
 import { hybrid } from "@/lib/bm25";
 import { effectivePlan, type PlanDoc } from "@/lib/billing-server";
+import { isOwner } from "@/lib/owner";
 import { planById } from "@/lib/plans";
 import { signJob } from "@/lib/job-token";
 import { audit } from "@/lib/audit";
@@ -39,7 +40,7 @@ const billing = () =>
   createStrictBilling(getAdminDb() as unknown as DbLike, (doc, now) => {
     const p = planById(effectivePlan(doc as PlanDoc | undefined, now));
     return { tokens: p.tokens, windowHours: p.windowHours, name: p.name };
-  }, process.env.AGENT_BILLING_FAIL_OPEN === "true");
+  }, process.env.AGENT_BILLING_FAIL_OPEN === "true", isOwner); // the owner of the deployment is never metered or refused (lib/owner.ts)
 
 const SLICE_MS = () => Math.max(15, Number(process.env.AGENT_SLICE_SECONDS) || 42) * 1000;
 const MAX_SLICES = 200;
@@ -47,11 +48,34 @@ const newRunId = () => "r" + Date.now().toString(36) + Math.random().toString(36
 const chatRef = (uid: string, chatId: string) => getAdminDb().collection("users").doc(uid).collection("chats").doc(chatId);
 
 // ---------------- start / continue ----------------
+/** A run that can never start must say so: it ends with a clear error instead of waiting in "queued" for ever with no reply. */
+async function giveUp(uid: string, runId: string, code: string, message: string): Promise<void> {
+  try {
+    const S = store();
+    const r = await S.getRun(uid, runId);
+    if (!r || r.status !== "queued") return; // a slice is already working on it (or it is over): leave it alone
+    await S.addEvent(uid, runId, { kind: "error", text: message }).catch(() => {});
+    await S.release(uid, runId, { status: "error", endedAt: Date.now(), error: { code, message } }, null);
+  } catch { /* nothing more can be done */ }
+}
+
 /** The next slice, as a separate function call (a fresh time limit). Never waits for it. */
 export function kick(uid: string, runId: string, chatId: string, origin: string): void {
   let token: string;
-  try { token = signJob(uid, chatId, runId, 2 * 3600_000); } catch { return; }
-  runAfter(fetch(`${origin}/api/agent/step`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ runId }) }));
+  try { token = signJob(uid, chatId, runId, 2 * 3600_000); }
+  catch (e) {
+    const why = e instanceof Error ? e.message : "no job token";
+    void giveUp(uid, runId, "config", `The background agent could not start (${why}). Set ROUTINE_RUNNER_SECRET (32+ characters) in Vercel -> Settings -> Environment Variables and redeploy.`);
+    return;
+  }
+  runAfter(
+    fetch(`${origin}/api/agent/step`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ runId }) })
+      .then(async (r) => {
+        // 5xx / time-outs are normal for a long slice: the scheduler and the open chat wake the run again. A 4xx means the step can never start.
+        if (r.ok || r.status >= 500) return;
+        await giveUp(uid, runId, "step_refused", `The server refused to start the next step (HTTP ${r.status}). Check that ROUTINE_RUNNER_SECRET is set, that Vercel Deployment Protection is off for /api/agent/step, and that NEXT_PUBLIC_APP_URL is your real site address.`);
+      }),
+  );
 }
 
 export type StartInput = { chatId: string; task: string; provider: ProviderId; model: string; keyRef: string; fallbacks?: KeyRef[]; tempKey?: string; maxRounds?: number; origin: string; routineId?: string; autoApprove?: boolean };
@@ -115,7 +139,13 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
   const cleanup = async () => { if (run.tempKey) await vaultDelete(uid, run.tempKey).catch(() => {}); };
 
   try {
-    const stop = await preflight({ S, run, uid, runId, startedAt, emit, finish, cleanup, maxSlices: MAX_SLICES });
+    // the OWNER is never held back: a leftover plan / cost latch is removed, and the slice and cost limits do not apply
+    const ownerRun = await isOwner(uid).catch(() => false);
+    if (ownerRun) {
+      const held = await S.readLatch(uid).catch(() => null);
+      if (held && held.kind !== "provider") await S.clearLatch(uid).catch(() => {});
+    }
+    const stop = await preflight({ S, run, uid, runId, startedAt, emit, finish, cleanup, maxSlices: ownerRun ? 5000 : MAX_SLICES });
     if (stop) return stop;
 
     // keys: only references are stored; the real keys are opened here, for this slice only
@@ -219,7 +249,7 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
 
     const window = contextWindow(run.model);
     const opts = {
-      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: costCap(run), autoApprove: Boolean(run.autoApprove),
+      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: ownerRun ? Number.MAX_SAFE_INTEGER : costCap(run), autoApprove: Boolean(run.autoApprove),
       compact: { ...DEFAULT_COMPACT, windowTokens: window }, fromNative: names.fromNative,
     };
 
