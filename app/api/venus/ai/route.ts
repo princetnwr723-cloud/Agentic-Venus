@@ -25,7 +25,7 @@ const ASPECT_LIST = ["16:9", "9:16", "1:1"];
 
 export async function POST(req: Request) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, { allowJob: "vpro" }); // Venus Pro server runs call this with their own job token
     const provider = body.provider as ProviderId;
     const apiKey = String(body.apiKey || "");
     const model = String(body.model || "");
