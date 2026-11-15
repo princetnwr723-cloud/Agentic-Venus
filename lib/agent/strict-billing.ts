@@ -3,6 +3,7 @@
 //   reserve  -> before every model call, in ONE transaction: refuse when the window is used up (plan_limit + reset time)
 //   settle   -> after the call: replace the estimate with the real token count from the provider
 // If the billing database itself cannot be reached the call is refused too (set AGENT_BILLING_FAIL_OPEN=true to allow it).
+// The OWNER of the deployment (lib/owner.ts) is never metered or refused: pass `unlimited` and it is asked first.
 // It reads and writes the same documents as billing-server.ts: users/{uid}/billing/usage { windowStart, tokens }.
 import type { DbLike } from "./store.ts";
 
@@ -23,7 +24,8 @@ export class BillingUnavailableError extends Error {
 
 const fmt = (ms: number) => { const m = Math.max(1, Math.ceil(ms / 60_000)); return m >= 90 ? `${Math.round(m / 60)} h` : `${m} min`; };
 
-export function createStrictBilling(db: DbLike, plan: PlanResolver, failOpen = false) {
+export function createStrictBilling(db: DbLike, plan: PlanResolver, failOpen = false, unlimited?: (uid: string) => Promise<boolean>) {
+  const free = async (uid: string): Promise<boolean> => { try { return unlimited ? await unlimited(uid) : false; } catch { return false; } };
   const base = (uid: string) => db.collection("users").doc(uid).collection("billing");
 
   async function adjust(uid: string, delta: (used: number, lim: PlanLimits, now: number) => { add: number; refuse?: string }): Promise<void> {
@@ -50,7 +52,13 @@ export function createStrictBilling(db: DbLike, plan: PlanResolver, failOpen = f
   }
 
   return {
-    reserve: (uid: string, est: number) => adjust(uid, (used, lim) => (lim.tokens !== null && used + est > lim.tokens ? { add: 0, refuse: `AI token limit reached on the ${lim.name} plan.` } : { add: est })),
-    settle: (uid: string, reserved: number, actual: number) => adjust(uid, () => ({ add: actual - reserved })).catch(() => {}),
+    reserve: async (uid: string, est: number): Promise<void> => {
+      if (await free(uid)) return;
+      await adjust(uid, (used, lim) => (lim.tokens !== null && used + est > lim.tokens ? { add: 0, refuse: `AI token limit reached on the ${lim.name} plan.` } : { add: est }));
+    },
+    settle: async (uid: string, reserved: number, actual: number): Promise<void> => {
+      if (await free(uid)) return;
+      await adjust(uid, () => ({ add: actual - reserved })).catch(() => {});
+    },
   };
 }
