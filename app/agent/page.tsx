@@ -8,7 +8,6 @@ import { useKeys } from "@/lib/keys-context";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { createChat } from "@/lib/chats";
 import { agentApi, usd, watchRuns, type RunView } from "@/lib/agent/client";
-import AgentRunPanel from "@/components/agent/AgentRunPanel";
 
 export default function AgentPage() {
   const { user, loading } = useAuth();
@@ -68,12 +67,10 @@ export default function AgentPage() {
           {runs.length === 0 && <p className="text-xs text-faint">No background tasks yet.</p>}
           {runs.map((r) => (
             <div key={r.id}>
-              {open === r.id ? <AgentRunPanel uid={user.uid} runId={r.id} /> : (
-                <button onClick={() => setOpen(r.id)} className="flex w-full items-center gap-3 rounded-lg border border-line bg-panel px-3.5 py-2.5 text-left">
-                  <span className="min-w-0 flex-1 truncate text-sm text-ink">{r.task}</span>
-                  <span className="text-[11px] text-faint">{r.status} · ~{usd(r.costMicros)}</span>
-                </button>
-              )}
+              <div className="flex w-full items-center gap-3 rounded-lg border border-line bg-panel px-3.5 py-2.5 text-left">
+                <span className="min-w-0 flex-1 truncate text-sm text-ink">{r.task}</span>
+                <span className="text-[11px] text-faint">{r.status}</span>
+              </div>
             </div>
           ))}
         </div>
