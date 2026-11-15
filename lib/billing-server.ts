@@ -11,6 +11,7 @@ import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { RequestError } from "@/lib/request";
 import { PLANS, fmtDuration, nextPlan, planById, type PlanDef, type PlanId } from "@/lib/plans";
 import { envFailOpen, guarded, type Lost, type Mode } from "@/lib/billing-policy";
+import { isOwner } from "@/lib/owner";
 
 const db = () => getAdminDb();
 const base = (uid: string) => db().collection("users").doc(uid).collection("billing");
@@ -22,18 +23,10 @@ const GRACE_MS = 3 * DAY; // late renewal payments do not cut access instantly
 const MAX_JOB_MS = 130 * 60_000; // a computer job never runs longer than ~2h
 
 /**
- * Temporary testing bypass, restricted to explicitly listed Firebase UIDs.
- * Set VENUS_UNLIMITED_TEST_MODE=true and VENUS_UNLIMITED_TEST_UIDS=<uid1,uid2>
- * in the server environment. Never enable this for every user on a public deployment.
+ * The OWNER of the deployment is never limited (tokens, computer time, daily videos / websites).
+ * Who the owner is comes from lib/owner.ts (OWNER_EMAILS or OWNER_UIDS in the server environment).
  */
-function isUnlimitedTestUser(uid: string): boolean {
-  if (process.env.VENUS_UNLIMITED_TEST_MODE !== "true" || !uid) return false;
-  const allowed = (process.env.VENUS_UNLIMITED_TEST_UIDS || "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  return allowed.includes(uid);
-}
+const unlimitedUser = (uid: string): Promise<boolean> => isOwner(uid);
 
 export type PlanDoc = {
   plan?: PlanId;
@@ -116,13 +109,15 @@ function limitError(what: string, c: Ctx) {
 }
 
 // ---------------- tokens ----------------
-export const assertTokens = (uid: string) =>
-  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : guard("gate", "assertTokens", uid, () =>
+export const assertTokens = async (uid: string): Promise<void> => {
+  if (await unlimitedUser(uid)) return;
+  await guard("gate", "assertTokens", uid, () =>
     tx(uid, (c) => {
       if (c.plan.tokens !== null && c.n.tokens >= c.plan.tokens) throw limitError("AI token", c);
     }),
     undefined
   );
+};
 
 export const addTokens = (uid: string, tokens: number) =>
   guard("meter", "addTokens", uid, () =>
@@ -135,18 +130,20 @@ export const addTokens = (uid: string, tokens: number) =>
   );
 
 // ---------------- computer time ----------------
-export const assertPcAllowed = (uid: string) =>
-  isUnlimitedTestUser(uid) ? Promise.resolve(undefined) : guard("gate", "assertPcAllowed", uid, () =>
+export const assertPcAllowed = async (uid: string): Promise<void> => {
+  if (await unlimitedUser(uid)) return;
+  await guard("gate", "assertPcAllowed", uid, () =>
     tx(uid, (c) => {
       if (c.plan.pcSeconds !== null && pcUsed(c) >= c.plan.pcSeconds) throw limitError("Computer agent time", c);
     }),
     undefined
   );
+};
 
 // "not used up yet" is remembered for 20 seconds, so a status poll does not hit the database every time
 const notExhaustedAt = new Map<string, number>();
 export const pcExhausted = async (uid: string): Promise<boolean> => {
-  if (isUnlimitedTestUser(uid)) return false;
+  if (await unlimitedUser(uid)) return false;
   const hit = notExhaustedAt.get(uid);
   if (hit && Date.now() - hit < 20_000) return false;
   // a poll that can end a job that is already running: a database blip must not kill it (starting a job is gated by assertPcAllowed)
@@ -227,7 +224,7 @@ const featureLimitOf = (plan: PlanDef, kind: Feature) => (kind === "video" ? pla
 const FREE_REPEATS = 3;
 
 export async function consumeFeature(uid: string, kind: Feature, key: string): Promise<void> {
-  if (!uid || isUnlimitedTestUser(uid)) return;
+  if (!uid || (await unlimitedUser(uid))) return;
   const id = String(key || "default").slice(0, 120);
   await guard("gate", "consumeFeature:" + kind, uid, () =>
     db().runTransaction(async (t) => {
@@ -282,7 +279,7 @@ const pct = (used: number, limit: number | null) => (limit ? Math.min(100, Math.
 
 // ---------------- what the UI shows ----------------
 export async function billingSummary(uid: string) {
-  const unlimited = isUnlimitedTestUser(uid);
+  const unlimited = await unlimitedUser(uid);
   return tx(uid, (c) => {
     const tokenLimit = unlimited ? null : c.plan.tokens;
     const pcLimit = unlimited ? null : c.plan.pcSeconds;
@@ -299,7 +296,7 @@ export async function billingSummary(uid: string) {
       pc: { usedSeconds: Math.round(pcUsed(c)), limitSeconds: pcLimit, pct: pct(pcUsed(c), pcLimit), alwaysOn: c.plan.alwaysOn },
       video: featureState(c, "video", unlimited),
       site: featureState(c, "site", unlimited),
-      label: unlimited ? "Unlimited testing" : c.plan.rel,
+      label: unlimited ? "Owner · unlimited" : c.plan.rel,
     };
   });
 }
