@@ -5,6 +5,7 @@ import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { appBaseUrl } from "@/lib/voice-server";
 import { kick, startRun, store } from "@/lib/agent/worker";
 import { latchReason } from "@/lib/agent/latch-server";
+import { isOwner } from "@/lib/owner";
 import { summarizeRuns } from "@/lib/agent/budget";
 import { autoDecision } from "@/lib/agent/autopilot";
 import { beat, handBack, nextCheck, startTakeover, takeoverSeconds, decline } from "@/lib/agent/takeover";
@@ -16,6 +17,7 @@ export const runtime = "nodejs";
 export const maxDuration = 30;
 
 const MAX_ACTIVE = 3;
+const MAX_ACTIVE_OWNER = 12; // the owner of the deployment is not held to the normal task count (lib/owner.ts)
 const PROVIDER_IDS = new Set<string>(PROVIDERS.map((p) => p.id));
 const str = (v: unknown, n: number) => String(v ?? "").slice(0, n);
 
@@ -45,8 +47,10 @@ export async function POST(req: Request) {
       if (!PROVIDER_IDS.has(provider) || !model) throw new RequestError("Pick a provider and a model for this chat.", 400);
       const l = await latchReason(uid);
       if (l) return NextResponse.json({ ok: false, latched: true, until: l.until, error: l.text }, { status: 429 });
-      const active = (await S.listRuns(uid, 12)).filter((r) => r.status === "queued" || r.status === "running").length;
-      if (active >= MAX_ACTIVE) throw new RequestError(`You already have ${MAX_ACTIVE} tasks running. Wait for one to finish or stop one.`, 429);
+      const ownerUser = await isOwner(uid);
+      const cap = ownerUser ? MAX_ACTIVE_OWNER : MAX_ACTIVE;
+      const active = (await S.listRuns(uid, 30)).filter((r) => r.status === "queued" || r.status === "running").length;
+      if (active >= cap) throw new RequestError(`You already have ${cap} tasks running. Wait for one to finish or stop one.`, 429);
 
       // Only a reference to the key is stored. A plain key (not yet in the vault) gets a private vault slot that is deleted when the run ends.
       let keyRef = typeof raw.apiKey === "string" ? raw.apiKey : "";
@@ -59,7 +63,7 @@ export async function POST(req: Request) {
       const fallbacks = (Array.isArray(raw.fallbacks) ? (raw.fallbacks as Array<Record<string, unknown>>) : [])
         .filter((f) => PROVIDER_IDS.has(String(f?.provider)) && isPlaceholder(f?.apiKey) && typeof f?.model === "string")
         .slice(0, 3).map((f) => ({ provider: String(f.provider), model: str(f.model, 120), keyRef: String(f.apiKey) }));
-      const runId = await startRun(uid, { chatId, task, provider: provider as ProviderId, model, keyRef, fallbacks, tempKey, origin: origin(req), maxRounds: Math.min(80, Math.max(5, Number(body.maxRounds) || 40)), autoApprove: body.autoApprove === true });
+      const runId = await startRun(uid, { chatId, task, provider: provider as ProviderId, model, keyRef, fallbacks, tempKey, origin: origin(req), maxRounds: Math.min(ownerUser ? 300 : 80, Math.max(5, Number(body.maxRounds) || 40)), autoApprove: body.autoApprove === true });
       return NextResponse.json({ ok: true, runId });
     }
 
@@ -101,6 +105,29 @@ export async function POST(req: Request) {
     };
 
     if (action === "status") return NextResponse.json({ ok: true, run: view(run) });
+
+    // The open chat calls this when a run looks stuck (nothing happened for a while). It wakes the run again, so a reply never
+    // depends on the scheduler alone. Safe to call often: a slice that is really working holds a lease and is left alone.
+    if (action === "nudge") {
+      const now = Date.now();
+      if (run.status === "queued" || run.status === "running") {
+        const working = Boolean(run.lease && run.lease.until > now);
+        if (working || now - run.updatedAt < 20_000) return NextResponse.json({ ok: true, nudged: false });
+        await S.setQueue(uid, runId, "run", now + 90_000);
+        go();
+        return NextResponse.json({ ok: true, nudged: true });
+      }
+      if (run.status === "budget") {
+        const capped = run.error?.code === "cost";
+        if (capped && !(await isOwner(uid))) return NextResponse.json({ ok: true, nudged: false }); // a per-task cost stop waits for the owner's "Continue"
+        if (await latchReason(uid)) return NextResponse.json({ ok: true, nudged: false }); // still held (the reset time has not come)
+        await S.patchRun(uid, runId, { status: "queued", error: null, resumeAt: null, stopRequested: false, ...(capped ? { costExtra: (run.costExtra ?? 0) + 1 } : {}) });
+        await S.setQueue(uid, runId, "run", now + 90_000);
+        go();
+        return NextResponse.json({ ok: true, nudged: true });
+      }
+      return NextResponse.json({ ok: true, nudged: false });
+    }
 
     if (action === "stop") {
       if (run.status === "running") { await S.patchRun(uid, runId, { stopRequested: true }); return NextResponse.json({ ok: true, note: "Stopping after the current step." }); }
