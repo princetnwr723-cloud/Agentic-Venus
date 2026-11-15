@@ -158,7 +158,7 @@ const cat = async (sb: Awaited<ReturnType<typeof connect>>, path: string, max = 
 
 export async function POST(req: Request) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, { allowJob: "vpro" }); // Venus Pro server runs call this with their own job token
     const action = String(body.action || "");
     const e2bKey = String(body.e2bKey || "");
     if (!e2bKey) return fail("E2B key missing.", 400);
