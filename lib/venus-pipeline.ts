@@ -12,16 +12,42 @@ import { chapterBudgets, countWords, findLengthPlan, fitSecondsToWords, isDocume
 import { detectScript, enforceScript, scriptSeconds, splitScript, voiceModeOf, wordsOf, type ScriptInfo } from "@/lib/venus-script";
 import type { ProviderId } from "@/lib/providers";
 
+/**
+ * Everything the pipeline needs from "outside". In the browser all of it is optional (the defaults below are the browser's own:
+ * fetch with the owner's token, the Firestore client, the computers helper). The SERVER runner (lib/venus-run-server.ts) supplies
+ * its own versions, so the very same pipeline runs in the background with the tab closed.
+ */
+export type PipelineIO = {
+  api?: (path: string, body: Record<string, unknown>) => Promise<{ ok: boolean; status: number; data: any }>;
+  saveProject?: (uid: string, p: VenusProject) => Promise<void>;
+  hydrateProject?: (uid: string, p: VenusProject) => Promise<VenusProject>;
+  beat?: (uid: string, projectId: string, at: number) => Promise<void>;
+  agentComputer?: (uid: string, chatId: string) => Promise<string | null>;
+  firstChatId?: (uid: string) => Promise<string | undefined>;
+  acquire?: (env: PipelineEnv, chatId: string, slot: string) => Promise<string>;
+  release?: (env: PipelineEnv, sandboxId: string) => unknown;
+  touch?: (sandboxId: string, e2bKey: string) => void;
+  loadBrain?: (scope: { uid: string; chatId: string }) => Promise<Brain>;
+  /** server runs do not write to the chat's brain from here */
+  noReflect?: boolean;
+  /** a seeded random source: a video that is continued in the next slice must pick the same style again */
+  rand?: () => number;
+};
 export type PipelineEnv = {
   uid: string; token: () => Promise<string>; e2bKey: string;
   apiKeys: Partial<Record<ProviderId, string>>; pexels: boolean; sandboxId?: string;
+  io?: PipelineIO;
 };
 export type PipelineHooks = {
   log: (m: string) => void;
   progress: (p: { label: string; value: number | null } | null) => void;
   update: (p: VenusProject) => void;
   cancelled: () => boolean;
+  /** true when `cancelled()` is true only because the time slice of a server run is over: the run is NOT failed, it goes on in the next slice */
+  yielded?: () => boolean;
 };
+
+const rnd = (env: PipelineEnv) => (env.io?.rand ?? Math.random)();
 export type Run = { env: PipelineEnv; hooks: PipelineHooks; p: VenusProject; sid: string };
 
 export const STAGES: Stage[] = ["studio", "ingest", "script", "design", "assets", "voice", "preview", "review", "final", "done"];
@@ -65,7 +91,7 @@ const TWISTS = [
   "Alternate between very calm scenes and very energetic scenes.",
   "Use a strong horizontal rhythm: elements enter from alternating sides.",
 ];
-const rndSeed = () => Math.floor(Math.random() * 999_000) + 1;
+const rndSeed = (env: PipelineEnv) => Math.floor(rnd(env) * 999_000) + 1;
 
 /**
  * After the storyboard exists: in script mode the narration IS the script (word for word, repaired when the model changed it);
@@ -107,16 +133,24 @@ export function parseSb(p: VenusProject): Storyboard | null {
   try { return JSON.parse(p.storyboardJson) as Storyboard; } catch { return null; }
 }
 
-export async function studioCall(env: PipelineEnv, action: string, extra: Record<string, unknown> = {}) {
-  const res = await fetch("/api/venus/studio", {
+/** The one place where the pipeline talks to the server: the browser's fetch, or the server runner's own transport. */
+async function post(env: PipelineEnv, path: string, body: Record<string, unknown>, auth = true): Promise<{ ok: boolean; status: number; data: any }> {
+  if (env.io?.api) return env.io.api(path, body);
+  const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
-    body: JSON.stringify({ action, uid: env.uid, e2bKey: env.e2bKey, ...extra }),
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: "Bearer " + (await env.token()) } : {}) },
+    body: JSON.stringify(body),
   });
-  const data = await readJson(res);
-  if (!res.ok) throw new Error(data?.error || "Studio request failed.");
-  if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
-  return data;
+  return { ok: res.ok, status: res.status, data: await readJson(res) };
+}
+const touchPc = (env: PipelineEnv, id: string) => (env.io?.touch ?? touch)(id, env.e2bKey);
+const releasePc = (env: PipelineEnv, id: string) => (env.io?.release ? env.io.release(env, id) : releaseNow(env.e2bKey, id));
+
+export async function studioCall(env: PipelineEnv, action: string, extra: Record<string, unknown> = {}) {
+  const res = await post(env, "/api/venus/studio", { action, uid: env.uid, e2bKey: env.e2bKey, ...extra });
+  if (!res.ok) throw new Error(res.data?.error || "Studio request failed.");
+  if (typeof extra.sandboxId === "string") touchPc(env, extra.sandboxId);
+  return res.data;
 }
 
 /** Waits for the local voice model to be ready: no short limit. Stops only when there is no PC at all, or after 25 minutes. */
@@ -143,33 +177,24 @@ async function agentComputer(run: Run): Promise<string | null> {
   const chatId = run.p.chatId;
   if (!chatId) return null;
   try {
-    const snap = await getDoc(doc(db, "users", run.env.uid, "chats", chatId));
-    const id = (snap.data() as { computers?: Record<string, string> } | undefined)?.computers?.code;
+    const id = run.env.io?.agentComputer
+      ? await run.env.io.agentComputer(run.env.uid, chatId)
+      : ((await getDoc(doc(db, "users", run.env.uid, "chats", chatId))).data() as { computers?: Record<string, string> } | undefined)?.computers?.code;
     return id && id !== run.sid ? id : null;
   } catch { return null; }
 }
 
 async function pcCall(env: PipelineEnv, action: string, extra: Record<string, unknown>) {
-  const res = await fetch("/api/code/ws", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
-    body: JSON.stringify({ action, uid: env.uid, e2bKey: env.e2bKey, ...extra }),
-  });
-  const data = await readJson(res);
-  if (!res.ok) throw new Error(data?.error || "Computer request failed.");
-  if (typeof extra.sandboxId === "string") touch(extra.sandboxId, env.e2bKey);
-  return data;
+  const res = await post(env, "/api/code/ws", { action, uid: env.uid, e2bKey: env.e2bKey, ...extra });
+  if (!res.ok) throw new Error(res.data?.error || "Computer request failed.");
+  if (typeof extra.sandboxId === "string") touchPc(env, extra.sandboxId);
+  return res.data;
 }
 
 export async function signedUrl(env: PipelineEnv, path: string, download?: string): Promise<string> {
-  const res = await fetch("/api/venus/media", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
-    body: JSON.stringify({ action: "url", uid: env.uid, path, download }),
-  });
-  const data = await readJson(res);
-  if (!res.ok) throw new Error(data?.error || "Could not get the video link.");
-  return data.url as string;
+  const res = await post(env, "/api/venus/media", { action: "url", uid: env.uid, path, download });
+  if (!res.ok) throw new Error(res.data?.error || "Could not get the video link.");
+  return res.data.url as string;
 }
 
 // The planning calls (the plan, the script, the fitting of the narration) let the model THINK first: a better plan makes the whole video better.
@@ -180,11 +205,8 @@ async function aiCall(env: PipelineEnv, p: VenusProject, body: Record<string, un
   const apiKey = env.apiKeys[p.provider];
   if (!apiKey) throw new Error("No API key saved for the selected model's provider.");
   const send = async (power: boolean) => {
-    const res = await fetch("/api/venus/ai", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: p.provider, apiKey, model: p.model, ...(power ? { power: true } : {}), ...body }),
-    });
-    return { res, data: await readJson(res) };
+    const res = await post(env, "/api/venus/ai", { provider: p.provider, apiKey, model: p.model, ...(power ? { power: true } : {}), ...body }, false);
+    return { res, data: res.data };
   };
   const thinks = THINKING_KINDS.has(String(body.kind));
   let { res, data } = await send(thinks);
@@ -201,7 +223,7 @@ async function upd(run: Run, patch: Partial<VenusProject>) {
   run.p = { ...run.p, ...patch, updatedAt: Date.now() };
   run.hooks.update(run.p);
   beat(run);
-  await saveProject(run.env.uid, run.p).catch(() => {});
+  await (run.env.io?.saveProject ?? saveProject)(run.env.uid, run.p).catch(() => {});
 }
 const check = (run: Run) => { if (run.hooks.cancelled()) throw new Error("Stopped."); };
 
@@ -213,7 +235,8 @@ function beat(run: Run) {
   const now = Date.now();
   if (now - (beatTimes.get(run) ?? 0) < 20_000) return;
   beatTimes.set(run, now);
-  void setDoc(doc(db, "users", run.env.uid, "venusProjects", run.p.id, "code", "hb"), { at: now }).catch(() => {});
+  if (run.env.io?.beat) void run.env.io.beat(run.env.uid, run.p.id, now).catch(() => {});
+  else void setDoc(doc(db, "users", run.env.uid, "venusProjects", run.p.id, "code", "hb"), { at: now }).catch(() => {});
 }
 /** When this project was last worked on by a browser (0 = never). */
 export async function lastBeat(uid: string, projectId: string): Promise<number> {
@@ -224,14 +247,9 @@ export async function lastBeat(uid: string, projectId: string): Promise<number> 
 }
 
 async function mediaCall(env: PipelineEnv, action: string, extra: Record<string, unknown> = {}) {
-  const res = await fetch("/api/venus/media", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
-    body: JSON.stringify({ action, uid: env.uid, ...extra }),
-  });
-  const data = await readJson(res);
-  if (!res.ok) throw new Error(data?.error || "Media request failed.");
-  return data;
+  const res = await post(env, "/api/venus/media", { action, uid: env.uid, ...extra });
+  if (!res.ok) throw new Error(res.data?.error || "Media request failed.");
+  return res.data;
 }
 
 /** Waits for a background job on the studio computer. `map` turns the job's own percent into the overall progress bar. */
@@ -268,10 +286,10 @@ function fallbackScene(s: Scene): Scene {
 
 async function resolvePc(run: Run): Promise<string> {
   if (run.env.sandboxId) return run.env.sandboxId;
-  const chatId = run.p.chatId ?? (await listChats(run.env.uid))[0]?.id;
+  const chatId = run.p.chatId ?? (run.env.io?.firstChatId ? await run.env.io.firstChatId(run.env.uid) : (await listChats(run.env.uid))[0]?.id);
   if (!chatId) throw new Error("Create a chat first — Venus Pro gets its own studio computer under a chat.");
   if (run.p.chatId !== chatId) await upd(run, { chatId });
-  return acquire({ uid: run.env.uid, e2bKey: run.env.e2bKey }, chatId, "studio");
+  return run.env.io?.acquire ? run.env.io.acquire(run.env, chatId, "studio") : acquire({ uid: run.env.uid, e2bKey: run.env.e2bKey }, chatId, "studio");
 }
 
 export async function ensureStudio(run: Run) {
@@ -373,7 +391,7 @@ async function prepareRepair(run: Run, sbIn: Storyboard): Promise<Storyboard> {
 // ---------- Rendering ----------
 
 export async function renderKind(run: Run, kind: "preview" | "final" | "scene", opts: { sceneIndex?: number } = {}): Promise<string> {
-  run.p = await hydrateProject(run.env.uid, run.p); // long videos keep the scene code in separate documents
+  run.p = await (run.env.io?.hydrateProject ?? hydrateProject)(run.env.uid, run.p); // long videos keep the scene code in separate documents
   let sb = parseSb(run.p);
   if (!sb) throw new Error("No storyboard yet.");
   let repairs = 0;
@@ -504,7 +522,7 @@ function isDark(sb: Storyboard): boolean {
 // ---------- The full pipeline ----------
 
 export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start: VenusProject, from: Stage): Promise<VenusProject> {
-  const run = newRun(env, hooks, await hydrateProject(env.uid, start));
+  const run = newRun(env, hooks, await (env.io?.hydrateProject ?? hydrateProject)(env.uid, start));
   const todo = (s: Stage) => STAGES.indexOf(from) <= STAGES.indexOf(s);
   const say = hooks.log;
   // memory and skills belong to the chat this video was ordered in (nothing is shared between chats)
@@ -516,7 +534,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     say("🎬 Checking the studio computer…");
     hooks.progress({ label: "Computer", value: null });
     await ensureStudio(run);
-    brain = await loadBrain({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }).catch(() => brain);
+    brain = await (env.io?.loadBrain ?? loadBrain)({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }).catch(() => brain);
     say("✅ Ready.");
 
     // ---- edit mode: take in the user's own video (download, convert, find shots / silences / speech, sample frames) ----
@@ -573,8 +591,8 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
       const hindi = isHindiText(run.p.brief) || /\bhindi\b|हिंदी|हिन्दी/i.test(run.p.brief);
       if (docu && run.p.docu !== true) await upd(run, { docu: true });
       if (docu) say("🎞️ Documentary mode: a fact sheet first, then the script with a word budget, real pictures and charts" + (voiceArg !== false ? ", and a voice-over." : "."));
-      const style = STYLES[Math.floor(Math.random() * STYLES.length)];
-      const twist = TWISTS[Math.floor(Math.random() * TWISTS.length)];
+      const style = STYLES[Math.floor(rnd(env) * STYLES.length)];
+      const twist = TWISTS[Math.floor(rnd(env) * TWISTS.length)];
       const agentSid = run.p.mode === "edit" ? null : await agentComputer(run);
       const files = agentSid ? (((await pcCall(env, "listassets", { sandboxId: agentSid }).catch(() => ({ files: [] as string[] }))).files ?? []) as string[]) : [];
       const memory = brainPrompt(brain, run.p.brief, { noSkills: true });
@@ -633,7 +651,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
           if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, b); }
           if (!r.storyboard) throw new Error(r.error || "Could not plan the edit.");
           const sbNew = r.storyboard as Storyboard;
-          sbNew.seed = rndSeed();
+          sbNew.seed = rndSeed(env);
           sbNew.source = ing.source;
           if (body.captions && an.transcript.length) sbNew.transcript = an.transcript;
           sbNew.scenes = sbNew.scenes.map((x) => (x.type === "clip" || x.useSource === true ? { ...x, video: ing.source.path } : x));
@@ -755,7 +773,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         const all = parts.flat();
         const total = chapters.reduce((a, c) => a + c.seconds, 0);
         const sbNew = sanitizeStoryboard({ ...styleLock, title: o.title, scenes: all }, { aspect: run.p.aspect, theme: run.p.theme, captions: run.p.captions, maxSeconds: Math.max(run.p.seconds, total) * 1.05, maxScenes: 450 });
-        sbNew.seed = rndSeed();
+        sbNew.seed = rndSeed(env);
         if (!scriptInfo) { const stretched = speaks ? fitSecondsToWords(sbNew, hindi) : stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""}` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""}`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
@@ -781,7 +799,7 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
         if (!r.storyboard) { say("First attempt failed — trying again…"); r = await aiCall(env, run.p, body); }
         if (!r.storyboard) throw new Error(r.error || "Could not create the storyboard.");
         const sbNew = r.storyboard as Storyboard;
-        sbNew.seed = rndSeed();
+        sbNew.seed = rndSeed(env);
         if (!scriptInfo) { const stretched = voiceArg !== false && sbNew.scenes.some((x) => narrationOf(x)) ? fitSecondsToWords(sbNew, hindi) : stretchTo(sbNew, run.p.seconds); sbNew.scenes = stretched.scenes; }
         sbNew.concept = (aiOwn ? `${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.` : `${style[0]} — ${style[1]}. ${twist} ${sbNew.concept ?? ""} Give every scene its own composition; never reuse one layout.`).slice(0, 600);
         if (aiOwn) sbNew.scenes = sbNew.scenes.map((x) => (x.type === "custom" && x.bg === undefined ? ({ ...x, bg: "none" } as Scene) : x)); // the scene paints its own world
@@ -992,17 +1010,19 @@ export async function runPipeline(env: PipelineEnv, hooks: PipelineHooks, start:
     hooks.progress(null);
     say("🎉 Your video is ready!");
 
-    reflect({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }, { apiKeys: env.apiKeys, provider: run.p.provider, model: run.p.model }, brain, {
+    if (!env.io?.noReflect) reflect({ uid: env.uid, chatId: run.p.chatId ?? scope.chatId }, { apiKeys: env.apiKeys, provider: run.p.provider, model: run.p.model }, brain, {
       task: `Make a video: ${run.p.brief}`,
       outcome: `Finished a ${run.p.seconds}s ${run.p.aspect} video "${run.p.title}" (AI design).`,
     }).then((l) => { if (l.length) say("🧠 Learned: " + l.join("; ")); }).catch(() => {});
   } catch (e) {
+    // the time slice of a server run is over: nothing failed. The project is saved, the computer stays on, the next slice goes on.
+    if (hooks.yielded?.()) { await upd(run, { status: "running" }).catch(() => {}); hooks.progress(null); return run.p; }
     const msg = e instanceof Error ? e.message : "The pipeline failed.";
     say("⚠️ " + msg);
     await upd(run, { status: "error", error: msg });
     hooks.progress(null);
   }
-  if (run.sid) void releaseNow(env.e2bKey, run.sid); // work is over → switch the studio computer off
+  if (run.sid) void releasePc(env, run.sid); // work is over → switch the studio computer off
   return run.p;
 }
 
@@ -1060,15 +1080,11 @@ export async function analyzeVideoTemplate(
     if (!r.template) { say("First attempt failed — trying again…"); r = await aiCall(env, p, body); }
     if (!r.template) throw new Error(r.error || "The model did not return a template.");
     hooks.progress({ label: "Saving the template", value: null });
-    const res2 = await fetch("/api/venus/template", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await env.token()) },
-      body: JSON.stringify({
-        action: "save", uid: env.uid, chatId: o.chatId, template: r.template, name: o.name, category: o.category, sourceName: o.source.name, sourceSeconds: an.duration,
-        aspect: an.height > an.width ? "9:16" : an.width === an.height ? "1:1" : "16:9",
-      }),
+    const res2 = await post(env, "/api/venus/template", {
+      action: "save", uid: env.uid, chatId: o.chatId, template: r.template, name: o.name, category: o.category, sourceName: o.source.name, sourceSeconds: an.duration,
+      aspect: an.height > an.width ? "9:16" : an.width === an.height ? "1:1" : "16:9",
     });
-    const saved = await readJson(res2);
+    const saved = res2.data;
     if (!res2.ok) throw new Error(saved?.error || "The template could not be saved.");
     hooks.progress(null);
     return { template: saved.template as VideoTemplate, skill: (saved.skill as string | null) ?? null };
@@ -1080,7 +1096,7 @@ export async function analyzeVideoTemplate(
   } finally {
     if (run.sid) {
       await studioCall(env, "forget", { sandboxId: run.sid, projectId: p.id }).catch(() => null); // the big video is not kept on the studio computer
-      void releaseNow(env.e2bKey, run.sid);
+      void releasePc(env, run.sid);
     }
   }
 }
