@@ -27,6 +27,8 @@ export type VenusProject = {
   minSeconds?: number; maxSeconds?: number;
   /** The brief is a documentary / explainer: it gets the documentary craft (fact sheet, word budgets, real pictures, a voice-over). */
   docu?: boolean;
+  /** A server run owns this video (it keeps going with the tab closed): browsers must not "resume" it a second time. */
+  server?: boolean;
 };
 
 const CHUNK_BYTES = 600_000;
