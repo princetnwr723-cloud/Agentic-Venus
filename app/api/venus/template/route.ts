@@ -17,7 +17,7 @@ const cleanId = (v: unknown) => String(v ?? "").replace(/[^A-Za-z0-9_-]/g, "").s
 
 export async function POST(req: Request) {
   try {
-    const body = await readBody(req);
+    const body = await readBody(req, { allowJob: "vpro" }); // Venus Pro server runs call this with their own job token
     const uid = String(body.uid);
     const action = String(body.action || "");
 
