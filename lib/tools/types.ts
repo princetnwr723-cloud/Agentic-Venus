@@ -13,4 +13,6 @@ export type ToolResult = {
 export type ToolCtx = {
   uid: string; chatId: string; save: (key: string, value: string) => Promise<void>;
   baseUrl?: string; origin?: string;
+  /** the model this run uses (a tool that starts more AI work, like a video, uses the same one) */
+  model?: { provider: string; model: string };
 };
