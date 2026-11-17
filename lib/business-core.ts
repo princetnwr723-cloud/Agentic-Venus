@@ -78,7 +78,6 @@ export const clip = (s: string, n: number) => (s.length > n ? s.slice(0, Math.ma
 export const oneLine = (s: string, n: number) => clip(String(s ?? "").replace(/\s+/g, " ").trim(), n);
 
 /** The first {...} block of a model reply, parsed. Models often wrap JSON in prose or code fences. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseJson(reply: string): any {
   const a = reply.indexOf("{"), b = reply.lastIndexOf("}");
   if (a < 0 || b <= a) return null;
