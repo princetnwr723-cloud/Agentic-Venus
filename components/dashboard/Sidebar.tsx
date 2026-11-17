@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Briefcase, Key, LogOut, MapPin, Menu, Moon, Plus, Search, Settings, Sun, User, X } from "lucide-react";
+import { Key, LogOut, MapPin, Menu, Moon, Plus, Search, Settings, Sun, User, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Logo from "@/components/Logo";
 import { byRecent, type Chat } from "@/lib/chats";
@@ -130,17 +130,6 @@ export default function Sidebar({
           >
             <MapPin size={15} className="text-avatar-teal" /> Vmaps
             <span className="ml-auto text-[11px] text-faint">maps &amp; leads</span>
-          </button>
-        </div>
-
-        <div className="px-4 pb-2">
-          <button
-            type="button"
-            onClick={() => { closeDrawer(); router.push("/business"); }}
-            className="press flex w-full items-center gap-2.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-left text-sm text-ink md:rounded-lg md:border-line md:bg-bg md:py-2"
-          >
-            <Briefcase size={15} className="text-gold" /> Business Hub
-            <span className="ml-auto text-[11px] text-faint">team for your business</span>
           </button>
         </div>
 
