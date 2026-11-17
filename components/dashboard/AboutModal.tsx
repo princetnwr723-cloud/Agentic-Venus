@@ -6,6 +6,7 @@ import { Check, Loader2, Moon, Sun, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { useProfile, shownName, type Profile } from "@/lib/profile";
 import { useTheme } from "@/lib/theme";
+import { DEFAULT_HEADER, HEADER_BUTTONS, setHeaderButtons, useHeaderButtons } from "@/lib/header-prefs";
 
 const FIELDS: Array<[keyof Pick<Profile, "name" | "phone" | "company" | "role" | "location" | "website">, string, string, string]> = [
   ["name", "Name", "Your name", "text"], ["phone", "Mobile number", "+91 98765 43210", "tel"], ["company", "Company", "Where you work", "text"],
@@ -16,6 +17,7 @@ export default function AboutModal({ open, onClose }: { open: boolean; onClose: 
   const { user } = useAuth();
   const { profile, reload, save } = useProfile();
   const [theme, setTheme] = useTheme();
+  const headerKeys = useHeaderButtons();
   const [draft, setDraft] = useState<Profile>(profile);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -54,6 +56,20 @@ export default function AboutModal({ open, onClose }: { open: boolean; onClose: 
             <button key={k} type="button" onClick={() => setTheme(k)} aria-pressed={theme === k} className={`flex items-center justify-center gap-2 rounded-lg border py-2.5 text-sm transition-colors ${theme === k ? "border-gold bg-goldSoft text-ink" : "border-line text-muted hover:text-ink"}`}>{icon}{label}{theme === k && <Check size={14} />}</button>
           ))}
         </div>
+
+        <p className="mb-1 text-xs font-medium uppercase tracking-wider text-faint">Header buttons</p>
+        <p className="mb-2 text-[11px] text-muted">Pick what shows on the dashboard header. The rest stay in the “…” menu.</p>
+        <div className="mb-2 grid grid-cols-2 gap-2">
+          {HEADER_BUTTONS.map((b) => {
+            const on = headerKeys.includes(b.key);
+            return (
+              <button key={b.key} type="button" aria-pressed={on} onClick={() => setHeaderButtons(on ? headerKeys.filter((k) => k !== b.key) : [...headerKeys, b.key])} className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-colors ${on ? "border-gold bg-goldSoft text-ink" : "border-line text-muted hover:text-ink"}`}>
+                <span className="min-w-0 truncate">{b.label}</span>{on && <Check size={13} className="shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+        <button type="button" onClick={() => setHeaderButtons(DEFAULT_HEADER)} className="mb-5 text-[11px] text-faint underline hover:text-muted">Reset to default</button>
 
         <p className="mb-2 text-xs font-medium uppercase tracking-wider text-faint">About you</p>
         <div className="space-y-3">
