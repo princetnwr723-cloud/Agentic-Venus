@@ -29,8 +29,9 @@ export const emptyProfile = (): BizProfile => ({
 
 export type Lead = { name: string; why: string; website?: string; contact?: string; source?: string };
 
-export type BizTool = "think" | "research" | "leads";
-export type BizMember = { id: string; name: string; title: string; color: AvatarColor; tool: BizTool; skill: string; drafts?: boolean };
+/** think/research/leads run quickly in the open Hub; "agent" members run as background server agents with ALL tools (Cloud PC, Venus Code, Venus Pro, mail, routines...). */
+export type BizTool = "think" | "research" | "leads" | "agent";
+export type BizMember = { id: string; name: string; title: string; color: AvatarColor; tool: BizTool; skill: string; drafts?: boolean; focus?: string };
 
 export const BIZ_TEAM: BizMember[] = [
   { id: "chief", name: "Chief", title: "Team lead", color: "amber", tool: "think", skill: "Understands the business, splits goals into steps, hands work to the right teammate and reports back in one clear message." },
@@ -43,6 +44,10 @@ export const BIZ_TEAM: BizMember[] = [
   { id: "ledger", name: "Ledger", title: "Pricing & offers", color: "amber", tool: "think", skill: "Reviews prices, margins and offers and suggests packages and discounts with clear assumptions." },
   { id: "atlas", name: "Atlas", title: "Operations", color: "violet", tool: "think", skill: "Turns work into checklists, SOPs, schedules and follow-up routines the business can repeat." },
   { id: "lingo", name: "Lingo", title: "Translator", color: "sky", tool: "think", drafts: true, skill: "Translates and localises messages and pages naturally, keeping tone and meaning." },
+  { id: "hunter", name: "Hunter", title: "Computer operator", color: "teal", tool: "agent", skill: "Works on the Cloud PC with a real browser: finds contacts in directories, fills forms, logs in with your saved logins, downloads files and collects data into sheets.", focus: "Use the Cloud PC (computer tools) for this job." },
+  { id: "forge", name: "Forge", title: "Website & app builder", color: "amber", tool: "agent", skill: "Builds and changes websites and apps with the coding tools (Venus Code) and reports the link or the files.", focus: "Use the coding and repository tools to build or change the site or app, then report the link or the files." },
+  { id: "frame", name: "Frame", title: "Video producer", color: "violet", tool: "agent", skill: "Makes motion-graphics and short videos with Venus Pro and returns the finished video link.", focus: "Use the Venus video tools to make the video, then return the link." },
+  { id: "clock", name: "Clock", title: "Scheduler (routines)", color: "sage", tool: "agent", skill: "Sets up recurring work with routines (cron): weekly lead hunts, daily reports, follow-up reminders.", focus: "Use the routine tools to create or change the recurring routines for this chat, then list what is now scheduled." },
 ];
 export const memberById = (id: unknown): BizMember | undefined => BIZ_TEAM.find((m) => m.id === id);
 export const DEFAULT_ROSTER = ["chief", "scout", "closer", "lens", "care", "quill"];
@@ -62,7 +67,9 @@ export type Msg = {
 export type StepStatus = "queued" | "running" | "done" | "failed" | "skipped";
 export type RunStep = { i: number; member: string; task: string; after: number[]; status: StepStatus; note?: string };
 export type BizRun = { id: string; goal: string; status: "planning" | "running" | "done" | "partial" | "failed"; steps: RunStep[]; startedAt: number; endedAt?: number };
-export type BizDoc = { profile: BizProfile; team: string[]; msgs: Msg[]; working: Record<string, string>; leads: Lead[]; run?: BizRun; updatedAt: number };
+export type BizDoc = { profile: BizProfile; team: string[]; msgs: Msg[]; working: Record<string, string>; leads: Lead[]; run?: BizRun; /** the dashboard chat the background agents work in (connectors, Cloud PC, results) */ chatId?: string; updatedAt: number };
+/** What the SERVER writes while the team works in the background (a second document, so the browser and the server never overwrite each other). */
+export type BgDoc = { msgs: Msg[]; run?: BizRun; updatedAt: number };
 export type PlanStep = { member: string; task: string; after: number[] };
 
 // ---------- small text helpers ----------
@@ -71,6 +78,7 @@ export const clip = (s: string, n: number) => (s.length > n ? s.slice(0, Math.ma
 export const oneLine = (s: string, n: number) => clip(String(s ?? "").replace(/\s+/g, " ").trim(), n);
 
 /** The first {...} block of a model reply, parsed. Models often wrap JSON in prose or code fences. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseJson(reply: string): any {
   const a = reply.indexOf("{"), b = reply.lastIndexOf("}");
   if (a < 0 || b <= a) return null;
@@ -135,7 +143,7 @@ export const persona = (m: BizMember, p: BizProfile) =>
 export function sanitizeRoster(raw: unknown): string[] {
   const list = raw && typeof raw === "object" && Array.isArray((raw as { members?: unknown }).members) ? (raw as { members: unknown[] }).members : [];
   const ids = Array.from(new Set(list.map((x) => String(x).trim().toLowerCase()))).filter((x) => Boolean(memberById(x)) && x !== "chief");
-  const team = ["chief", ...ids].slice(0, 7);
+  const team = ["chief", ...ids].slice(0, 8);
   return team.length >= 4 ? team : [...DEFAULT_ROSTER];
 }
 
@@ -197,3 +205,78 @@ const csvCell = (v: string | undefined) => {
 };
 export const leadsCsv = (leads: Lead[]) =>
   ["Name,Why it fits,Website,Contact,Source", ...leads.map((l) => [l.name, l.why, l.website, l.contact, l.source].map(csvCell).join(","))].join("\n");
+
+// ---------- background jobs: the team keeps working on the server ----------
+
+export type JobStepStatus = "queued" | "running" | "done" | "failed" | "skipped";
+export type JobStep = {
+  i: number; member: string; task: string; after: number[]; status: JobStepStatus;
+  runId?: string; result?: string; note?: string; startedAt?: number; endedAt?: number; pendingNoted?: boolean;
+};
+export const MAX_PARALLEL_RUNS = 2;
+
+/** Which queued steps may start now (all their inputs are done, and not too many run at once) and which must be skipped (an input failed). */
+export function nextActions(steps: JobStep[], parallel = MAX_PARALLEL_RUNS): { start: number[]; skip: number[] } {
+  const st = steps.map((x) => x.status);
+  const skip: number[] = [];
+  for (let changed = true; changed;) {
+    changed = false;
+    steps.forEach((x, i) => {
+      if (st[i] === "queued" && x.after.some((k) => st[k] === "failed" || st[k] === "skipped")) { st[i] = "skipped"; skip.push(i); changed = true; }
+    });
+  }
+  let running = st.filter((x) => x === "running").length;
+  const start: number[] = [];
+  steps.forEach((x, i) => {
+    if (st[i] === "queued" && running < parallel && x.after.every((k) => st[k] === "done")) { start.push(i); running++; }
+  });
+  return { start, skip };
+}
+
+export function jobOutcome(steps: JobStep[]): "running" | "done" | "partial" | "failed" {
+  if (steps.some((x) => x.status === "queued" || x.status === "running")) return "running";
+  const done = steps.filter((x) => x.status === "done").length;
+  return done === steps.length ? "done" : done === 0 ? "failed" : "partial";
+}
+
+/** The step list the chat shows, made from the job. */
+export function jobRun(job: { runId: string; goal: string; steps: JobStep[]; createdAt: number; endedAt?: number }): BizRun {
+  const out = jobOutcome(job.steps);
+  return {
+    id: job.runId, goal: clip(job.goal, 300), status: out, startedAt: job.createdAt, ...(out !== "running" && job.endedAt ? { endedAt: job.endedAt } : {}),
+    steps: job.steps.map((x) => ({ i: x.i, member: x.member, task: oneLine(x.task, 220), after: x.after, status: x.status, ...(x.note ? { note: oneLine(x.note, 200) } : {}) })),
+  };
+}
+
+/** The instruction a background agent gets for one step (the server caps a task at 8000 characters). */
+export function stepTask(m: BizMember, step: JobStep, a: { goal: string; profile: BizProfile; results: Array<{ name: string; text: string }> }): string {
+  const deps = a.results.map((r, n) => `RESULT OF EARLIER STEP ${n + 1} (${r.name}):\n${clip(r.text, 1800)}`).join("\n\n");
+  return clip(
+    `You are ${m.name}, ${m.title} on the AI team of a business. ${m.skill}\n\nTHE BUSINESS\n${profileText(a.profile)}\n\nTHE TEAM'S OVERALL GOAL\n${clip(a.goal, 600)}\n\n` +
+    `YOUR STEP (step ${step.i + 1})\n${clip(step.task, 1800)}\n${m.focus ? `\n${m.focus}\n` : ""}${deps ? `\n${deps}\n` : ""}\n` +
+    `RULES: Never invent facts, names, prices or contact details. ${m.drafts ? "Your output is a DRAFT: never send or publish it; the owner approves first. " : ""}` +
+    `Anything that sends mail or posts is held for the owner's approval by the system, so just describe it. Finish with a short result for the team: what you did, links or file names, and a "Needs you" line if something is missing. Write in the language the owner uses.`,
+    7800,
+  );
+}
+
+export function reportText(goal: string, steps: JobStep[], nameOf: (id: string) => string): string {
+  const out = jobOutcome(steps);
+  const head = out === "done" ? "✅ Done" : out === "failed" ? "❌ Failed" : "⚠️ Partly done";
+  const lines = steps.map((x) => `- **${nameOf(x.member)}** (${x.status}): ${oneLine(x.status === "done" ? x.result ?? "" : x.note ?? "", 200) || "no result text"}`);
+  return `${head}: ${steps.filter((x) => x.status === "done").length} of ${steps.length} steps finished for “${oneLine(goal, 120)}”.\n\n${lines.join("\n")}\n\nThe full results are in the messages above and in the Business Hub chat in your dashboard.`;
+}
+
+// ---------- asking for the Hub from the normal chat ----------
+
+/** A message in the normal dashboard chat that is really about the business team. Returns what to pre-send in the Hub ("" = just open it), or null. */
+export function wantsBusinessHub(text: string): string | null {
+  const t = String(text ?? "").trim();
+  if (!t || t.length > 1500) return null;
+  const cmd = /^\/(?:business|biz)(?:\s+([\s\S]*))?$/i.exec(t);
+  if (cmd) return (cmd[1] ?? "").trim();
+  if (/^(what|kya|how|why|explain|kaise|kyu|kyun)\b/i.test(t)) return null;
+  if (/\bbusiness[\s-]?hub\b/i.test(t)) return t;
+  if (/\b(my|mera|meri|apna|apne|our|humara)\s+business\b/i.test(t) && /\b(team|set\s?up|setup|agents?|assemble|hub|bana\w*|bna\w*|banao|laga\w*)\b/i.test(t) && t.length <= 600) return t;
+  return null;
+}
