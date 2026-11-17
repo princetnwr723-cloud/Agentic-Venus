@@ -95,34 +95,37 @@ if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=""; fi
 
 # E2B/base-image startup may run apt-get in parallel. Never kill that process
 # or delete apt lock files: wait for the package manager to release its locks.
+apt_is_busy() {
+  # fuser run WITHOUT sudo cannot see root-owned processes, so it wrongly said "free" while a root apt-get held the lock.
+  # Check with sudo (when available) AND by process name, so either method alone is enough to notice a busy package manager.
+  if command -v fuser >/dev/null 2>&1; then
+    $SUDO fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1 && return 0
+  fi
+  pgrep -x 'apt-get|apt|dpkg|aptitude|unattended-upgr|apt.systemd.dai' >/dev/null 2>&1 && return 0
+  return 1
+}
+
 wait_for_apt() {
-  local attempt=0 max_attempts=36
+  local attempt=0 max_attempts=120
   while [ "$attempt" -lt "$max_attempts" ]; do
-    local busy=0
-    if command -v fuser >/dev/null 2>&1; then
-      fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1 && busy=1 || true
-    else
-      pgrep -x apt-get >/dev/null 2>&1 && busy=1 || true
-      pgrep -x dpkg >/dev/null 2>&1 && busy=1 || true
-    fi
-    if [ "$busy" -eq 0 ]; then return 0; fi
+    if ! apt_is_busy; then return 0; fi
     attempt=$((attempt + 1))
     echo "Package manager is busy; waiting for its locks (\${attempt}/\${max_attempts})..."
     sleep 5
   done
-  echo "ERROR: apt/dpkg locks remained busy for 180 seconds. No lock files were deleted and no package process was killed. Retry Studio setup after the other package operation finishes."
+  echo "ERROR: apt/dpkg locks remained busy for 10 minutes. No lock files were deleted and no package process was killed. Retry Studio setup after the other package operation finishes."
   return 1
 }
 
 apt_retry() {
-  local attempt=1 max_attempts=4
-  until wait_for_apt && $SUDO apt-get -o DPkg::Lock::Timeout=180 -o Acquire::Retries=3 "$@"; do
+  local attempt=1 max_attempts=6
+  until wait_for_apt && $SUDO apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 "$@"; do
     if [ "$attempt" -ge "$max_attempts" ]; then
       echo "ERROR: apt-get failed after \${max_attempts} attempts: $*"
       return 1
     fi
-    echo "apt-get attempt \${attempt} failed; waiting 10 seconds before retry..."
-    sleep 10
+    echo "apt-get attempt \${attempt} failed; waiting 15 seconds before retry..."
+    sleep 15
     attempt=$((attempt + 1))
   done
 }
@@ -164,7 +167,7 @@ npm --version
 npx --version
 
 log "3/6 Install browser runtime libraries"
-$SUDO apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 ||   $SUDO apt-get install -y libnss3 libgbm1 libasound2t64 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2
+apt_retry install -y libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 || apt_retry install -y libnss3 libgbm1 libasound2t64 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2
 
 log "4/6 Install Remotion and React"
 # Ensure npm is taken from the official runtime even in a non-login job shell.
@@ -191,6 +194,10 @@ export async function setupStudio(sb: Sb) {
   for (const [p, c] of Object.entries({ ...TEMPLATE_FILES, ...EXTRA_FILES })) files[`${DIR}/${p}`] = c;
   files[`${DIR}/.template-version`] = TEMPLATE_VERSION_FINAL;
   await writeFiles(sb, files);
+  // A second install running at the same time fights the first one over the apt lock ("held by process … (apt-get)").
+  // If an install is already running, let it finish instead of starting another one.
+  const running = await exec(sb, `pgrep -f '/tmp/jobs/install.sh' >/dev/null 2>&1 && [ ! -f /tmp/jobs/install.exit ] && echo running || echo idle`, 8_000);
+  if (running.stdout.includes("running")) return;
   await startJob(sb, "install", INSTALL_SCRIPT);
 }
 
