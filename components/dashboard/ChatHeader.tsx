@@ -16,10 +16,12 @@ import {
   MapPin,
   MoreHorizontal,
   Plug,
+  Settings2,
   User,
   Users,
 } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
+import AboutModal from "@/components/dashboard/AboutModal";
 import PaymentApprovals from "@/components/dashboard/PaymentApprovals";
 import DeckStudio from "@/components/decks/DeckStudio";
 import { DeckIcon } from "@/components/icons";
@@ -27,6 +29,7 @@ import GlassSheet from "@/components/ui/GlassSheet";
 import { avatarFor, getActiveChat, useAnyActivity, useAvatarStore } from "@/lib/avatar-activity";
 import type { AvatarColor } from "@/lib/bots";
 import { openDrawer, useDashFlag, useIsMobile } from "@/lib/mobile-ui";
+import { useHeaderButtons } from "@/lib/header-prefs";
 
 /** Below this header width the less-used buttons move into the "More" menu, so nothing ever overlaps the avatar. */
 const COMPACT_BELOW = 720;
@@ -117,6 +120,7 @@ export default function ChatHeader({
   useAvatarStore();
   useDashFlag();
   const mobile = useIsMobile();
+  const shownKeys = useHeaderButtons();
   const router = useRouter();
   const shown = avatarFor(getActiveChat(), color);
   const working = busy || teamRunning;
@@ -127,6 +131,7 @@ export default function ChatHeader({
   const [menuOpen, setMenuOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [deckOpen, setDeckOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   // measure the header itself (not the screen): the chat column gets narrow when the computer panel is open
   useEffect(() => {
@@ -140,7 +145,7 @@ export default function ChatHeader({
     return () => ro.disconnect();
   }, []);
 
-  // the menu closes on an outside tap, on Escape, and as soon as the header is wide again
+  // the menu closes on an outside tap and on Escape
   useEffect(() => {
     if (!menuOpen) return;
     const onDown = (e: PointerEvent) => {
@@ -151,7 +156,6 @@ export default function ChatHeader({
     document.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
   }, [menuOpen]);
-  useEffect(() => { if (!compact) setMenuOpen(false); }, [compact]);
   useEffect(() => { if (!mobile) setSheet(false); }, [mobile]);
 
   const pcLabel = !hasComputer
@@ -184,8 +188,10 @@ export default function ChatHeader({
     },
   ];
 
-  const visible = compact ? items.filter((i) => i.pinned) : items;
-  const hidden = compact ? items.filter((i) => !i.pinned) : [];
+  // the owner picks the header buttons in About → "Header buttons"; the rest stay in the More menu
+  const onHeader = (i: Item) => shownKeys.includes(i.key) && (!compact || i.pinned);
+  const visible = items.filter(onHeader);
+  const hidden = items.filter((i) => !onHeader(i));
   const hiddenDot = hidden.some((i) => i.dot);
 
   // phone: the same actions, grouped by purpose inside one glass sheet
@@ -289,45 +295,53 @@ export default function ChatHeader({
           <div className="flex shrink-0 items-center justify-end gap-0.5">
             {visible.map((i) => <IconBtn key={i.key} item={i} />)}
 
-            {compact && (
-              <div ref={menuRef} className="relative">
-                <button
-                  type="button"
-                  onClick={() => setMenuOpen((v) => !v)}
-                  title="More"
-                  aria-label="More"
-                  aria-haspopup="menu"
-                  aria-expanded={menuOpen}
-                  className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-panel2 hover:text-ink active:scale-95 ${
-                    menuOpen ? "bg-panel2 text-ink" : "text-muted"
-                  }`}
-                >
-                  <MoreHorizontal size={18} />
-                  {hiddenDot && !menuOpen && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-gold" />}
-                </button>
+            <div ref={menuRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setMenuOpen((v) => !v)}
+                title="More"
+                aria-label="More"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-panel2 hover:text-ink active:scale-95 ${
+                  menuOpen ? "bg-panel2 text-ink" : "text-muted"
+                }`}
+              >
+                <MoreHorizontal size={18} />
+                {hiddenDot && !menuOpen && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-gold" />}
+              </button>
 
-                {menuOpen && (
-                  <div
-                    role="menu"
-                    className="absolute right-0 top-full z-50 mt-2 w-60 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl border border-line bg-panel p-1.5 shadow-2xl"
+              {menuOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-50 mt-2 w-60 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl border border-line bg-panel p-1.5 shadow-2xl"
+                >
+                  {hidden.map((i) => (
+                    <button
+                      key={i.key}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => { setMenuOpen(false); i.onClick(); }}
+                      className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-ink transition-colors hover:bg-panel2"
+                    >
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-muted">{i.icon}</span>
+                      <span className="min-w-0 flex-1 truncate">{i.label}</span>
+                      {i.dot && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold" />}
+                    </button>
+                  ))}
+                  {hidden.length > 0 && <div className="my-1 h-px bg-line" />}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
+                    className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-muted transition-colors hover:bg-panel2 hover:text-ink"
                   >
-                    {hidden.map((i) => (
-                      <button
-                        key={i.key}
-                        type="button"
-                        role="menuitem"
-                        onClick={() => { setMenuOpen(false); i.onClick(); }}
-                        className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-ink transition-colors hover:bg-panel2"
-                      >
-                        <span className="flex h-5 w-5 shrink-0 items-center justify-center text-muted">{i.icon}</span>
-                        <span className="min-w-0 flex-1 truncate">{i.label}</span>
-                        {i.dot && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center"><Settings2 size={16} /></span>
+                    <span className="min-w-0 flex-1 truncate">Customize header</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </header>
@@ -368,6 +382,7 @@ export default function ChatHeader({
         ))}
       </GlassSheet>
 
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
       <DeckStudio open={deckOpen} onClose={() => setDeckOpen(false)} />
     </>
   );
