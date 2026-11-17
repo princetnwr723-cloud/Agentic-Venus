@@ -1,12 +1,13 @@
-import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
+import { doc, getDoc, onSnapshot, runTransaction, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { fallbackChain, pickModel, type Role } from "@/lib/router";
+import { createChat } from "@/lib/chats";
 import { defaultProviderAndModel, readJson } from "@/lib/dashboard/helpers";
 import type { ProviderId } from "@/lib/providers";
 import {
   BIZ_TEAM, DEFAULT_ROSTER, PROFILE_FIELDS, PROFILE_KEYS, applyPatch, cleanPatch, clip, emptyProfile, isReady, memberById, mergeLeads,
   oneLine, parseJson, persona, profileText, sanitizePlan, sanitizeRoster, validateLeads,
-  type BizDoc, type BizMember, type BizProfile, type BizRun, type Lead, type Msg, type PlanStep,
+  type BgDoc, type BizDoc, type BizMember, type BizProfile, type BizRun, type Lead, type Msg, type PlanStep,
 } from "@/lib/business-core";
 
 export * from "@/lib/business-core";
@@ -29,6 +30,7 @@ function normalize(raw: unknown): BizDoc {
     working: d.working && typeof d.working === "object" ? d.working : {},
     leads: Array.isArray(d.leads) ? d.leads : [],
     run: d.run,
+    ...(typeof d.chatId === "string" && d.chatId ? { chatId: d.chatId } : {}),
     updatedAt: Number(d.updatedAt) || 0,
   };
 }
@@ -58,8 +60,42 @@ export function updateBiz(uid: string, fn: (d: BizDoc) => void): Promise<void> {
 export const post = (uid: string, m: Omit<Msg, "id" | "at">) => updateBiz(uid, (d) => { d.msgs.push({ ...m, id: mid(), at: Date.now() }); });
 export const setWorking = (uid: string, id: string, text: string | null) =>
   updateBiz(uid, (d) => { if (text) d.working[id] = clip(text, 120); else delete d.working[id]; });
-export const approveMsg = (uid: string, id: string) => updateBiz(uid, (d) => { const m = d.msgs.find((x) => x.id === id); if (m) m.approved = true; });
-export const clearChat = (uid: string) => updateBiz(uid, (d) => { d.msgs = []; d.working = {}; delete d.run; });
+export async function approveMsg(uid: string, id: string): Promise<void> {
+  let found = false;
+  await updateBiz(uid, (d) => { const m = d.msgs.find((x) => x.id === id); if (m) { m.approved = true; found = true; } });
+  if (found) return;
+  // the message may come from the background team (the server's own document)
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(bgRef(uid));
+    const msgs = ((s.data() as Partial<BgDoc> | undefined)?.msgs ?? []).map((m) => (m.id === id ? { ...m, approved: true } : m));
+    tx.set(bgRef(uid), { msgs }, { merge: true });
+  }).catch((e) => console.error("Business Hub: could not approve", e));
+}
+export async function clearChat(uid: string): Promise<void> {
+  await updateBiz(uid, (d) => { d.msgs = []; d.working = {}; delete d.run; });
+  await setDoc(bgRef(uid), { msgs: [], updatedAt: Date.now() }).catch(() => {});
+}
+
+// ---------- the background team (written by the server: lib/business-server.ts) ----------
+
+const bgRef = (uid: string) => doc(db, "users", uid, "teams", "biz-bg");
+export const emptyBg = (): BgDoc => ({ msgs: [], updatedAt: 0 });
+export function watchBg(uid: string, cb: (d: BgDoc) => void) {
+  return onSnapshot(bgRef(uid), (s) => {
+    const d = (s.exists() ? s.data() : {}) as Partial<BgDoc>;
+    cb({ msgs: Array.isArray(d.msgs) ? d.msgs : [], run: d.run, updatedAt: Number(d.updatedAt) || 0 });
+  }, () => cb(emptyBg()));
+}
+
+async function bizApi(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const res = await fetch("/api/business", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await readJson(res);
+  if (!res.ok) throw new Error(d?.error || "The background team request failed.");
+  return d;
+}
+/** Moves running background jobs forward right now (the scheduler does the same every few minutes). */
+export const advanceBg = (): Promise<unknown> => bizApi({ action: "advance" }).catch(() => null);
+export const stopBg = (runId: string): Promise<unknown> => bizApi({ action: "stop", runId }).catch(() => null);
 
 const GREETING =
   "Hi, I'm **Chief**, the lead of your business team. Tell me about your business right here in chat: its name, what you sell or do, who your customers are, your city and your goals. " +
@@ -87,7 +123,7 @@ export const recoverStale = (uid: string) =>
 
 // ---------- the model ----------
 
-export type Llm = (system: string, prompt: string, opts?: { plan?: boolean }) => Promise<string>;
+export type Llm = ((system: string, prompt: string, opts?: { plan?: boolean }) => Promise<string>) & { keys: Partial<Record<ProviderId, string>> };
 type Keys = Partial<Record<ProviderId, string>>;
 export const hasAnyKey = (keys: Keys) => Object.values(keys).some(Boolean);
 
@@ -107,10 +143,35 @@ export function makeLlm(keys: Keys): Llm {
     if (!res.ok) throw new Error(data?.error || "The model request failed.");
     return String(data.reply ?? "").trim();
   };
-  return async (system, prompt, opts) => {
+  const fn = async (system: string, prompt: string, opts?: { plan?: boolean }): Promise<string> => {
     if (!opts?.plan) return call("act", system, prompt);
     try { return await call("plan", system, prompt); } catch { return call("act", system, prompt); } // a helper model your key cannot use must never break the team
   };
+  return Object.assign(fn, { keys });
+}
+
+/** The dashboard chat the background agents work in: it holds their connectors, the Cloud PC and their results. Made once. */
+async function ensureHubChat(uid: string, llm: Llm, biz: BizDoc): Promise<string> {
+  if (biz.chatId) {
+    const s = await getDoc(doc(db, "users", uid, "chats", biz.chatId)).catch(() => null);
+    if (s?.exists()) return biz.chatId;
+  }
+  const pick = defaultProviderAndModel(llm.keys);
+  const chat = await createChat(uid, { agentName: "Business Hub", agentColor: "amber", provider: pick.provider, model: pick.model });
+  await updateBiz(uid, (d) => { d.chatId = chat.id; });
+  return chat.id;
+}
+
+/** Hands the plan to the server: the agents run there, with all tools, even when this tab is closed. */
+async function launchBackground(a: { uid: string; llm: Llm; biz: BizDoc; goal: string; steps: PlanStep[]; profile: BizProfile }): Promise<void> {
+  const chatId = await ensureHubChat(a.uid, a.llm, a.biz);
+  const preferred = defaultProviderAndModel(a.llm.keys);
+  const pick = pickModel("act", a.llm.keys, preferred);
+  if (!pick.apiKey) throw new Error("No API key saved yet. Add one under API keys in the dashboard, then come back.");
+  await bizApi({
+    action: "launch", chatId, goal: a.goal, steps: a.steps, profile: a.profile,
+    provider: pick.provider, model: pick.model, apiKey: pick.apiKey, fallbacks: fallbackChain(a.llm.keys, pick.provider),
+  });
 }
 
 async function webCall(body: Record<string, unknown>): Promise<string> {
@@ -145,7 +206,7 @@ export async function assembleBizTeam(uid: string, llm: Llm, profile: BizProfile
     const roster = BIZ_TEAM.map((m) => `${m.id}|${m.name}|${m.title}|${m.skill}`).join("\n");
     const reply = await llm(
       persona(CHIEF, profile),
-      `Pick the specialists this business needs (4 to 7 members; Chief is added automatically). Choose by what the business really does and wants: for example a clinic needs support and local content, a shop needs ads and pricing, a B2B service needs leads and outreach. Reply with JSON only: {"members":["id", ...]}\n\nROSTER (id|name|title|skill):\n${roster}`,
+      `Pick the specialists this business needs (4 to 7 members; Chief is added automatically). Choose by what the business really does and wants: for example a clinic needs support and local content, a shop needs ads and pricing, a B2B service needs leads and outreach. Hunter (Cloud PC), Forge (websites and apps), Frame (videos) and Clock (routines) are background agents with real tools: pick them only when the business clearly needs that kind of work. Reply with JSON only: {"members":["id", ...]}\n\nROSTER (id|name|title|skill):\n${roster}`,
       { plan: true },
     );
     ids = sanitizeRoster(parseJson(reply));
@@ -223,6 +284,7 @@ export async function planGoal(llm: Llm, goal: string, profile: BizProfile, team
       `Split the goal into STEPS and give each step to the right teammate. Use ONLY these teammates (id|name|title|skill):\n${roster}\n\n` +
       `- Each step = {"member": id, "task": a complete instruction with every detail the teammate needs, "after": [numbers of EARLIER steps (starting at 0) whose result this step needs]}.\n` +
       `- Steps that do not need each other get "after": [] and run at the same time.\n- Finding customers or companies goes to the leads finder; messages and proposals go after the leads, never before.\n` +
+      `- Real computer or browser work (forms, logins, directories, downloads) goes to Hunter; building or changing a website or app goes to Forge; making a video goes to Frame; recurring work on a schedule goes to Clock. These background agents join the team automatically.\n` +
       `- A small job stays ONE step. Maximum 5 steps. Use a teammate only if the work needs that skill.\nReply with JSON only: {"steps":[...]}\n\nGOAL: ${goal}`,
       { plan: true },
     );
@@ -285,7 +347,7 @@ async function execStep(llm: Llm, who: BizMember, task: string, profile: BizProf
   return { ok: true, text, detail: text, leads: [] };
 }
 
-export async function runBizGoal(a: { uid: string; goal: string; llm: Llm; profile: BizProfile; team: BizMember[] }): Promise<void> {
+export async function runBizGoal(a: { uid: string; goal: string; llm: Llm; profile: BizProfile; team: BizMember[]; biz: BizDoc; background?: boolean }): Promise<void> {
   const { uid, llm, profile } = a;
   const team = a.team.length ? a.team : [CHIEF];
   const runId = Date.now().toString(36);
@@ -294,8 +356,23 @@ export async function runBizGoal(a: { uid: string; goal: string; llm: Llm; profi
   await setWorking(uid, "chief", "Planning the work…");
 
   try {
-    const steps = await planGoal(llm, a.goal, profile, team);
+    // the background agents (Cloud PC, code, video, routines) are brought in on demand, like the dashboard team does
+    const pool = [...team, ...BIZ_TEAM.filter((m) => m.tool === "agent" && !team.some((t) => t.id === m.id))];
+    const steps = await planGoal(llm, a.goal, profile, pool);
     const nameOf = (id: string) => memberById(id)?.name ?? id;
+    const joined = Array.from(new Set(steps.map((s) => s.member))).filter((id) => !team.some((t) => t.id === id));
+    if (joined.length) {
+      await updateBiz(uid, (d) => {
+        for (const id of joined) if (!d.team.includes(id)) d.team.push(id);
+        d.msgs.push({ id: mid(), at: Date.now(), kind: "agent", from: "chief", to: "team", tag: "note", text: `Joined for this goal: ${joined.map((id) => `${nameOf(id)} (${memberById(id)?.title ?? ""})`).join(", ")}.` });
+      });
+    }
+    if (a.background || steps.some((s) => memberById(s.member)?.tool === "agent")) {
+      await launchBackground({ uid, llm, biz: a.biz, goal: a.goal, steps, profile });
+      await updateBiz(uid, (d) => { delete d.run; });
+      await post(uid, { kind: "agent", from: "chief", to: "you", text: "The team is working **in the background** on the server, so you can close the app. Every handoff and result shows up here, and I post the final report when everyone is done." });
+      return;
+    }
     await patch((r) => { r.status = "running"; r.steps = steps.map((s, i) => ({ i, member: s.member, task: oneLine(s.task, 220), after: s.after, status: "queued" as const })); });
     await post(uid, {
       kind: "agent", from: "chief", to: "team", tag: "plan",
@@ -374,7 +451,7 @@ export async function runBizGoal(a: { uid: string; goal: string; llm: Llm; profi
 
 // ---------- one message from the owner ----------
 
-export async function ownerSays(a: { uid: string; text: string; llm: Llm; biz: BizDoc }): Promise<void> {
+export async function ownerSays(a: { uid: string; text: string; llm: Llm; biz: BizDoc; background?: boolean }): Promise<void> {
   const { uid, llm, biz } = a;
   const text = a.text.trim().slice(0, 4000);
   if (!text) return;
@@ -403,6 +480,6 @@ export async function ownerSays(a: { uid: string; text: string; llm: Llm; biz: B
     catch (e) { await post(uid, { kind: "system", text: `⚠️ Could not build the team: ${e instanceof Error ? e.message : "unknown error"}` }); }
   }
   if (out.goal && isReady(next) && teamIds.length) {
-    await runBizGoal({ uid, goal: out.goal, llm, profile: next, team: teamIds.map((id) => memberById(id)).filter((m): m is BizMember => Boolean(m)) });
+    await runBizGoal({ uid, goal: out.goal, llm, profile: next, biz, background: a.background, team: teamIds.map((id) => memberById(id)).filter((m): m is BizMember => Boolean(m)) });
   }
 }
