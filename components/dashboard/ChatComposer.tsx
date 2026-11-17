@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   AlertCircle, ArrowUp, AtSign, Check, CornerUpLeft, File as FileIcon, FileArchive, FileCode2, FileSpreadsheet, FileText,
   Film, Hand, Image as ImageIcon, Loader2, Music, Paperclip, Presentation, UploadCloud, X, Zap,
@@ -11,6 +12,7 @@ import BotAvatar from "@/components/BotAvatar";
 import type { AvatarColor } from "@/lib/bots";
 import { useAuth } from "@/lib/auth-context";
 import { deckIntent } from "@/lib/intent";
+import { wantsBusinessHub } from "@/lib/business-core";
 import { decksApi } from "@/components/decks/DeckViewer";
 
 export type Mentionable = { id: string; name: string; color: AvatarColor; hint: string; preview: string };
@@ -174,6 +176,7 @@ export default function ChatComposer({
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
   const { user } = useAuth();
+  const router = useRouter();
   const [deckBusy, setDeckBusy] = useState(false);
   const [deckSecs, setDeckSecs] = useState(0);
 
@@ -197,7 +200,7 @@ export default function ChatComposer({
     const look = rest.join("|").replace(/\s+/g, " ").trim();
     const n = /\b(\d{1,2})\s*(?:slides?|pages?)\b/i.exec(main);
     const slides = n ? Math.max(3, Math.min(24, Number(n[1]))) : 10;
-    const topic = main.replace(n?.[0] ?? "", " ").replace(/\s+/g, " ").trim();
+    const topic = main.replace(n?.[0] ?? " ", " ").replace(/\s+/g, " ").trim();
     if (topic.length < 3) {
       await post([{ role: "user", content: text }, { role: "assistant", content: "ℹ️ Write what the presentation is about after the command, for example:\n\n`/deck how our AI agents save 20 hours a week, for a client meeting`\n\nOptional: add a number of slides (`/deck AI for beginners 8 slides`) and a look after a `|` (`/deck my startup pitch | dark and bold like a keynote`)." }]);
       return;
@@ -212,6 +215,14 @@ export default function ChatComposer({
   }
 
   function submit(e: React.FormEvent) {
+    // "/business ..." or "set up a team for my business": the Business Hub opens, and what was typed is sent there as the first message
+    const hub = wantsBusinessHub(draft);
+    if (hub !== null && attach.length === 0 && !replyTo) {
+      e.preventDefault();
+      setDraft("");
+      router.push(`/business${hub ? `?say=${encodeURIComponent(hub.slice(0, 1500))}` : ""}`);
+      return;
+    }
     const c = /^\s*\/deck(?:\s+([\s\S]*))?$/i.exec(draft);
     if (c && chatId && user) {
       e.preventDefault();
@@ -450,7 +461,7 @@ export default function ChatComposer({
 
       {!draft && !attach.length && !replyTo && (
         <p className="mt-1.5 hidden truncate px-12 text-center text-[11px] text-faint sm:block">
-          @agent · /deck (or just ask for a presentation) · /code · /video · /team · /deploy · /recipe &nbsp;—&nbsp; Shift+Enter for a new line
+          @agent · /deck (or just ask for a presentation) · /code · /video · /team · /business · /deploy · /recipe &nbsp;—&nbsp; Shift+Enter for a new line
         </p>
       )}
     </div>
