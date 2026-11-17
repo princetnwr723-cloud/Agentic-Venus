@@ -5,15 +5,15 @@
 // results, drafts) shows up in this same chat, so nothing happens behind the owner's back.
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, ArrowRight, Briefcase, Building2, Check, CheckCircle2, Circle, CircleAlert, Copy, Download, LoaderCircle, Minus, RefreshCw, Send, Trash2, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Briefcase, Building2, Check, CheckCircle2, Circle, CircleAlert, Copy, Download, LoaderCircle, Minus, RefreshCw, Send, Square, Trash2, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Markdown from "@/components/Markdown";
 import { useAuth } from "@/lib/auth-context";
 import { useKeys } from "@/lib/keys-context";
 import {
-  BIZ_TEAM, PROFILE_FIELDS, approveMsg, assembleBizTeam, clearChat, completeness, emptyDoc, ensureGreeting, hasAnyKey, isReady, leadsCsv, makeLlm,
-  memberById, ownerSays, recoverStale, safeHref, saveProfileForm, toggleMember, watchBiz,
-  type BizDoc, type BizMember, type BizProfile, type Lead, type Msg, type RunStep,
+  BIZ_TEAM, PROFILE_FIELDS, advanceBg, approveMsg, assembleBizTeam, clearChat, completeness, emptyBg, emptyDoc, ensureGreeting, hasAnyKey, isReady, leadsCsv, makeLlm,
+  memberById, ownerSays, recoverStale, safeHref, saveProfileForm, stopBg, toggleMember, watchBg, watchBiz,
+  type BgDoc, type BizDoc, type BizMember, type BizProfile, type BizRun, type Lead, type Msg, type RunStep,
 } from "@/lib/business";
 
 const CHIEF = BIZ_TEAM[0];
@@ -142,13 +142,16 @@ function StepIcon({ s }: { s: RunStep["status"] }) {
   return <Circle size={13} className="text-faint" />;
 }
 
-function RunBanner({ biz }: { biz: BizDoc }) {
-  const r = biz.run;
+function RunBanner({ run: r, background, onStop }: { run?: BizRun; background: boolean; onStop: () => void }) {
   if (!r || (r.status !== "running" && r.status !== "planning")) return null;
   const done = r.steps.filter((s) => s.status === "done").length;
   return (
     <div className="mx-3 mb-2 rounded-xl border border-line bg-panel px-3 py-2 md:mx-5">
-      <p className="truncate text-xs text-ink"><span className="text-muted">Working on:</span> {r.goal}</p>
+      <div className="flex items-center gap-2">
+        <p className="min-w-0 flex-1 truncate text-xs text-ink"><span className="text-muted">Working on:</span> {r.goal}</p>
+        {background && <span className="shrink-0 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-400">Background: you can close the app</span>}
+        {background && <button type="button" onClick={onStop} aria-label="Stop the team" className="press inline-flex shrink-0 items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] text-muted hover:text-red-400"><Square size={10} /> Stop</button>}
+      </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
         {r.status === "planning" && <span className="inline-flex items-center gap-1.5 text-[11px] text-muted"><LoaderCircle size={12} className="animate-spin" /> Chief is planning…</span>}
         {r.steps.map((s) => (
@@ -213,7 +216,7 @@ function ProfilePanel(p: {
                   <li key={m.id} className="flex items-center gap-3 rounded-xl border border-line bg-panel2 px-3 py-2">
                     <BotAvatar color={m.color} size={30} animate={false} />
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm text-ink">{m.name} <span className="text-[11px] text-muted">· {m.title}</span></p>
+                      <p className="text-sm text-ink">{m.name} <span className="text-[11px] text-muted">· {m.title}</span>{m.tool === "agent" && <span className="ml-1.5 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] text-emerald-400">background · all tools</span>}</p>
                       <p className="line-clamp-2 text-[11px] text-faint">{m.skill}</p>
                     </div>
                     {locked ? <span className="text-[10px] text-faint">always</span> : (
@@ -247,6 +250,10 @@ export default function BusinessHub() {
   const [panel, setPanel] = useState(false);
   const [draft, setDraft] = useState<BizProfile>(emptyDoc().profile);
   const [dirty, setDirty] = useState(false);
+  const [bg, setBg] = useState<BgDoc>(emptyBg());
+  const [background, setBackground] = useState(false);
+  const [ready, setReady] = useState(false);
+  const sayRef = useRef<string | null>(null);
   const bizRef = useRef(biz);
   bizRef.current = biz;
   const endRef = useRef<HTMLDivElement>(null);
@@ -255,6 +262,10 @@ export default function BusinessHub() {
   const llm = useMemo(() => makeLlm(apiKeys), [apiKeys]);
   const keyOk = hasAnyKey(apiKeys);
   const profileKey = JSON.stringify(biz.profile);
+  // what the team says: the browser's own messages and the ones the server wrote while the team worked in the background
+  const msgs = useMemo(() => [...biz.msgs, ...bg.msgs].sort((a, b) => a.at - b.at), [biz.msgs, bg.msgs]);
+  const run = [biz.run, bg.run].filter((r): r is BizRun => Boolean(r)).sort((a, b) => b.startedAt - a.startedAt)[0];
+  const bgLive = bg.run?.status === "running" && run === bg.run;
 
   useEffect(() => {
     if (!uid) return;
@@ -262,17 +273,34 @@ export default function BusinessHub() {
     return watchBiz(uid, (d, ok) => { setBiz(d); setLoaded(ok); });
   }, [uid]);
 
+  useEffect(() => { if (!uid) return; return watchBg(uid, setBg); }, [uid]);
+
+  // a goal typed in the normal chat arrives here as ?say=...
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get("say");
+    if (q) { sayRef.current = q.slice(0, 1500); window.history.replaceState(null, "", window.location.pathname); }
+  }, []);
+
+  // while a background job runs, nudge it forward (the scheduler does the same every few minutes when the app is closed)
+  useEffect(() => {
+    if (!uid || !bgLive) return;
+    void advanceBg();
+    const t = setInterval(() => { void advanceBg(); }, 10_000);
+    return () => clearInterval(t);
+  }, [uid, bgLive]);
+
   // first time on this screen: close any run a closed tab left half-way, and let Chief say hello
   useEffect(() => {
     if (!uid || !loaded || started.current === uid) return;
     started.current = uid;
-    void recoverStale(uid).then(() => ensureGreeting(uid));
+    void recoverStale(uid).then(() => ensureGreeting(uid)).then(() => setReady(true));
   }, [uid, loaded]);
 
   useEffect(() => { if (!dirty) setDraft(bizRef.current.profile); }, [profileKey, dirty]);
 
+  const bgWorking = bgLive ? (bg.run?.steps ?? []).filter((x) => x.status === "running").map((x) => x.member) : [];
   const workingIds = busy ? Object.keys(biz.working) : [];
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [biz.msgs.length, busy, workingIds.join(",")]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [msgs.length, busy, workingIds.join(","), bgWorking.join(",")]);
   useEffect(() => {
     const el = taRef.current;
     if (!el) return;
@@ -285,8 +313,16 @@ export default function BusinessHub() {
     if (!t || busy || !uid || !keyOk) return;
     setInput("");
     setBusy(true);
-    try { await ownerSays({ uid, text: t, llm, biz: bizRef.current }); } finally { setBusy(false); }
+    try { await ownerSays({ uid, text: t, llm, biz: bizRef.current, background }); } finally { setBusy(false); }
   }
+
+  useEffect(() => {
+    if (!uid || !ready || !keyOk || busy || !sayRef.current) return;
+    const q = sayRef.current;
+    sayRef.current = null;
+    void send(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, ready, keyOk, busy]);
 
   async function saveProfile() {
     if (!uid || busy) return;
@@ -337,18 +373,24 @@ export default function BusinessHub() {
           <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-5">
             <div className="mx-auto flex max-w-3xl flex-col gap-3">
               {!loaded && <p className="py-8 text-center text-xs text-faint">Opening your hub…</p>}
-              {biz.msgs.map((m) => <Message key={m.id} m={m} uid={uid} />)}
+              {msgs.map((m) => <Message key={m.id} m={m} uid={uid} />)}
               {workingIds.map((id) => (
                 <div key={id} className="flex items-center gap-2.5 px-1 text-xs text-muted">
                   <BotAvatar color={who(id).color} size={24} working />
                   <span><b className="font-medium text-ink">{who(id).name}</b> · {biz.working[id]}</span>
                 </div>
               ))}
+              {bgWorking.filter((id) => !workingIds.includes(id)).map((id) => (
+                <div key={`bg-${id}`} className="flex items-center gap-2.5 px-1 text-xs text-muted">
+                  <BotAvatar color={who(id).color} size={24} working />
+                  <span><b className="font-medium text-ink">{who(id).name}</b> · working in the background</span>
+                </div>
+              ))}
               <div ref={endRef} />
             </div>
           </div>
 
-          <RunBanner biz={biz} />
+          <RunBanner run={run} background={bgLive} onStop={() => { if (run) void stopBg(run.id); }} />
 
           <div className="border-t border-line px-3 pt-3 pb-[calc(0.75rem+var(--sab))] md:px-5">
             <div className="mx-auto max-w-3xl">
@@ -359,6 +401,7 @@ export default function BusinessHub() {
               )}
               {team.length > 0 && !busy && (
                 <div className="mb-2 flex gap-1.5 overflow-x-auto pb-1">
+                  <button type="button" role="switch" aria-checked={background} onClick={() => setBackground((v) => !v)} title="Run the team on the server so it keeps working when you close the app" className={`press shrink-0 rounded-full border px-3 py-1 text-xs ${background ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-400" : "border-line text-muted hover:text-ink"}`}>{background ? "Background: on" : "Background: off"}</button>
                   {QUICK.map((q) => <button key={q.label} type="button" onClick={() => { setInput(q.text); taRef.current?.focus(); }} className="press shrink-0 rounded-full border border-line px-3 py-1 text-xs text-muted hover:text-ink">{q.label}</button>)}
                 </div>
               )}
