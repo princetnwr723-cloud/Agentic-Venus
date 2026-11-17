@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   BIZ_TEAM, DEFAULT_ROSTER, applyPatch, cleanPatch, completeness, emptyProfile, inText, isReady, leadsCsv, mergeLeads,
   parseJson, safeHref, sanitizePlan, sanitizeRoster, validateLeads, profileText,
+  nextActions, jobOutcome, jobRun, stepTask, reportText, wantsBusinessHub, memberById,
 } from '../../lib/business-core.ts';
 
 test('parseJson finds the JSON inside prose and code fences, and survives garbage', () => {
@@ -44,7 +45,7 @@ test('sanitizeRoster: only real ids, Chief first, falls back when too small', ()
   assert.deepEqual(sanitizeRoster({ members: ['scout'] }), DEFAULT_ROSTER);
   assert.deepEqual(sanitizeRoster(null), DEFAULT_ROSTER);
   const many = sanitizeRoster({ members: BIZ_TEAM.map((m) => m.id) });
-  assert.equal(many.length, 7);
+  assert.equal(many.length, 8);
   assert.equal(many[0], 'chief');
 });
 
@@ -108,5 +109,55 @@ test('mergeLeads dedupes by name; leadsCsv quotes cells and blocks formulas', ()
 test('team catalog: unique ids, chief first, every member has a skill', () => {
   assert.equal(BIZ_TEAM[0].id, 'chief');
   assert.equal(new Set(BIZ_TEAM.map((m) => m.id)).size, BIZ_TEAM.length);
-  for (const m of BIZ_TEAM) assert.ok(m.skill.length > 20 && ['think', 'research', 'leads'].includes(m.tool));
+  for (const m of BIZ_TEAM) assert.ok(m.skill.length > 20 && ['think', 'research', 'leads', 'agent'].includes(m.tool));
+});
+
+const S = (i, member, after, status = 'queued') => ({ i, member, task: 't' + i, after, status });
+
+test('nextActions: starts ready steps, respects the parallel limit, skips the children of a failed step', () => {
+  assert.deepEqual(nextActions([S(0, 'scout', []), S(1, 'closer', [0])]), { start: [0], skip: [] });
+  assert.deepEqual(nextActions([S(0, 'scout', [], 'done'), S(1, 'closer', [0])]), { start: [1], skip: [] });
+  assert.deepEqual(nextActions([S(0, 'a', []), S(1, 'b', []), S(2, 'c', [])]).start, [0, 1]); // two at a time
+  assert.deepEqual(nextActions([S(0, 'a', [], 'running'), S(1, 'b', []), S(2, 'c', [])]).start, [1]);
+  const r = nextActions([S(0, 'a', [], 'failed'), S(1, 'b', [0]), S(2, 'c', [1]), S(3, 'd', [])]);
+  assert.deepEqual(r.skip, [1, 2]);
+  assert.deepEqual(r.start, [3]);
+  assert.deepEqual(nextActions([S(0, 'a', [], 'running'), S(1, 'b', [0])]), { start: [], skip: [] });
+});
+
+test('jobOutcome and jobRun describe the job honestly', () => {
+  assert.equal(jobOutcome([S(0, 'a', [], 'done'), S(1, 'b', [0], 'running')]), 'running');
+  assert.equal(jobOutcome([S(0, 'a', [], 'done'), S(1, 'b', [0], 'done')]), 'done');
+  assert.equal(jobOutcome([S(0, 'a', [], 'done'), S(1, 'b', [0], 'failed')]), 'partial');
+  assert.equal(jobOutcome([S(0, 'a', [], 'failed'), S(1, 'b', [0], 'skipped')]), 'failed');
+  const run = jobRun({ runId: 'r1', goal: 'G', createdAt: 5, endedAt: 9, steps: [{ ...S(0, 'a', [], 'done'), note: 'ok' }] });
+  assert.equal(run.status, 'done');
+  assert.equal(run.endedAt, 9);
+  assert.equal(run.steps[0].note, 'ok');
+  assert.equal(jobRun({ runId: 'r1', goal: 'G', createdAt: 5, steps: [S(0, 'a', [])] }).endedAt, undefined);
+});
+
+test('stepTask carries the business, the focus, the earlier results and stays under the server limit', () => {
+  const hunter = memberById('hunter');
+  const t = stepTask(hunter, { ...S(1, 'hunter', [0]), task: 'collect emails' }, { goal: 'GOAL', profile: { ...emptyProfile(), name: 'Acme', offer: 'Shoes' }, results: [{ name: 'Scout', text: 'x'.repeat(5000) }] });
+  assert.match(t, /Acme/); assert.match(t, /Cloud PC/); assert.match(t, /EARLIER STEP 1 \(Scout\)/); assert.match(t, /step 2/);
+  assert.ok(t.length <= 7800);
+  assert.match(stepTask(memberById('closer'), S(0, 'closer', []), { goal: 'g', profile: emptyProfile(), results: [] }), /DRAFT/);
+});
+
+test('reportText counts finished steps and names each member', () => {
+  const r = reportText('Find leads', [{ ...S(0, 'scout', [], 'done'), result: 'Found 8' }, { ...S(1, 'closer', [0], 'skipped'), note: 'no leads' }], (id) => id.toUpperCase());
+  assert.match(r, /^⚠️ Partly done: 1 of 2/); assert.match(r, /\*\*SCOUT\*\* \(done\): Found 8/); assert.match(r, /\*\*CLOSER\*\* \(skipped\): no leads/);
+});
+
+test('wantsBusinessHub: asks for the Hub in the normal chat, and leaves other chat alone', () => {
+  assert.equal(wantsBusinessHub('/business'), '');
+  assert.equal(wantsBusinessHub('/biz find me 10 clients'), 'find me 10 clients');
+  assert.equal(wantsBusinessHub('open business hub'), 'open business hub');
+  assert.equal(wantsBusinessHub('mera business ke liye team bana do'), 'mera business ke liye team bana do');
+  assert.equal(wantsBusinessHub('set up a team for my business'), 'set up a team for my business');
+  assert.equal(wantsBusinessHub('what is a business hub'), null);
+  assert.equal(wantsBusinessHub('my business is doing well today'), null);
+  assert.equal(wantsBusinessHub('write a python script'), null);
+  assert.equal(wantsBusinessHub(''), null);
 });
