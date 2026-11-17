@@ -4,6 +4,7 @@ import { kick, store } from "@/lib/agent/worker";
 import { appBaseUrl } from "@/lib/voice-server";
 import { planTick } from "@/lib/agent/actions";
 import { tickVenus } from "@/lib/venus-run-server";
+import { tickBusiness } from "@/lib/business-server";
 import type { Reply } from "@/lib/agent/types";
 
 export const runtime = "nodejs";
@@ -14,6 +15,7 @@ export const maxDuration = 60;
 //   - a run held by a budget latch                 -> continues when the limit has reset
 //   - a takeover with no heartbeat / past 15 min   -> the screen is handed back to the agent
 //   - a card nobody answered for 24 hours          -> the agent is told, and wraps up
+//   - a Business Hub team job                       -> the next steps start, finished ones are collected
 export async function POST(req: Request) {
   const denied = cronDenied(req);
   if (denied) return denied;
@@ -50,7 +52,9 @@ export async function POST(req: Request) {
     }
     // Venus Pro videos that run on the server: wake the ones whose slice died, announce finished ones that were not announced
     const venus = await tickVenus(site, now).catch(() => ({ checked: 0, resumed: 0, posted: 0 }));
-    return NextResponse.json({ ok: true, ...out, venus });
+    // Business Hub teams working in the background: start the next steps, collect finished ones, post the report
+    const business = await tickBusiness(site, now).catch(() => ({ checked: 0 }));
+    return NextResponse.json({ ok: true, ...out, venus, business });
   } catch (err) {
     return NextResponse.json({ ok: false, ...out, error: err instanceof Error ? err.message : "Agent tick failed." }, { status: 500 });
   }
