@@ -10,6 +10,7 @@ import { PROVIDERS, providerMeta, type ProviderId } from "@/lib/providers";
 import { ASPECTS, type Aspect } from "@/lib/venus-schema";
 import { saveProject, type SourceRef, type VenusProject } from "@/lib/venus";
 import { runPipeline, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
+import { startVenusServer } from "@/lib/venus-run-client";
 import { findSeconds } from "@/lib/dashboard/helpers";
 import { findLengthPlan } from "@/lib/venus-length";
 
@@ -138,6 +139,14 @@ export default function StudioPlus() {
         provider, model, stage: "studio", status: "idle", createdAt: Date.now(), updatedAt: Date.now(),
         ...(mode === "edit" ? { mode: "edit" as const, source, keepAll, matchSource } : { mode: "make" as const }),
       };
+      // The SERVER makes the video (tab, phone or laptop may be closed). Only when the server cannot be reached at all does it run in this browser.
+      const started = await startVenusServer(user.uid, "", { ...p, origin: "venus" });
+      if (started.ok) {
+        setLog((l) => [...l, "🌙 Your video is being made on the server. You can close this tab: the finished video is posted in your newest chat and shows up in Venus Pro."]);
+        return;
+      }
+      if (started.status !== 0 && started.status < 500) throw new Error(started.error);
+      setLog((l) => [...l, "ℹ️ The server could not be reached, so the video runs in this tab. Keep it open."]);
       await saveProject(user.uid, p).catch(() => {});
       setCreatedId(pid);
       const hooks: PipelineHooks = {
