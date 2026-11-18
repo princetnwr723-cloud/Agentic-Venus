@@ -1,5 +1,5 @@
 import type { ToolSpec } from "./types";
-import { packPrompt } from "./pack";
+import { packPrompt } from "./pack/blurb";
 
 // Short "how to use it" notes for the services people connect most.
 const HINTS: Record<string, string> = {
