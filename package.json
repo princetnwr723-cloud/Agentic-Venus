@@ -13,7 +13,8 @@
     "eval:run": "node scripts/eval-run.mjs",
     "test": "node --test scripts/tests/*.test.mjs",
     "check": "npm run eval:check && npm test",
-    "vmaps:check": "node scripts/vmaps-check.mjs"
+    "vmaps:check": "node scripts/vmaps-check.mjs",
+    "eval:report": "node scripts/eval-report.mjs"
   },
   "dependencies": {
     "next": "14.2.15",
