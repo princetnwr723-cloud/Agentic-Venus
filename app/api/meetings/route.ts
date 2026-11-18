@@ -1,30 +1,29 @@
 import { NextResponse } from "next/server";
-import { readBody, requestStatus, RequestError } from "@/lib/request";
-import { getMeeting, joinMeeting, listMeetings, meetingsConfigured } from "@/lib/meetings-server";
+import { appBaseUrl } from "@/lib/voice-server";
+import { runAfter } from "@/lib/channels";
+import { verifyMeetingWebhook } from "@/lib/meetings-core";
+import { handleMeetingEvent, meetingsApiKey, webhookSecret, type MeetingEvent } from "@/lib/meetings-server";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
-// The owner's side of the meeting bot: send it into a call, list meetings, read the notes.
+// The notetaker service (Meeting BaaS) calls this when the bot joins, leaves, fails or the transcript is ready.
+// The URL is given to the service automatically when the bot is sent, so there is nothing to set up in a dashboard.
+// Without the secret token in the URL (or the service's API-key header) nothing happens: anybody could otherwise make the agent post "meeting notes".
 export async function POST(req: Request) {
-  try {
-    const body = await readBody(req);
-    const uid = String(body.uid);
-    switch (String(body.action || "list")) {
-      case "status": return NextResponse.json({ ok: true, configured: meetingsConfigured() });
-      case "join": {
-        const m = await joinMeeting(uid, { url: String(body.url ?? ""), chatId: body.chatId ? String(body.chatId) : undefined, title: String(body.title ?? "") });
-        return NextResponse.json({ ok: true, meeting: { ...m, url: "" } });
-      }
-      case "list": return NextResponse.json({ ok: true, meetings: await listMeetings(uid) });
-      case "get": {
-        const m = await getMeeting(uid, String(body.botId ?? ""));
-        if (!m) throw new RequestError("Meeting not found.", 404);
-        return NextResponse.json({ ok: true, meeting: m });
-      }
-      default: throw new RequestError("Unknown action.", 400);
-    }
-  } catch (err) {
-    return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : "Request failed." }, { status: requestStatus(err) });
-  }
+  const raw = await req.text();
+  let token = "";
+  try { token = new URL(req.url).searchParams.get("t") || ""; } catch { token = ""; }
+  const ok = verifyMeetingWebhook({
+    secret: webhookSecret(), apiKey: meetingsApiKey(), token,
+    headerKey: req.headers.get("x-meeting-baas-api-key") || "",
+  });
+  if (!ok) return new NextResponse("Forbidden", { status: 403 });
+  let ev: MeetingEvent = {};
+  try { ev = JSON.parse(raw); } catch { return NextResponse.json({ ok: true }); }
+  let site = "";
+  try { site = appBaseUrl(req); } catch { site = new URL(req.url).origin; }
+  // answer fast (the service retries slow endpoints); the notes are written in the background of this request
+  runAfter(handleMeetingEvent(ev, site).catch((e) => console.error("meeting webhook failed", e)));
+  return NextResponse.json({ ok: true });
 }
