@@ -1,6 +1,9 @@
 // The built-in Tool Pack: 1000+ small deterministic tools. These tests pin the answers that matter (money, tax, IDs, dates, leads).
 import test from "node:test";
 import assert from "node:assert/strict";
+import { packPrompt, PACK_PROMPT_MIN_TOOLS } from "../../lib/tools/pack/blurb.ts";
+import { RECIPES } from "../../lib/tools/pack/recipes.ts";
+import { FIELDS } from "../../lib/tools/pack/fields.ts";
 import { PACK, PACK_MAP, META_TOOLS, runPackTool, resolveAlias, packCount, suggest } from "../../lib/tools/pack/index.ts";
 
 const run = async (name, args = {}) => { const r = await runPackTool(name, args); assert.ok(r, `no tool ${name}`); return r; };
@@ -204,4 +207,12 @@ test("bad arguments never throw: they come back as a fixable message", async () 
     assert.equal(r.ok, false, n); assert.match(r.text, /Usage:/, n);
   }
   assert.equal(await runPackTool("nope.nothing", {}), null);
+});
+
+test("the prompt block tells the truth about the pack and imports nothing (client pages load prompt.ts)", () => {
+  assert.ok(packCount() >= PACK_PROMPT_MIN_TOOLS, `pack has ${packCount()}, blurb promises ${PACK_PROMPT_MIN_TOOLS}+`);
+  assert.ok(RECIPES.length >= 70, "blurb says 70+ recipes");
+  assert.ok(FIELDS.length >= 60, "blurb says 60+ playbooks");
+  assert.ok(PACK.filter((t) => t.family === "convert").length >= 1000);
+  assert.match(packPrompt(), /tools\.search/);
 });
