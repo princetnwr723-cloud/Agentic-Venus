@@ -1,8 +1,8 @@
-// Meetings: link checks, transcript normalising, notes parsing, who owns an item, webhook signatures.
+// Meetings: link checks, transcript normalising, notes parsing, who owns an item, webhook checks, bot status codes.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { cleanMeetingUrl, extractMeetingUrl, extractionPrompt, itemsForAgent, itemsToSignals, normalizeTranscript, notesMessage, parseMeetingNotes, speakersOf, transcriptToText, verifySvix } from "../../lib/meetings-core.ts";
+import { cleanMeetingUrl, extractMeetingUrl, extractionPrompt, itemsForAgent, itemsToSignals, normalizeTranscript, notesMessage, parseMeetingNotes, speakersOf, statusFromCode, transcriptToText, verifyMeetingWebhook, meetingWebhookToken, verifySvix } from "../../lib/meetings-core.ts";
 import { signalsToProposals, DEFAULT_SETTINGS } from "../../lib/watchers-core.ts";
 
 test("only real meeting links are accepted", () => {
@@ -79,4 +79,45 @@ test("Svix signature: valid, wrong body, old timestamp, wrong secret", () => {
   assert.equal(verifySvix({ secret, id, timestamp: ts, signature: sig, body, nowMs: now + 3600_000 }), false);
   assert.equal(verifySvix({ secret: "whsec_" + Buffer.from("other").toString("base64"), id, timestamp: ts, signature: sig, body, nowMs: now }), false);
   assert.equal(verifySvix({ secret: "", id, timestamp: ts, signature: sig, body, nowMs: now }), false);
+});
+
+test("Meeting BaaS transcript: word/start_time shape, wrapped shapes, merging", () => {
+  const baas = [
+    { speaker: "Priya", start_time: 1, words: [{ word: "I", start_time: 1, end_time: 1.1 }, { word: "will", start_time: 1.2, end_time: 1.4 }, { word: "send", start_time: 1.5, end_time: 1.7 }, { word: "it.", start_time: 1.8, end_time: 2 }] },
+    { speaker: "Priya", words: [{ word: "Friday", start_time: 6, end_time: 6.5 }] },
+    { speaker: "Raj", words: [{ word: "Ok", start_time: 200, end_time: 200.4 }] },
+  ];
+  const segs = normalizeTranscript(baas);
+  assert.equal(segs.length, 2);
+  assert.equal(segs[0].text, "I will send it. Friday");
+  assert.equal(segs[1].t, 200);
+  assert.equal(normalizeTranscript({ transcript: baas }).length, 2);
+  assert.equal(normalizeTranscript({ bot_data: { transcripts: baas } }).length, 2);
+  assert.deepEqual(normalizeTranscript({}), []);
+  assert.deepEqual(normalizeTranscript(null), []);
+});
+
+test("webhook check: URL token or the service's API-key header", () => {
+  const secret = "a-long-random-secret-value-1234567890", apiKey = "mb-key-123";
+  const token = meetingWebhookToken(secret);
+  assert.equal(token.length, 48);
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token, headerKey: "" }), true);
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token: "", headerKey: apiKey }), true);
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token: "x".repeat(48), headerKey: "" }), false);
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token: "", headerKey: "wrong" }), false);
+  assert.equal(verifyMeetingWebhook({ secret: "", apiKey: "", token, headerKey: "" }), false, "nothing configured = nothing accepted");
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token: "", headerKey: "" }), false);
+});
+
+test("bot status codes map to ours, unknown ones are ignored", () => {
+  assert.equal(statusFromCode("joining_call").status, "joining");
+  assert.equal(statusFromCode("in_waiting_room").status, "joining");
+  assert.equal(statusFromCode("in_call_recording").status, "in_call");
+  assert.equal(statusFromCode("in_call_not_recording").status, "in_call");
+  assert.equal(statusFromCode("call_ended").status, "ended");
+  assert.equal(statusFromCode("bot_rejected").status, "failed");
+  assert.equal(statusFromCode("waiting_room_timeout").status, "failed");
+  assert.equal(statusFromCode("something_new"), null);
+  assert.equal(statusFromCode(""), null);
+  assert.equal(statusFromCode(undefined), null);
 });
