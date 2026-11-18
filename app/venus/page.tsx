@@ -17,6 +17,7 @@ import {
   summarizeScene, totalFramesOf, type Aspect, type Scene, type Storyboard,
 } from "@/lib/venus-schema";
 import { deleteProject, listProjects, saveProject, type VenusProject } from "@/lib/venus";
+import { startVenusServer } from "@/lib/venus-run-client";
 import { ensureStudio, genCode, newRun, parseSb, regenVoice, renderKind, runPipeline, signedUrl, studioCall, type PipelineEnv, type PipelineHooks } from "@/lib/venus-pipeline";
 
 const TYPE_COLOR: Record<string, string> = {
@@ -323,6 +324,10 @@ export default function VenusPage() {
   async function createProject() {
     if (!user || !brief.trim()) return;
     const p: VenusProject = { id: "v" + Date.now().toString(36), title: brief.trim().slice(0, 48), brief: brief.trim(), seconds, aspect, theme: "midnight", voice: voice && Boolean(openaiKey), voiceName: "nova", captions: true, quality, review: true, design, music: true, origin: "venus", provider, model, stage: "studio", status: "idle", createdAt: Date.now(), updatedAt: Date.now() };
+    // The SERVER makes the video; the browser only watches. If it cannot be reached at all, the old in-tab run takes over.
+    const started = await startVenusServer(user.uid, "", p);
+    if (started.ok) { setLog(["🌙 Your video is being made on the server. You can close this tab: the finished video is posted in your newest chat and appears in your projects here."]); setBrief(""); return; }
+    if (started.status !== 0 && started.status < 500) { setLog([`⚠️ ${started.error}`]); return; }
     await saveProject(user.uid, p).catch(() => {});
     setProjects((prev) => [p, ...prev]); setActiveId(p.id); setBrief(""); setRunning(true); setLog([]); cancelRef.current = false;
     try { await runPipeline(env(), hooks(), p, "studio"); } finally { setRunning(false); setProgress(null); }
