@@ -1,6 +1,7 @@
-// Meetings, server side: sends a Recall.ai bot into Zoom / Google Meet / Teams / Webex, receives the "transcript is ready" webhook,
-// has the owner's agent write the notes, posts them to the chat and turns the owner's action items into proposals (the owner still
-// says yes or no to each one: see watchers-server.ts). Needs RECALL_API_KEY, RECALL_REGION and RECALL_WEBHOOK_SECRET (see .env.example).
+// Meetings, server side: sends a notetaker bot (Meeting BaaS) into Zoom / Google Meet / Teams, receives the "meeting is over, here is the
+// transcript" webhook, has the owner's agent write the notes, posts them to the chat and turns the owner's action items into proposals
+// (the owner still says yes or no to each one: see watchers-server.ts).
+// Needs ONE secret: MEETINGBAAS_API_KEY (see .env.example). MEETING_WEBHOOK_SECRET is optional (any long random text).
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider } from "@/lib/ai-providers-server";
@@ -8,8 +9,9 @@ import { loadAgent } from "@/lib/voice-calls";
 import { notifyOwner } from "@/lib/channels";
 import { audit } from "@/lib/audit";
 import { addProposal } from "@/lib/watchers-server";
+import { appBaseUrl } from "@/lib/voice-server";
 import { DEFAULT_SETTINGS, signalsToProposals } from "@/lib/watchers-core";
-import { cleanMeetingUrl, extractionPrompt, itemsForAgent, itemsToSignals, normalizeTranscript, notesMessage, parseMeetingNotes, speakersOf, transcriptToText, type MeetingNotes } from "@/lib/meetings-core";
+import { cleanMeetingUrl, extractionPrompt, itemsForAgent, itemsToSignals, meetingWebhookToken, normalizeTranscript, notesMessage, parseMeetingNotes, speakersOf, statusFromCode, transcriptToText, type MeetingNotes } from "@/lib/meetings-core";
 
 const db = () => getAdminDb();
 const meetings = () => db().collection("meetings");
@@ -21,41 +23,64 @@ export type MeetingDoc = {
   createdAt: number; updatedAt: number; note?: string; notes?: MeetingNotes; speakers?: string[]; proposalsSent?: number;
 };
 
-const region = () => (process.env.RECALL_REGION || "us-east-1").replace(/[^a-z0-9-]/gi, "");
-const base = () => `https://${region()}.recall.ai/api/v1`;
-export const meetingsConfigured = () => Boolean(process.env.RECALL_API_KEY);
+const API_BASE = "https://api.meetingbaas.com";
+const apiKey = () => String(process.env.MEETINGBAAS_API_KEY || process.env.MEETING_BAAS_API_KEY || "").trim();
+/** The secret that signs the webhook URL. Defaults to the API key, so no second setting is needed. */
+export const webhookSecret = () => String(process.env.MEETING_WEBHOOK_SECRET || "").trim() || apiKey();
+export const meetingsApiKey = apiKey;
+export const meetingsConfigured = () => Boolean(apiKey());
 const fail = (message: string, status = 400) => Object.assign(new Error(message), { status });
 
-/** Recall documents the bare key in the Authorization header; older accounts use "Token <key>". Try the documented form first. */
-async function recall(path: string, init: RequestInit = {}): Promise<Response> {
-  const key = process.env.RECALL_API_KEY || "";
-  if (!key) throw fail("The meeting bot is not set up on this server (RECALL_API_KEY is missing).", 503);
-  const go = (auth: string) => fetch(base() + path, { ...init, headers: { Authorization: auth, Accept: "application/json", "Content-Type": "application/json", ...(init.headers ?? {}) }, signal: AbortSignal.timeout(20_000) });
-  let r = await go(key);
-  if (r.status === 401 || r.status === 403) r = await go(`Token ${key}`);
-  return r;
+async function botApi(path: string, init: RequestInit = {}): Promise<Response> {
+  const key = apiKey();
+  if (!key) throw fail("The meeting bot is not set up on this server (MEETINGBAAS_API_KEY is missing).", 503);
+  return fetch(API_BASE + path, {
+    ...init,
+    headers: { "x-meeting-baas-api-key": key, Accept: "application/json", "Content-Type": "application/json", ...(init.headers ?? {}) },
+    signal: AbortSignal.timeout(20_000),
+  });
 }
 
-export async function joinMeeting(uid: string, a: { url: string; chatId?: string; title?: string; botName?: string }): Promise<MeetingDoc> {
+function errorText(j: Record<string, unknown>): string {
+  const v = j.message ?? j.error ?? j.detail ?? "";
+  const text = typeof v === "string" ? v : v ? JSON.stringify(v) : "";
+  return text.replace(/\s+/g, " ").slice(0, 160);
+}
+
+export async function joinMeeting(uid: string, a: { url: string; chatId?: string; title?: string; botName?: string; site?: string }): Promise<MeetingDoc> {
   const m = cleanMeetingUrl(a.url);
   if (!m) throw fail("That is not a Zoom, Google Meet, Microsoft Teams or Webex meeting link.");
+  if (m.platform === "webex") throw fail("The notetaker supports Zoom, Google Meet and Microsoft Teams links.");
+  if (!apiKey()) throw fail("The meeting bot is not set up on this server (MEETINGBAAS_API_KEY is missing).", 503);
+
+  let site = "";
+  try { site = a.site || appBaseUrl(); } catch { site = ""; }
+  if (!/^https:\/\//.test(site)) throw fail("Set NEXT_PUBLIC_APP_URL to your https domain, so the notetaker can report back when the meeting ends.", 503);
+
   let chatId = a.chatId || "";
   if (!chatId) chatId = (await loadAgent(uid)).chatId;
   const agent = await loadAgent(uid, chatId);
   const botName = String(a.botName || `${agent.name} (notetaker)`).slice(0, 80);
-  const res = await recall("/bot/", {
+  const webhook = `${site}/api/meetings/webhook?t=${meetingWebhookToken(webhookSecret())}`;
+
+  const res = await botApi("/bots", {
     method: "POST",
     body: JSON.stringify({
-      meeting_url: m.url, bot_name: botName, metadata: { uid, chatId },
-      recording_config: { transcript: { provider: { recallai_streaming: { mode: "prioritize_accuracy", language_code: "auto" } } } },
+      meeting_url: m.url, bot_name: botName, reserved: false,
+      webhook_url: webhook, extra: { uid, chatId },
     }),
   });
-  const j = (await res.json().catch(() => ({}))) as { id?: string; detail?: string };
-  if (!res.ok || !j.id) throw fail(`The meeting service refused the bot (HTTP ${res.status}${j.detail ? ": " + String(j.detail).slice(0, 120) : ""}).`, res.status === 401 ? 502 : 400);
+  const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const botId = String(j.bot_id ?? j.id ?? "");
+  if (!res.ok || !botId) {
+    const why = errorText(j);
+    const hint = res.status === 401 || res.status === 403 ? " Check MEETINGBAAS_API_KEY." : res.status === 402 ? " The free hours may be used up." : res.status === 429 ? " Too many requests, try again in a minute." : "";
+    throw fail(`The meeting service refused the bot (HTTP ${res.status}${why ? ": " + why : ""}).${hint}`, res.status === 401 || res.status === 403 ? 502 : 400);
+  }
   const now = Date.now();
-  const doc: MeetingDoc = { botId: j.id, uid, chatId, url: m.url, platform: m.platform, title: String(a.title || "").slice(0, 120), botName, status: "joining", createdAt: now, updatedAt: now };
-  await meetings().doc(j.id).set(clean(doc));
-  await audit(uid, { kind: "meeting_join", chatId, text: `${m.platform} bot ${j.id}` }).catch(() => {});
+  const doc: MeetingDoc = { botId, uid, chatId, url: m.url, platform: m.platform, title: String(a.title || "").slice(0, 120), botName, status: "joining", createdAt: now, updatedAt: now };
+  await meetings().doc(botId).set(clean(doc));
+  await audit(uid, { kind: "meeting_join", chatId, text: `${m.platform} bot ${botId}` }).catch(() => {});
   return doc;
 }
 
@@ -76,20 +101,25 @@ async function setStatus(botId: string, status: MeetingDoc["status"], note?: str
   await meetings().doc(botId).set(clean({ status, updatedAt: Date.now(), ...(note ? { note } : {}) }), { merge: true });
 }
 
-/** The transcript is ready: download it, write the notes with the owner's own model, post them, propose the owner's action items. */
-export async function processTranscript(botId: string, transcriptId: string, site: string): Promise<void> {
+/** Fallback: ask the bot service for the transcript when the webhook did not carry it. */
+async function fetchTranscript(botId: string): Promise<unknown> {
+  try {
+    const r = await botApi(`/bots/meeting_data?bot_id=${encodeURIComponent(botId)}`);
+    if (!r.ok) return [];
+    return await r.json().catch(() => []);
+  } catch { return []; }
+}
+
+/** The meeting is over and the transcript is here: write the notes with the owner's own model, post them, propose the owner's action items. */
+export async function processTranscript(botId: string, rawTranscript: unknown, site: string): Promise<void> {
   const snap = await meetings().doc(botId).get();
   if (!snap.exists) return;
   const m = snap.data() as MeetingDoc;
   if (m.status === "done" || m.status === "processing") return; // webhooks can arrive twice
   await setStatus(botId, "processing");
   try {
-    const meta = await recall(`/transcript/${encodeURIComponent(transcriptId)}/`);
-    const mj = (await meta.json().catch(() => ({}))) as { data?: { download_url?: string } };
-    const dl = mj.data?.download_url;
-    if (!meta.ok || !dl || !/^https:\/\//.test(dl)) throw new Error(`The transcript could not be fetched (HTTP ${meta.status}).`);
-    const raw = await (await fetch(dl, { signal: AbortSignal.timeout(30_000) })).json().catch(() => null);
-    const segs = normalizeTranscript(raw);
+    let segs = normalizeTranscript(rawTranscript);
+    if (!segs.length) segs = normalizeTranscript(await fetchTranscript(botId));
     if (!segs.length) { await setStatus(botId, "failed", "The meeting had no speech to write down."); await say(m.uid, m.chatId, "📝 The meeting ended, but nobody was heard, so there are no notes."); return; }
 
     const agent = await loadAgent(m.uid, m.chatId);
@@ -117,26 +147,41 @@ export async function processTranscript(botId: string, transcriptId: string, sit
   }
 }
 
-/** One Recall webhook event. The route has already checked the signature. */
-export async function handleRecallEvent(ev: { event?: string; data?: { bot?: { id?: string }; transcript?: { id?: string }; data?: { sub_code?: string; code?: string } } }, site: string): Promise<void> {
-  const botId = ev.data?.bot?.id;
+export type MeetingEvent = { event?: string; data?: { bot_id?: string; transcript?: unknown; error?: unknown; status?: { code?: string } } };
+
+/** One webhook event from the bot service. The route has already checked that it is genuine. */
+export async function handleMeetingEvent(ev: MeetingEvent, site: string): Promise<void> {
+  const botId = String(ev.data?.bot_id ?? "");
   if (!botId) return;
   const snap = await meetings().doc(botId).get();
-  if (!snap.exists) return; // a bot of someone else sharing the same Recall account
+  if (!snap.exists) return; // a bot of someone else sharing the same account
   const m = snap.data() as MeetingDoc;
   switch (ev.event) {
-    case "bot.joining_call": case "bot.in_waiting_room": return setStatus(botId, "joining");
-    case "bot.in_call_recording": case "bot.in_call_not_recording":
-      if (m.status !== "in_call") { await setStatus(botId, "in_call"); await say(m.uid, m.chatId, "🎙 The notetaker is in the meeting."); }
+    case "bot.status_change": {
+      const st = statusFromCode(ev.data?.status?.code);
+      if (!st || m.status === "done" || m.status === "processing") return;
+      if (st.status === "in_call") {
+        if (m.status !== "in_call") { await setStatus(botId, "in_call"); await say(m.uid, m.chatId, "🎙 The notetaker is in the meeting."); }
+        return;
+      }
+      if (st.status === "ended") { if (m.status === "in_call" || m.status === "joining") await setStatus(botId, "ended"); return; }
+      if (st.status === "failed") {
+        if (m.status === "failed") return;
+        await setStatus(botId, "failed", st.note);
+        await say(m.uid, m.chatId, `⚠️ The notetaker could not join or stay in the meeting. Check that the link works and that it was admitted from the waiting room.`);
+        return;
+      }
+      if (m.status === "joining" || m.status === "ended") await setStatus(botId, "joining");
       return;
-    case "bot.call_ended": return m.status === "in_call" || m.status === "joining" ? setStatus(botId, "ended") : undefined;
-    case "bot.fatal": {
-      const code = ev.data?.data?.sub_code || ev.data?.data?.code || "unknown";
-      await setStatus(botId, "failed", `The bot could not stay in the meeting (${code}).`);
+    }
+    case "complete": await processTranscript(botId, ev.data?.transcript, site); return;
+    case "failed": {
+      if (m.status === "done" || m.status === "processing") return;
+      const errRaw = ev.data?.error;
+      const code = typeof errRaw === "string" && errRaw ? errRaw.slice(0, 80) : "unknown";
+      await setStatus(botId, "failed", `The bot could not finish the meeting (${code}).`);
       await say(m.uid, m.chatId, `⚠️ The notetaker could not join or stay in the meeting (${code}). Check that the link works and that it was admitted from the waiting room.`);
       return;
     }
-    case "transcript.done": { const id = ev.data?.transcript?.id; if (id) await processTranscript(botId, id, site); return; }
-    case "transcript.failed": await setStatus(botId, "failed", "The transcript failed."); await say(m.uid, m.chatId, "⚠️ The meeting transcript failed, so there are no notes."); return;
   }
 }
