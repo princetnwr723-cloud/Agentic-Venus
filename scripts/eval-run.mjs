@@ -57,7 +57,23 @@ export async function runTask(task, { endpoint, token, fetchImpl = fetch, timeou
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return done({ success: false, notes: `endpoint HTTP ${res.status}` });
-    const data = await res.json();
+    let data = await res.json();
+    // Long tasks: the endpoint answers {runId, status:"running"} and is polled until the run is over.
+    const pollEvery = Number(process.env.EVAL_POLL_MS) || 5000;
+    while (data && data.runId && data.status === 'running' && !('output' in data)) {
+      if (Date.now() - t0 > timeoutMs) return done({ success: false, notes: 'timed out' });
+      await new Promise((r) => setTimeout(r, pollEvery));
+      const p = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ runId: data.runId }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!p.ok) return done({ success: false, notes: `endpoint HTTP ${p.status}` });
+      const next = await p.json();
+      data = next.status === 'running' ? { ...data, status: 'running' } : { ...next, runId: undefined };
+    }
+    if (data && data.status === 'failed') return done({ success: false, ...(Number.isFinite(data.costUsd) ? { costUsd: data.costUsd } : {}), notes: String(data.notes || 'the run failed') });
     const output = String(data.output ?? '');
     const grade = judge ? await judge(task, output) : gradeKeywords(output, task.rubric);
     const failed = grade.checks.filter((c) => !c.pass).map((c) => c.line);
