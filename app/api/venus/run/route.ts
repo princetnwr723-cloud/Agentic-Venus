@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { readBody, requestStatus, RequestError } from "@/lib/request";
 import { PROVIDERS } from "@/lib/providers";
+import { getAdminDb } from "@/lib/firebase-admin";
 import { appBaseUrl } from "@/lib/voice-server";
 import { startVenusRun, stopVenusRun, venusStore, VenusStartError } from "@/lib/venus-run-server";
 import type { VenusRunDoc } from "@/lib/venus-run";
@@ -32,7 +33,7 @@ function cleanProject(raw: Record<string, unknown>, chatId: string): VenusProjec
   const p: VenusProject = {
     id: "v" + now.toString(36) + Math.random().toString(36).slice(2, 5), title: str(raw.title || brief, 48).replace(/\s+/g, " "), brief,
     seconds: num(raw.seconds, 5, 3600, 45), aspect, theme: str(raw.theme || "midnight", 30), voice: raw.voice !== false && Boolean(raw.voice), voiceName: str(raw.voiceName || "nova", 40),
-    captions: raw.captions !== false, quality: raw.quality === "1080p" ? "1080p" : "720p", review: raw.review !== false, design: "ai", music: raw.music !== false, origin: "chat", chatId,
+    captions: raw.captions !== false, quality: raw.quality === "1080p" ? "1080p" : "720p", review: raw.review !== false, design: ["ai", "mixed", "library"].includes(String(raw.design)) ? (raw.design as VenusProject["design"]) : "ai", music: raw.music !== false, origin: raw.origin === "venus" ? "venus" : "chat", chatId,
     provider: provider as VenusProject["provider"], model: str(raw.model, 120), stage: "studio", status: "idle", createdAt: now, updatedAt: now,
     mode: raw.mode === "edit" ? "edit" : "make",
   };
@@ -58,8 +59,13 @@ export async function POST(req: Request) {
     const action = String(body.action || "");
 
     if (action === "start") {
-      const chatId = str(body.chatId, 200);
-      if (!chatId) throw new RequestError("chatId is required.", 400);
+      // The Venus page and Studio+ have no chat of their own: the finished video is announced in the newest chat.
+      let chatId = str(body.chatId, 200);
+      if (!chatId) {
+        const q = await getAdminDb().collection("users").doc(uid).collection("chats").orderBy("createdAt", "desc").limit(1).get().catch(() => null);
+        chatId = q?.docs[0]?.id ?? "";
+      }
+      if (!chatId) throw new RequestError("Open the dashboard once and create a chat first: the finished video is posted there.", 400);
       const project = cleanProject(raw.project ?? {}, chatId);
       const id = await startVenusRun(uid, project, { origin: origin(req), source: "chat" });
       return NextResponse.json({ ok: true, runId: id });
