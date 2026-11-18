@@ -1,7 +1,7 @@
 // Meetings, server side: sends a notetaker bot (Meeting BaaS) into Zoom / Google Meet / Teams, receives the "meeting is over, here is the
 // transcript" webhook, has the owner's agent write the notes, posts them to the chat and turns the owner's action items into proposals
 // (the owner still says yes or no to each one: see watchers-server.ts).
-// Needs ONE secret: MEETINGBAAS_API_KEY (see .env.example). MEETING_WEBHOOK_SECRET is optional (any long random text).
+// Needs ONE secret: MEETINGBAAS_API_KEY (see .env.example). MEETINGBAAS_API_URL and MEETING_WEBHOOK_SECRET are optional.
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider } from "@/lib/ai-providers-server";
@@ -23,7 +23,14 @@ export type MeetingDoc = {
   createdAt: number; updatedAt: number; note?: string; notes?: MeetingNotes; speakers?: string[]; proposalsSent?: number;
 };
 
-const API_BASE = "https://api.meetingbaas.com";
+// Meeting BaaS runs in regions and an API key only works on the platform it was made on (an EU account's key is refused elsewhere
+// with "WrongPlatformApiKey"). Set MEETINGBAAS_API_URL to the API address of your account, or leave it empty and the right one is found.
+const HOSTS = ["https://api.meetingbaas.com", "https://eu.api.meetingbaas.com", "https://us.api.meetingbaas.com"];
+let goodHost = "";
+const configuredBase = () => {
+  const v = String(process.env.MEETINGBAAS_API_URL || "").trim().replace(/\/+$/, "");
+  return /^https:\/\/[^\s/]+$/i.test(v) ? v : "";
+};
 const apiKey = () => String(process.env.MEETINGBAAS_API_KEY || process.env.MEETING_BAAS_API_KEY || "").trim();
 /** The secret that signs the webhook URL. Defaults to the API key, so no second setting is needed. */
 export const webhookSecret = () => String(process.env.MEETING_WEBHOOK_SECRET || "").trim() || apiKey();
@@ -34,11 +41,27 @@ const fail = (message: string, status = 400) => Object.assign(new Error(message)
 async function botApi(path: string, init: RequestInit = {}): Promise<Response> {
   const key = apiKey();
   if (!key) throw fail("The meeting bot is not set up on this server (MEETINGBAAS_API_KEY is missing).", 503);
-  return fetch(API_BASE + path, {
-    ...init,
-    headers: { "x-meeting-baas-api-key": key, Accept: "application/json", "Content-Type": "application/json", ...(init.headers ?? {}) },
-    signal: AbortSignal.timeout(20_000),
-  });
+  const fixed = configuredBase();
+  const hosts = fixed ? [fixed] : Array.from(new Set([goodHost, ...HOSTS].filter(Boolean)));
+  let last: Response | null = null;
+  for (const host of hosts) {
+    let r: Response;
+    try {
+      r = await fetch(host + path, {
+        ...init,
+        headers: { "x-meeting-baas-api-key": key, Accept: "application/json", "Content-Type": "application/json", ...(init.headers ?? {}) },
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch { continue; }
+    if ((r.status === 401 || r.status === 403) && hosts.length > 1) {
+      const text = await r.clone().text().catch(() => "");
+      if (/WrongPlatform/i.test(text)) { last = r; continue; } // this key belongs to another region: try the next one
+    }
+    if (r.status < 500) goodHost = host;
+    return r;
+  }
+  if (last) return last;
+  throw fail("Could not reach the meeting service. Try again in a minute.", 502);
 }
 
 function errorText(j: Record<string, unknown>): string {
@@ -74,7 +97,7 @@ export async function joinMeeting(uid: string, a: { url: string; chatId?: string
   const botId = String(j.bot_id ?? j.id ?? "");
   if (!res.ok || !botId) {
     const why = errorText(j);
-    const hint = res.status === 401 || res.status === 403 ? " Check MEETINGBAAS_API_KEY." : res.status === 402 ? " The free hours may be used up." : res.status === 429 ? " Too many requests, try again in a minute." : "";
+    const hint = /WrongPlatform/i.test(why) ? " This key belongs to another Meeting BaaS region: set MEETINGBAAS_API_URL to the API address of your account." : res.status === 401 || res.status === 403 ? " Check MEETINGBAAS_API_KEY." : res.status === 402 ? " The free hours may be used up." : res.status === 429 ? " Too many requests, try again in a minute." : "";
     throw fail(`The meeting service refused the bot (HTTP ${res.status}${why ? ": " + why : ""}).${hint}`, res.status === 401 || res.status === 403 ? 502 : 400);
   }
   const now = Date.now();
