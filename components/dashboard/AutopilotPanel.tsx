@@ -97,9 +97,9 @@ export default function AutopilotPanel() {
 
             {tab === "meetings" && (
               <div className="space-y-3">
-                {configured === false && <div className="rounded-lg bg-amber-500/15 px-3 py-2 text-amber-100">The meeting bot is not set up on this server yet (RECALL_API_KEY, RECALL_REGION, RECALL_WEBHOOK_SECRET).</div>}
+                {configured === false && <div className="rounded-lg bg-amber-500/15 px-3 py-2 text-amber-100">The meeting bot is not set up on this server yet (add MEETINGBAAS_API_KEY and redeploy).</div>}
                 <div className="flex gap-2">
-                  <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Paste a Zoom, Google Meet, Teams or Webex link" className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2" />
+                  <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Paste a Zoom, Google Meet or Teams link" className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2" />
                   <button disabled={!url.trim() || busy === "join"} onClick={() => run("join", async () => { await call("/api/meetings", { action: "join", url: url.trim() }); setUrl(""); setMsg("The notetaker is joining. Admit it from the waiting room if there is one."); })} className="rounded-lg bg-emerald-600 px-3 py-2 hover:bg-emerald-500 disabled:opacity-50">{busy === "join" ? <Loader2 size={14} className="animate-spin" /> : "Send bot"}</button>
                 </div>
                 {meetings.length === 0 && <p className="text-zinc-400">No meetings yet.</p>}
