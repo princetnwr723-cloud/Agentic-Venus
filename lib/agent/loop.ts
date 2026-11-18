@@ -8,6 +8,7 @@ import { backoffMs, classifyError, userMessage, type Classified } from "./provid
 import { HITL_NAMES, isHitlName, pendingFromApproval, pendingFromHitl, resultFromReply } from "./hitl.ts";
 import { checkArgs, repairMessage, resolveToolName } from "./tool-repair.ts";
 import { AUTO_APPROVED_TEXT, autoDecision } from "./autopilot.ts";
+import { riskNote } from "./risk.ts";
 
 export type ToolOutcome = { ok: boolean; text: string; needsApproval?: { summary: string; risk: string }; flagged?: string[]; risk?: "read" | "write" };
 export type ModelReq = { system: { stable: string; volatile: string }; messages: AgentMsg[]; tools: ToolDef[]; maxTokens: number; round: number; onText?: (delta: string) => void };
@@ -189,7 +190,11 @@ export async function runLoop(s: RunState, deps: LoopDeps, o: LoopOpts): Promise
       catch (e) { r = { ok: false, text: e instanceof Error ? e.message : "Tool crashed." }; }
       s.inflight = null;
     }
-    if (r.needsApproval) return pendingFromApproval({ id: call.id, name, input: args }, r.needsApproval.summary, deps.now(), s.tainted);
+    if (r.needsApproval) {
+      // the card says WHY it needs a human (outside recipient + sensitive content, money, a key in the text ...)
+      const note = riskNote({ name, summary: r.needsApproval.summary, args, tainted: s.tainted });
+      return pendingFromApproval({ id: call.id, name, input: args }, note ? `${r.needsApproval.summary}\n${note}` : r.needsApproval.summary, deps.now(), s.tainted);
+    }
     if (r.flagged?.length) { s.tainted = true; await deps.emit({ kind: "info", text: `"${name}" returned text that tries to give orders (${r.flagged.join(", ")}). Write actions now need your approval.` }); }
     s.turnResults.push(resultBlock(call.id, clip(r.text, o.toolOutputChars), !r.ok));
     s.queue = s.queue.filter((c) => c.id !== call.id);
