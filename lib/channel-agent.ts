@@ -4,10 +4,13 @@ import { loadAgent } from "@/lib/voice-calls";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
 import { makeCtx } from "@/lib/tools/connectors";
 import { extractToolCalls, toolPrompt } from "@/lib/tools/prompt";
-import { brainText, runAfter } from "@/lib/channels";
+import { brainText, notifyOwner, runAfter } from "@/lib/channels";
 import { learnFromRun } from "@/lib/learning";
 import { audit } from "@/lib/audit";
 import { handleChannelCommand } from "@/lib/channel-control";
+import { classifyAction } from "@/lib/agent/risk";
+import { actorNote, can, mayApprove, type Role } from "@/lib/orgs-core";
+import { parseProposalReply } from "@/lib/watchers-core";
 
 type Turn = { role: "user" | "assistant"; content: string };
 type Pending = { name: string; args: Record<string, unknown>; summary: string };
@@ -25,13 +28,24 @@ const keep = (turns: Turn[]): Turn[] => turns.slice(-14).map((x) => turn(x.role,
  * Commands (/jobs, /stop, approve <id> <PIN> ...) and answers to a waiting computer task are handled before the model sees the message.
  * `wipe` (optional) deletes the owner's message again: used for PINs where the chat app allows it (Telegram).
  */
-export async function handleInbound(p: { uid: string; chatId: string; channel: string; from: string; text: string; reply: (t: string) => Promise<void>; wipe?: () => Promise<void> }) {
+export async function handleInbound(p: { uid: string; chatId: string; channel: string; from: string; text: string; reply: (t: string) => Promise<void>; wipe?: () => Promise<void>; actor?: { uid: string; name: string; role: Role; orgName: string } }) {
   const { uid } = p;
   const t0 = Date.now();
   const key = `${p.channel}_${p.from.replace(/[^A-Za-z0-9]/g, "")}`.slice(0, 80);
   const sref = getAdminDb().collection("users").doc(uid).collection("channelState").doc(key);
   try {
-    if (await handleChannelCommand({ uid, chatId: p.chatId, text: p.text, reply: p.reply, wipe: p.wipe })) return;
+    // The owner's commands (/jobs, approve <id> <PIN>, card payments) are never available to team members.
+    const isOwnerUser = !p.actor || p.actor.role === "owner";
+    if (isOwnerUser && (await handleChannelCommand({ uid, chatId: p.chatId, text: p.text, reply: p.reply, wipe: p.wipe }))) return;
+
+    // "YES p1a2b3c4" / "NO p1a2b3c4": the owner's answer to a proactive proposal (see watchers-core.ts)
+    const pr = parseProposalReply(p.text);
+    if (pr) {
+      if (p.actor && !can(p.actor.role, "approve_proposals")) { await p.reply("Only the owner or an admin can answer the agent's proposals."); return; }
+      const { decideProposal } = await import("@/lib/watchers-server");
+      await p.reply((await decideProposal(uid, pr.id, pr.approve, p.actor?.name ?? "owner")).message);
+      return;
+    }
 
     const st = ((await sref.get()).data() ?? {}) as { history?: Turn[]; pending?: Pending | null };
     const agent = await loadAgent(uid, p.chatId);
@@ -43,6 +57,14 @@ export async function handleInbound(p: { uid: string; chatId: string; channel: s
 
     if (st.pending) {
       if (YES.test(userText)) {
+        // a team member may only approve what their role allows: ordinary writes for members, money / secrets / confidential content for admins and the owner
+        const risky = classifyAction({ name: st.pending.name, summary: st.pending.summary, args: st.pending.args }).decision === "ask";
+        if (p.actor && !mayApprove(p.actor.role, risky)) {
+          await sref.set({ pending: null }, { merge: true });
+          await p.reply(`🔒 ${risky ? "This one touches money, secrets or confidential content" : "This changes something outside"}, so it needs an ${risky ? "admin or the owner" : "member, admin or the owner"}. I did not do it.`);
+          runAfter(notifyOwner(uid, p.chatId, `${p.actor.name} (${p.actor.role}) asked for: ${clip(st.pending.summary, 300)}. It needs your decision: do it yourself in the dashboard or ask me again from your own account.`));
+          return;
+        }
         const r = await callTool(agent.connectors, st.pending.name, st.pending.args, true, { ctx });
         await audit(uid, { kind: "channel_approved", chatId: p.chatId, text: `${p.channel}: ${st.pending.name}` });
         userText = `The owner approved "${st.pending.name}" by replying YES. Result:\n${clip(r.text, 3000)}\nContinue and tell the owner the outcome briefly.`;
@@ -65,6 +87,7 @@ export async function handleInbound(p: { uid: string; chatId: string; channel: s
         `Long multi-step jobs (research many leads, call people one by one, update sheets, then report) → start a mission with mission.start instead of doing them inline.`,
         `Anything that needs a real BROWSER or the computer (open websites, fill forms, log in with saved logins, scrape pages, download files, buy something with an approved card) → pc.run with a complete task. It keeps running when the website is closed; questions, login help and payment approvals reach the owner in this chat, and the final result is sent here. Use pc.status to check on it and pc.stop to stop it. After pc.run, just tell the owner it started: do not wait for it.`,
         `Actions that change things outside need the owner's OK: the system asks them to reply YES.`,
+        p.actor ? actorNote(p.actor, p.actor.orgName) : "",
         bt.role ? `YOUR ROLE: ${bt.role}` : "",
         bt.mem ? `WHAT YOU REMEMBER:\n${bt.mem}` : "",
       ].filter(Boolean).join("\n\n") + toolPrompt(specs);
@@ -85,9 +108,14 @@ export async function handleInbound(p: { uid: string; chatId: string; channel: s
       for (const c of tc.calls.slice(0, 3)) {
         const r = await callTool(agent.connectors, c.name, c.args, false, { ctx, force: tainted });
         if (r.needsApproval) {
+          if (p.actor && !can(p.actor.role, "write_tools")) {
+            await p.reply(`🔒 ${p.actor.name}, your role (${p.actor.role}) can ask questions and read, but not start actions that change things. A member, admin or the owner can ask me for this.`);
+            return;
+          }
           const pending: Pending = { name: c.name, args: c.args, summary: r.needsApproval.summary };
           await sref.set({ pending, history: keep([...convo, turn("assistant", `(waiting for approval of ${c.name})`)]) }, { merge: true });
-          await p.reply(`⏸️ I need your OK for this:\n${clip(r.needsApproval.summary, 700)}\n\nReply YES to approve or NO to cancel.`);
+          const rk = classifyAction({ name: c.name, summary: r.needsApproval.summary, args: c.args, tainted });
+          await p.reply(`⏸️ I need your OK for this:\n${clip(r.needsApproval.summary, 700)}${rk.reasons.length ? `\n⚠ Check first: ${rk.reasons.join("; ")}.` : ""}\n\nReply YES to approve or NO to cancel.`);
           return;
         }
         if (r.flagged?.length) tainted = true;
