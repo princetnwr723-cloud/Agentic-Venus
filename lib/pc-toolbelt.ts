@@ -1,10 +1,11 @@
 // What is installed on every agent computer, and how the agent is told to use it.
 import { REA_PC_PROMPT } from "@/lib/rea-policy";
+import { pcRecipeSheet } from "./tools/pack/recipes";
 
 // 8: the wait no longer matches the permanent unattended-upgrades daemon (it made setup wait forever).
 // 7: setup is now serialized (waits for the computer's own first-boot installs), retries apt with fresh package lists,
 // and falls back to the official Node.js tarball. Bumping the version re-runs setup on old computers.
-export const PC_SETUP_VERSION = "8";
+export const PC_SETUP_VERSION = "9";
 
 /**
  * Core tools install first (the computer is "ready" after this); the big desktop apps install in the background.
@@ -85,7 +86,7 @@ step "[1/5] system packages"
 apt_refresh || die "could not download the package lists from the Ubuntu mirrors"
 apt_get install -y git curl ca-certificates unzip zip jq xz-utils || die "could not install the core tools (git, curl, zip)"
 apt_best_effort ripgrep build-essential python3-pip python3-venv wget
-apt_best_effort p7zip-full sqlite3 fd-find tree poppler-utils qpdf ffmpeg imagemagick pandoc tesseract-ocr xclip xdotool scrot fonts-liberation fonts-noto-core fonts-noto-color-emoji
+apt_best_effort p7zip-full sqlite3 fd-find tree poppler-utils qpdf ffmpeg imagemagick pandoc tesseract-ocr xclip xdotool scrot fonts-liberation fonts-noto-core fonts-noto-color-emoji ghostscript dnsutils rename wdiff tesseract-ocr-hin
 
 step "[2/5] Node.js"
 if ! node_ok; then
@@ -106,7 +107,7 @@ node_ok || die "Node.js 22 is not available on this computer"
 node -v
 
 step "[3/5] Python libraries"
-PYLIBS="pandas numpy matplotlib openpyxl xlsxwriter python-docx python-pptx reportlab pypdf pdfplumber pillow requests beautifulsoup4 lxml scipy markdown pytesseract"
+PYLIBS="pandas numpy matplotlib openpyxl xlsxwriter python-docx python-pptx reportlab pypdf pdfplumber pillow requests beautifulsoup4 lxml scipy markdown pytesseract qrcode tabulate python-dateutil xlrd"
 if command -v pip3 >/dev/null 2>&1; then
   pip3 install --user -q $PYLIBS || pip3 install --user --break-system-packages -q $PYLIBS || {
     for l in $PYLIBS; do
@@ -156,6 +157,9 @@ Command line: python3 with pandas, numpy, matplotlib, openpyxl, xlsxwriter, pyth
 MAKING FILES: Word = python-docx; Excel = openpyxl (formulas allowed); PowerPoint = python-pptx; PDF = reportlab, or "soffice --headless --convert-to pdf file.docx"; charts = matplotlib PNG; scanned text = "tesseract in.png out"; PDF text = pdftotext. Save results in ~/Documents and tell the owner the exact path. ALWAYS verify a file you made: re-open it with python, or convert and look at it.
 EXTRA BROWSE OPS (besides click, type, secret, press, scroll, wait): {"op":"select","id":N,"value":"text"} {"op":"check","id":N,"checked":true} {"op":"hover","id":N} {"op":"upload","id":N,"path":"~/Documents/file.pdf"} {"op":"scroll_to","id":N} {"op":"back"} {"op":"wait_text","text":"Order confirmed","ms":8000} {"op":"newtab","url":"https://..."} {"op":"tab","index":0} {"op":"closetab"} {"op":"type_focus","text":"..."}. Cookie banners are dismissed automatically, browser dialogs are accepted, downloads land in ~/Downloads. If a click does nothing: re-read the elements, try scroll_to and click again, or use a screen click.
 SOCIAL MEDIA: uploading or posting to YouTube, Instagram, TikTok, X, LinkedIn, Facebook, Threads, Pinterest or Reddit is done with the social.* tools in the chat, never by clicking around in a browser. If you were sent here to upload a video, say so in one line and stop.
+TESTED COMMANDS (copy, change the file names, run; they are faster and safer than inventing your own):
+${pcRecipeSheet()}
+HOW TO WORK WITHOUT ERRORS: (1) look before you change: ls -la, file, head; (2) never overwrite or delete the owner's file: write a new name (out.pdf) or move to ~/.trash; (3) after EVERY command read the exit code and the output: an empty output or a 0-byte file is a failure; (4) if a command fails, read the message, fix the one cause and run again; after two failures change the method (another tool or a python script) instead of repeating; (5) jobs longer than ~60 s run in the background with a log (nohup ... > /tmp/jobs/x.log &) and you poll the log; (6) PROVE the result before saying done: open the file again, count pages / rows / seconds, show the owner the path; (7) scanned or photographed text is read with OCR and every number is double-checked by eye; (8) when the task is a lead / contact list, validate emails and phones and remove duplicates before you hand it over.
 RULES: prefer a connected tool or API over clicking around; write short progress notes; never claim success without evidence (a file that opens, a page that shows the result).
 
 ${REA_PC_PROMPT}`;
