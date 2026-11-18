@@ -5,6 +5,8 @@ import { appBaseUrl } from "@/lib/voice-server";
 import { planTick } from "@/lib/agent/actions";
 import { tickVenus } from "@/lib/venus-run-server";
 import { tickBusiness } from "@/lib/business-server";
+import { tickWatchers } from "@/lib/watchers-server";
+import { tickTeamRuns } from "@/lib/team-server";
 import type { Reply } from "@/lib/agent/types";
 
 export const runtime = "nodejs";
@@ -54,7 +56,10 @@ export async function POST(req: Request) {
     const venus = await tickVenus(site, now).catch(() => ({ checked: 0, resumed: 0, posted: 0 }));
     // Business Hub teams working in the background: start the next steps, collect finished ones, post the report
     const business = await tickBusiness(site, now).catch(() => ({ checked: 0 }));
-    return NextResponse.json({ ok: true, ...out, venus, business });
+    // Proactive watchers (mail / calendar / GitHub / routines -> proposals) and dashboard team runs that work in the background
+    const watchers = await tickWatchers(site, now).catch(() => ({ checked: 0, sent: 0 }));
+    const teams = await tickTeamRuns(site, now).catch(() => ({ checked: 0 }));
+    return NextResponse.json({ ok: true, ...out, venus, business, watchers, teams });
   } catch (err) {
     return NextResponse.json({ ok: false, ...out, error: err instanceof Error ? err.message : "Agent tick failed." }, { status: 500 });
   }
