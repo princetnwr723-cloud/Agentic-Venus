@@ -1,5 +1,5 @@
-// Meetings: the pure part. URL checks, transcript clean-up, the action-item prompt and its parser, webhook signature check.
-// No network and no database here (tested with node --test). meetings-server.ts talks to Recall.ai and the agent.
+// Meetings: the pure part. URL checks, transcript clean-up, the action-item prompt and its parser, webhook checks.
+// No network and no database here (tested with node --test). meetings-server.ts talks to the meeting bot service (Meeting BaaS) and the agent.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { hashId, type Signal } from "./watchers-core.ts";
 
@@ -32,18 +32,29 @@ export function extractMeetingUrl(text: string): string | null {
 // ---------------------------------------------------------------- transcript
 export type Segment = { speaker: string; text: string; t: number };
 
-/** Recall.ai transcript JSON (array of {participant:{name}, words:[{text,start_timestamp:{relative}}]}) or a simple [{speaker,text,start}] list. */
+/**
+ * Transcript JSON from the meeting bot service. Accepted shapes (all tolerated):
+ *  - Meeting BaaS: [{speaker, start_time, words:[{word, start_time, end_time}]}] (also wrapped in {transcript|transcripts|bot_data:{transcripts}})
+ *  - word lists with {participant:{name}, words:[{text, start_timestamp:{relative}}]}
+ *  - a simple [{speaker, text, start}] list
+ */
 export function normalizeTranscript(raw: unknown): Segment[] {
-  const list = Array.isArray(raw) ? raw : raw && typeof raw === "object" && Array.isArray((raw as { transcript?: unknown }).transcript) ? (raw as { transcript: unknown[] }).transcript : [];
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  const list: unknown[] = Array.isArray(raw) ? raw
+    : Array.isArray(r.transcript) ? r.transcript
+    : Array.isArray(r.transcripts) ? r.transcripts
+    : Array.isArray(r.bot_data?.transcripts) ? r.bot_data.transcripts
+    : Array.isArray(r.bot_data?.transcript) ? r.bot_data.transcript
+    : [];
   const out: Segment[] = [];
   for (const item of list.slice(0, 20_000)) {
     const o = (item && typeof item === "object" ? item : {}) as Record<string, any>;
-    const speaker = String(o.participant?.name ?? o.speaker ?? o.participant?.id ?? "Speaker").slice(0, 60) || "Speaker";
+    const speaker = String(o.participant?.name ?? o.speaker ?? o.speaker_name ?? o.participant?.id ?? "Speaker").slice(0, 60) || "Speaker";
     let text = "", t = 0;
-    if (Array.isArray(o.words)) {
-      text = o.words.map((w: any) => String(w?.text ?? "")).join(" ").replace(/\s+([,.!?;:])/g, "$1");
-      t = Number(o.words[0]?.start_timestamp?.relative ?? o.words[0]?.start ?? 0) || 0;
-    } else { text = String(o.text ?? ""); t = Number(o.start ?? o.t ?? 0) || 0; }
+    if (Array.isArray(o.words) && o.words.length) {
+      text = o.words.map((w: any) => String(w?.text ?? w?.word ?? "")).join(" ").replace(/\s+([,.!?;:])/g, "$1");
+      t = Number(o.words[0]?.start_timestamp?.relative ?? o.words[0]?.start_time ?? o.words[0]?.start ?? o.start_time ?? o.start ?? 0) || 0;
+    } else { text = String(o.text ?? ""); t = Number(o.start ?? o.start_time ?? o.t ?? 0) || 0; }
     text = text.replace(/\s+/g, " ").trim();
     if (!text) continue;
     const last = out[out.length - 1];
@@ -120,7 +131,7 @@ export function notesMessage(title: string, n: MeetingNotes, agentItems: number)
   return lines.join("\n");
 }
 
-// ---------------------------------------------------------------- webhook signature (Svix, used by Recall.ai)
+// ---------------------------------------------------------------- webhook signature (Svix standard; kept for services that sign this way)
 /** Checks `webhook-id`, `webhook-timestamp`, `webhook-signature` headers against the endpoint secret (`whsec_...`). */
 export function verifySvix(a: { secret: string; id: string; timestamp: string; signature: string; body: string; nowMs?: number; toleranceSec?: number }): boolean {
   if (!a.secret || !a.id || !a.timestamp || !a.signature) return false;
@@ -138,4 +149,34 @@ export function verifySvix(a: { secret: string; id: string; timestamp: string; s
     if (got.length === expected.length && timingSafeEqual(got, expected)) return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------- webhook check (Meeting BaaS)
+/** The webhook URL given to the bot service carries this token. It is derived from a server secret, so nobody else can make the agent post "meeting notes". */
+export function meetingWebhookToken(secret: string): string {
+  if (!secret) return "";
+  return createHmac("sha256", secret).update("agentic-venus-meeting-webhook-v1").digest("hex").slice(0, 48);
+}
+const sameText = (a: string, b: string) => {
+  const x = Buffer.from(a), y = Buffer.from(b);
+  return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
+};
+/** A webhook is genuine when it carries our URL token, or the service's own API-key header (Meeting BaaS sends it with every webhook). */
+export function verifyMeetingWebhook(a: { secret: string; apiKey: string; token: string; headerKey: string }): boolean {
+  if (a.secret && a.token && sameText(a.token, meetingWebhookToken(a.secret))) return true;
+  if (a.apiKey && a.headerKey && sameText(a.headerKey.trim(), a.apiKey)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------- bot status
+export type BotStatus = "joining" | "in_call" | "ended" | "failed";
+/** Maps the bot service's status codes to ours. Unknown codes return null and are ignored. */
+export function statusFromCode(codeRaw: unknown): { status: BotStatus; note?: string } | null {
+  const code = String(codeRaw ?? "").toLowerCase().trim();
+  if (!code) return null;
+  if (code === "joining_call" || code === "in_waiting_room" || code === "joining" || code === "waiting_room") return { status: "joining" };
+  if (code === "in_call_recording" || code === "in_call_not_recording" || code === "in_call") return { status: "in_call" };
+  if (code === "call_ended" || code === "meeting_ended") return { status: "ended" };
+  if (/reject|denied|timeout|removed|error|fatal|failed|cannot|invalid/.test(code)) return { status: "failed", note: `The bot could not stay in the meeting (${code.slice(0, 60)}).` };
+  return null;
 }
