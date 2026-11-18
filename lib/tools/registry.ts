@@ -7,6 +7,7 @@ import { META_TOOLS, PACK_MAP, isExternalPack, resolveAlias, runPackTool, sugges
 import { VOICE_TOOLS } from "./voice";
 import { CHANNEL_TOOLS, NOTIFY_TOOLS } from "./channels";
 import { MISSION_TOOLS } from "./mission";
+import { MEETING_TOOLS } from "./meetings";
 import { ROUTINE_TOOLS } from "./routine";
 import { LEARNING_TOOLS } from "./learning";
 import { REPO_TOOLS } from "./repo";
@@ -35,7 +36,7 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...VENUS_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS, ...(META_TOOLS as unknown as Def[])];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...MEETING_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...VENUS_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS, ...(META_TOOLS as unknown as Def[])];
 /** "Unknown tool" with the closest real names, so the model fixes the name instead of giving up. */
 const unknownTool = (name: string): ToolResult => {
   const near = suggest(name, 5);
