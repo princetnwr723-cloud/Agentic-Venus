@@ -6,6 +6,18 @@ export type Line = { id: string; t: number; text: string };
 
 /** "web.search" -> "Searching the web". Unknown tools get a readable name, never the raw id. */
 const LABELS: Array<[RegExp, string]> = [
+  [/^tools[._]/i, "Finding the right tool"],
+  [/^leads[._]/i, "Working on leads"],
+  [/^(validate|encode|color|dev)[._]/i, "Checking the details"],
+  [/^(data|json|xml)[._]/i, "Working on the data"],
+  [/^(finance)[._]/i, "Doing the money maths"],
+  [/^(math|stats|geo)[._]/i, "Calculating"],
+  [/^(date)[._]/i, "Working out the dates"],
+  [/^convert[._]/i, "Converting units"],
+  [/^text[._]/i, "Working on the text"],
+  [/^(field)[._]|^pc[._]recipe/i, "Looking up the best way"],
+  [/^(dns|domain)[._]|^email[._]domain|^web[._](extract|find|page|tech|links|social|headers|status|robots|sitemap|ssl|text|fetch_json)/i, "Checking the website"],
+  [/^file[._](docx|xlsx|pptx|csv|pdf|zip|create)/i, "Making your file"],
   [/^web[._]?search|search/i, "Searching the web"],
   [/^web[._]?(fetch|read|open)|fetch|browse|browser/i, "Reading a web page"],
   [/mail|gmail|email|inbox/i, "Working with email"],
