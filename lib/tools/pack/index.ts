@@ -11,8 +11,8 @@ import { DATA_TOOLS } from "./data.ts";
 import { LEADS_TOOLS } from "./leads.ts";
 import { FINANCE_TOOLS } from "./finance.ts";
 import { WEB_TOOLS } from "./web.ts";
-import { FIELD_TOOLS, FIELDS } from "./fields.ts";
-import { PC_TOOLS, RECIPES } from "./recipes.ts";
+import { FIELD_TOOLS } from "./fields.ts";
+import { PC_TOOLS } from "./recipes.ts";
 
 type Run = (args: Record<string, unknown>, cred: string[], ctx?: unknown) => Promise<string>;
 export type MetaDef = { name: string; description: string; params: string; risk: "read"; run: Run };
@@ -101,25 +101,4 @@ export const META_TOOLS: MetaDef[] = [
   },
 ];
 
-/** A short block for the agent's prompt: it must know the pack exists and how to use it, without 1000 lines of text. */
-export function packPrompt(): string {
-  const f = fam();
-  const line = (k: string, e: string) => `${k} (${f.get(k) ?? 0}): ${e}`;
-  return `\n\nBUILT-IN TOOL PACK (${PACK.length}+ tools, always available, free, no key). They are not listed one by one: FIND them with tools.search {"query":"what you need"} and call them by name. Examples of what exists:\n` +
-    [
-      line("leads", "clean_list, dedupe, score_list, email_patterns, seniority, search_queries, spam_check, classify_reply, followup_sequence, to_crm_csv, call_script"),
-      line("validate", "email, phone, indian_mobile, pan, gstin, aadhaar, ifsc, iban, credit_card (format), url, domain, password_strength"),
-      line("data", "csv_info, csv_dedupe, csv_filter, csv_sort, csv_join, csv_group_sum, csv_compare, csv_to_sql, csv_to_vcf; json.* (get, flatten, diff, merge, to_yaml)"),
-      line("web", "extract_contacts, find_emails, page_meta, tech_stack, sitemap, status_many; dns.records, email.domain_health, domain.age, web.ssl_expiry"),
-      line("finance", "gst, invoice_total, emi, sip, income_tax_india_new_regime, salary_breakup, break_even, cac_ltv, ad_metrics"),
-      line("text", "slugify, extract_emails / phones / urls / prices, mail_merge, readability, keywords, diff, regex_*, table_markdown"),
-      line("math+stats+geo", "calc (safe expression), percent_*, number_to_words (lakh / crore), summary, regression, ab_test, haversine"),
-      line("date", "parse, add_business_days, diff, age, financial_year, timezone_convert, cron_next, ics_event, followup_schedule"),
-      line("convert", `units (everything), plus ${f.get("convert") ?? 0} exact pair tools like convert.km_to_mile`),
-      line("encode+color+dev", "hash, base64, uuid, password, totp, jwt_decode, upi_link, qr_url, color.palette / contrast, http_status, regex_for"),
-      line("pc", `recipe: ${RECIPES.length} tested commands for the computer (pdf merge / split / ocr, docx / xlsx / pptx convert, ffmpeg video & audio, images, zip, scraping, automation)`),
-      line("field", `guide: ${FIELDS.length} work-field playbooks (lead_generation, tax_gst_india, recruitment_hr, accounting_bookkeeping, ecommerce, real_estate, legal_documents ...)`),
-    ].map((x) => "- " + x).join("\n") +
-    `\nNames you may guess are understood: pdf.create = file.pdf, docx.create = file.docx, xlsx.create = file.xlsx, pptx.create = file.pptx, zip.create = file.zip, csv.create = file.csv. ` +
-    `RULES: (1) Anything that can be COMPUTED, CHECKED or CONVERTED is done with a tool, never by guessing in your head: numbers, dates, taxes, unit conversions, email / phone / ID checks, CSV work. (2) At the start of an unfamiliar kind of job call field.guide {"task":"..."}; for a job on the computer call pc.recipe {"task":"..."} before you improvise commands. (3) If a tool answers with an error, read the Usage line and call it again with fixed arguments: do not give up and do not do it by hand. (4) Report only what a tool result confirms.`;
-}
+export { packPrompt } from "./blurb.ts";
