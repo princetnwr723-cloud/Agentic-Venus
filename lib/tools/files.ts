@@ -1,9 +1,11 @@
-// Server-only. The agent makes real files itself (text files, PDF, ZIP) and hands the owner a private download link.
-// No computer, no extra library: the PDF and ZIP writers are small and live here.
-import { deflateRawSync, deflateSync } from "zlib";
+// Server-only. The agent makes real files itself (text files, PDF, Word, Excel, PowerPoint, ZIP) and hands the owner a private download link.
+// No computer, no extra library: the PDF writer lives here, the Word / Excel / PowerPoint / ZIP writers in office.ts.
+import { deflateSync } from "zlib";
 import { attachmentUrl, findAttachment, markReady, signAttachment } from "@/lib/attachments-server";
 import { humanSize } from "@/lib/attachments";
 import type { Def } from "./plugins";
+import { OFFICE_MIME, docxEntries, pptxEntries, xlsxEntries, zipOf, type Sheet, type Slide } from "./office";
+import { parseCsv, toCsv } from "./pack/core";
 import type { ToolCtx } from "./types";
 
 const s = (v: unknown, n = 4000) => String(v ?? "").trim().slice(0, n);
@@ -35,47 +37,6 @@ async function saveFile(ctx: ToolCtx, name: string, mime: string, bytes: Buffer)
 }
 
 // ---------------- ZIP ----------------
-const CRC = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
-  return t;
-})();
-const crc32 = (b: Buffer): number => { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-
-function zipOf(entries: Array<{ name: string; data: Buffer }>): Buffer {
-  const parts: Buffer[] = [];
-  const central: Buffer[] = [];
-  let offset = 0;
-  const d = new Date();
-  const dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
-  const dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
-  for (const e of entries) {
-    const name = Buffer.from(e.name, "utf8");
-    const crc = crc32(e.data);
-    const packed = deflateRawSync(e.data);
-    const deflated = packed.length < e.data.length;
-    const body = deflated ? packed : e.data;
-    const method = deflated ? 8 : 0;
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6); local.writeUInt16LE(method, 8);
-    local.writeUInt16LE(dosTime, 10); local.writeUInt16LE(dosDate, 12); local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(body.length, 18); local.writeUInt32LE(e.data.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(0, 28);
-    parts.push(local, name, body);
-    const c = Buffer.alloc(46);
-    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x0800, 8); c.writeUInt16LE(method, 10);
-    c.writeUInt16LE(dosTime, 12); c.writeUInt16LE(dosDate, 14); c.writeUInt32LE(crc, 16);
-    c.writeUInt32LE(body.length, 20); c.writeUInt32LE(e.data.length, 24); c.writeUInt16LE(name.length, 28);
-    c.writeUInt32LE(offset, 42);
-    central.push(c, name);
-    offset += 30 + name.length + body.length;
-  }
-  const cd = Buffer.concat(central);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...parts, cd, end]);
-}
-
 const entryName = (n: string) => String(n).replace(/\\/g, "/").split("/").filter((p) => p && p !== "." && p !== "..").join("/").slice(0, 200) || "file";
 
 // ---------------- PDF ----------------
@@ -197,7 +158,7 @@ export const FILE_TOOLS: Def[] = [
       const c = need(ctx);
       const name = cleanName(s(a.name, 90), "txt");
       const ext = (/\.([A-Za-z0-9]{1,8})$/.exec(name)?.[1] ?? "").toLowerCase();
-      if (!TEXT_MIME[ext]) throw new Error(`file.create makes text files only (${Object.keys(TEXT_MIME).join(", ")}). For PDF use file.pdf, for several files file.zip, for Word/Excel/PowerPoint or images use the computer.`);
+      if (!TEXT_MIME[ext]) throw new Error(`file.create makes text files only (${Object.keys(TEXT_MIME).join(", ")}). For PDF use file.pdf, for Word file.docx, for Excel file.xlsx, for PowerPoint file.pptx, for several files file.zip, for images use the computer.`);
       const content = String(a.content ?? "");
       if (!content.trim()) throw new Error("content is empty.");
       if (content.length > 2_000_000) throw new Error("The file is too big for this tool (2 MB). Use the computer for it.");
@@ -240,6 +201,77 @@ export const FILE_TOOLS: Def[] = [
       }
       if (!entries.length) throw new Error("Nothing to zip: give files and/or attachments.");
       return saveFile(c, cleanName(s(a.name, 90), "zip").replace(/\.[A-Za-z0-9]{1,8}$/, ".zip"), "application/zip", zipOf(entries));
+    },
+  },
+  {
+    name: "file.docx", risk: "read", params: "name:string (e.g. proposal.docx), title?:string, content:string (simple markdown: # ## ### headings, - bullets, 1. steps, | tables |, **bold**, *italic*, > quote, --- page break)",
+    description: "Make a real Word document (.docx) yourself: letters, proposals, quotations, reports, contracts drafts, resumes. Hindi and every other script work. The owner can edit it in Word / Google Docs. Gives a private download link.",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      const content = String(a.content ?? "").trim();
+      if (!content) throw new Error("content is empty.");
+      if (content.length > 400_000) throw new Error("The text is too long for one Word file here (400,000 characters).");
+      return saveFile(c, cleanName(s(a.name, 90), "docx").replace(/\.[A-Za-z0-9]{1,8}$/, ".docx"), OFFICE_MIME.docx, zipOf(docxEntries(s(a.title, 200), content)));
+    },
+  },
+  {
+    name: "file.xlsx", risk: "read", params: "name:string (e.g. leads.xlsx), rows?:[[...]] | [{...}] (first row = header; a cell starting with = is a formula, e.g. \"=B2*C2\"), csv?:string, sheets?:[{name:string, rows?:[...], csv?:string}], header?:boolean (default true)",
+    description: "Make a real Excel workbook (.xlsx) yourself: styled header row, frozen header, filters, auto column widths, several sheets, working formulas (=SUM(D2:D20)), numbers stored as numbers, phone / PIN / ID columns kept as text. Use it for lead lists, price lists, reports, trackers. Gives a private download link.",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      const toRows = (v: unknown, csv: unknown): unknown[][] => {
+        if (typeof csv === "string" && csv.trim()) return parseCsv(csv);
+        let arr: unknown = v;
+        if (typeof arr === "string") { try { arr = JSON.parse(arr); } catch { return parseCsv(arr as string); } }
+        if (!Array.isArray(arr) || !arr.length) return [];
+        if (arr.every((r) => Array.isArray(r))) return arr as unknown[][];
+        const objs = arr.filter((r) => r && typeof r === "object" && !Array.isArray(r)) as Array<Record<string, unknown>>;
+        if (objs.length) { const keys: string[] = []; for (const o of objs) for (const k of Object.keys(o)) if (!keys.includes(k)) keys.push(k); return [keys, ...objs.map((o) => keys.map((k) => { const x = o[k]; return x !== null && typeof x === "object" ? JSON.stringify(x) : x; }))]; }
+        return arr.map((x) => [x]);
+      };
+      const sheets: Sheet[] = [];
+      if (Array.isArray(a.sheets)) for (const sh of (a.sheets as Array<Record<string, unknown>>).slice(0, 30)) { const rows = toRows(sh?.rows, sh?.csv); if (rows.length) sheets.push({ name: s(sh?.name, 31) || `Sheet${sheets.length + 1}`, rows }); }
+      if (!sheets.length) { const rows = toRows(a.rows, a.csv); if (rows.length) sheets.push({ name: s(a.sheet, 31) || "Sheet1", rows }); }
+      if (!sheets.length) throw new Error("Give rows (list of lists or list of objects), csv text, or sheets.");
+      if (sheets.reduce((n, sh) => n + sh.rows.length, 0) > 200_000) throw new Error("Too many rows for this tool (200,000). Use the computer with pandas.");
+      const header = !(a.header === false || String(a.header).toLowerCase() === "false");
+      return saveFile(c, cleanName(s(a.name, 90), "xlsx").replace(/\.[A-Za-z0-9]{1,8}$/, ".xlsx"), OFFICE_MIME.xlsx, zipOf(xlsxEntries(sheets, { header })));
+    },
+  },
+  {
+    name: "file.pptx", risk: "read", params: "name:string (e.g. pitch.pptx), slides?:[{title:string, bullets?:[string], text?:string, notes?:string}] (the first slide with only a title becomes the cover), content?:string (markdown: each # or ## heading = one slide, lines under it = bullets), accent?:string (hex colour like 3F51B5)",
+    description: "Make a real PowerPoint (.pptx) yourself: clean 16:9 slides with title, bullets, text, speaker notes and a colour theme. Hindi and every other script work. For a deck with photos or charts use the computer or Venus Pro. Gives a private download link.",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      let slides: Slide[] = [];
+      if (Array.isArray(a.slides)) slides = (a.slides as Array<Record<string, unknown>>).slice(0, 80).map((x) => ({ title: s(x?.title, 200), bullets: Array.isArray(x?.bullets) ? (x.bullets as unknown[]).map((b) => s(b, 400)).filter(Boolean) : undefined, text: x?.text ? s(x.text, 1500) : undefined, notes: x?.notes ? s(x.notes, 3000) : undefined }));
+      else if (typeof a.content === "string" && a.content.trim()) {
+        let cur: Slide | null = null;
+        for (const line of a.content.replace(/\r/g, "").split("\n")) {
+          const m = /^#{1,2}\s+(.*)$/.exec(line.trim());
+          if (m) { cur = { title: m[1].trim(), bullets: [] }; slides.push(cur); continue; }
+          const t = line.trim().replace(/^[-*•]\s+/, "");
+          if (t && cur) cur.bullets!.push(t.slice(0, 400));
+        }
+        slides = slides.map((x) => (x.bullets && x.bullets.length ? x : { title: x.title })).slice(0, 80);
+      }
+      if (!slides.length) throw new Error("Give slides ([{title, bullets}]) or markdown content with # headings.");
+      return saveFile(c, cleanName(s(a.name, 90), "pptx").replace(/\.[A-Za-z0-9]{1,8}$/, ".pptx"), OFFICE_MIME.pptx, zipOf(pptxEntries(slides, { accent: s(a.accent, 7).replace("#", "") })));
+    },
+  },
+  {
+    name: "file.csv", risk: "read", params: "name:string (e.g. leads.csv), rows:[[...]] | [{...}] (first row = header), delimiter?:string",
+    description: "Make a CSV file from rows (list of lists or list of objects) with correct quoting, and give the owner a private download link. For a styled spreadsheet use file.xlsx.",
+    run: async (a, _c, ctx) => {
+      const c = need(ctx);
+      let arr: unknown = a.rows;
+      if (typeof arr === "string") { try { arr = JSON.parse(arr); } catch { arr = parseCsv(arr as string); } }
+      if (!Array.isArray(arr) || !arr.length) throw new Error("rows is empty.");
+      let rows: unknown[][];
+      if (arr.every((r) => Array.isArray(r))) rows = arr as unknown[][];
+      else { const objs = arr.filter((r) => r && typeof r === "object") as Array<Record<string, unknown>>; const keys: string[] = []; for (const o of objs) for (const k of Object.keys(o)) if (!keys.includes(k)) keys.push(k); rows = [keys, ...objs.map((o) => keys.map((k) => o[k]))]; }
+      const text = "\uFEFF" + toCsv(rows, s(a.delimiter, 1) || ",");
+      return saveFile(c, cleanName(s(a.name, 90), "csv").replace(/\.[A-Za-z0-9]{1,8}$/, ".csv"), "text/csv", Buffer.from(text, "utf8"));
     },
   },
 ];

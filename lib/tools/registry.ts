@@ -3,6 +3,7 @@ import { GITHUB_EXTRA } from "./github-extra";
 import { GITHUB_PUT } from "./github-put";
 import { IDENTITY_TOOLS } from "./identity";
 import { VERIFY_TOOLS } from "./verify";
+import { META_TOOLS, PACK_MAP, isExternalPack, resolveAlias, runPackTool, suggest } from "./pack";
 import { VOICE_TOOLS } from "./voice";
 import { CHANNEL_TOOLS, NOTIFY_TOOLS } from "./channels";
 import { MISSION_TOOLS } from "./mission";
@@ -34,7 +35,12 @@ const ALL: Record<string, Def[]> = {
   identity: IDENTITY_TOOLS,
   ...CHANNEL_TOOLS,
 };
-const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...VENUS_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS];
+const ALL_FREE: Def[] = [...FREE_TOOLS, ...VERIFY_TOOLS, ...VOICE_TOOLS, ...NOTIFY_TOOLS, ...MISSION_TOOLS, ...ROUTINE_TOOLS, ...LEARNING_TOOLS, ...REPO_TOOLS, ...VISUAL_TOOLS, ...VENUS_TOOLS, ...MAIL_TOOLS, ...PLAN_TOOLS, ...REVERSE_TOOLS, ...ATTACHMENT_TOOLS, ...CONNECT_TOOLS, ...(META_TOOLS as unknown as Def[])];
+/** "Unknown tool" with the closest real names, so the model fixes the name instead of giving up. */
+const unknownTool = (name: string): ToolResult => {
+  const near = suggest(name, 5);
+  return { ok: false, text: `Unknown tool "${name}".${near.length ? ` Did you mean: ${near.join(", ")}?` : ""} Use tools.search {"query":"..."} to find the right one.` };
+};
 const READISH = /^(get|list|search|find|read|fetch|query|describe|lookup|view|check|count|show)/i;
 
 const json = <T,>(v?: string): T | null => { try { return v ? (JSON.parse(v) as T) : null; } catch { return null; } };
@@ -182,8 +188,9 @@ export async function callTool(
   opts: { force?: boolean; ctx?: ToolCtx } = {}
 ): Promise<ToolResult> {
   const args = (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs : {}) as Record<string, unknown>;
+  name = resolveAlias(name); // pdf.create -> file.pdf, xlsx.create -> file.xlsx ...
   const dot = name.indexOf(".");
-  if (dot < 1) return { ok: false, text: `Unknown tool "${name}".` };
+  if (dot < 1) return unknownTool(name);
   const src = name.slice(0, dot), tool = name.slice(dot + 1);
   const mustAsk = (risk: Risk, auto: boolean) => risk === "write" && !approved && (opts.force === true || !auto);
 
@@ -191,6 +198,14 @@ export async function callTool(
   if (name.startsWith("connect.")) {
     try { return await runConnect(name, args, c, opts.ctx, approved); }
     catch (e) { return { ok: false, text: e instanceof Error ? e.message : "Connecting failed." }; }
+  }
+
+  // Tool Pack (1000+ built-in tools: text, math, dates, units, validation, CSV, leads, finance, web helpers ...). Never throws.
+  if (PACK_MAP.has(name)) {
+    const r = await runPackTool(name, args);
+    if (!r) return unknownTool(name);
+    if (!r.ok) return { ok: false, text: r.text, flagged: [], risk: "read" };
+    return isExternalPack(name) ? good(r.text, name, "read") : { ok: true, text: cut(r.text, 20000), flagged: [], risk: "read" };
   }
 
   const free = ALL_FREE.find((t) => t.name === name);
@@ -205,7 +220,7 @@ export async function callTool(
   const defs = ALL[src];
   if (defs) {
     const def = defs.find((d) => d.name === name);
-    if (!def) return { ok: false, text: `Unknown tool "${name}".` };
+    if (!def) return unknownTool(name);
     if (!c[src]) return { ok: false, text: `${src} is not connected for this chat (Connectors button).` };
     if (mustAsk(def.risk, isAuto(c, src))) return ask(name, args, "write");
     try { return good(await def.run(args, unpack(c[src]), opts.ctx), name, def.risk); }
@@ -215,7 +230,7 @@ export async function callTool(
   // Gmail tools use the Google OAuth connection (MIME is built on the server: the model never writes base64).
   if (src === "gmail") {
     const def = GMAIL_TOOLS.find((d) => d.name === name);
-    if (!def) return { ok: false, text: `Unknown tool "${name}".` };
+    if (!def) return unknownTool(name);
     const raw = c["oauth:google"];
     if (!raw) return { ok: false, text: "Google is not connected for this chat (Connectors → Google). To SEND email without Google use mail.send." };
     if (mustAsk(def.risk, isAuto(c, "oauth:google"))) return ask(name, args, "write");
@@ -229,7 +244,7 @@ export async function callTool(
   // Social media tools use the OAuth logins of the connected platforms (YouTube, X, LinkedIn, Meta, Threads, TikTok, Pinterest, Reddit).
   if (src === "social") {
     const def = SOCIAL_TOOLS.find((d) => d.name === name);
-    if (!def) return { ok: false, text: `Unknown tool "${name}".` };
+    if (!def) return unknownTool(name);
     const connected = SOCIAL_PROVIDERS.filter((p) => c[`oauth:${p.id}`]);
     if (!connected.length) return { ok: false, text: "No social media account is connected for this chat. Tell the owner: open Connectors (plug icon), pick the platform and press Connect." };
     const wanted = socialTargets(args).map(providerOfPlatform);
@@ -318,5 +333,5 @@ export async function callTool(
       return good(`HTTP ${r.status}\n${r.text}`, name, risk, r.status < 400);
     } catch (err) { return { ok: false, text: err instanceof Error ? err.message : "API call failed." }; }
   }
-  return { ok: false, text: `Unknown tool "${name}".` };
+  return unknownTool(name);
 }

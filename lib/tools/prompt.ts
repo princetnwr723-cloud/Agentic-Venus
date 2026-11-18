@@ -1,4 +1,5 @@
 import type { ToolSpec } from "./types";
+import { packPrompt } from "./pack";
 
 // Short "how to use it" notes for the services people connect most.
 const HINTS: Record<string, string> = {
@@ -91,7 +92,8 @@ export function toolPrompt(specs: ToolSpec[]): string {
     `research or post on social media, upload a video → social.* (social.accounts first); ` +
     `analyse how software works, rebuild a feature ourselves → reverse.guide; ` +
     `a file / photo / video / zip the owner attached → attachments.read (or attachments.link for the computer); ` +
-    `a PDF, a document, a zip or any file for the owner to download → file.pdf / file.create / file.zip; ` +
+    `a PDF, Word, Excel, PowerPoint, CSV, zip or any file for the owner to download → file.pdf / file.docx / file.xlsx / file.pptx / file.csv / file.create / file.zip (pdf.create, docx.create, xlsx.create work as names too); ` +
+    `anything to compute, check, convert or clean (numbers, tax, dates, units, emails, phones, IDs, CSV, leads) → a built-in tool found with tools.search, never a guess; ` +
     `a bot token the owner pasted → bot.telegram / bot.slack; set up or manage phone calls → voice.status first; ` +
     `phone a person → voice.call (approved first; you talk live and the summary comes back); ` +
     `phone the owner after the work is done → voice.call_me; ` +
@@ -103,7 +105,7 @@ export function toolPrompt(specs: ToolSpec[]): string {
     `connect / add / link a service, tool or MCP → connect.service (first, even in the middle of other work); ` +
     `research, scraping, design, data work → the connected mcp_* / api_* tool that does it, before web.search; ` +
     `anything a connected service can answer is checked with that tool, not guessed.`;
-  return head + lines.join("\n") + (more > 0 ? `\n(+${more} more tools not shown)` : "") + when;
+  return head + lines.join("\n") + (more > 0 ? `\n(+${more} more tools not shown: use tools.search to find them)` : "") + when + packPrompt();
 }
 
 /**
