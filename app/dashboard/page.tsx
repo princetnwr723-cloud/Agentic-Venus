@@ -1407,6 +1407,19 @@ export default function DashboardPage() {
     if (activeIdRef.current === chat.id) { setTeamOpen(true); setPcOpen(false); }
     say(chat.id, "👥 Chief is assembling a team for this. Open the **Team** panel (people icon) to watch who does what — I'll post one final report here.");
     try {
+      // The server runs the whole team (planning, steps, hand-offs, report): closing this tab changes nothing.
+      // Only when the server cannot be reached at all does the old in-browser run take over.
+      let serverFailed = "";
+      if (serverAgentOn()) try {
+        const res = await fetch("/api/team/run", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) }, body: JSON.stringify({ uid: user.uid, action: "start", chatId: chat.id, goal }) });
+        const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        if (res.ok && d.ok) { say(chat.id, "✅ The team is working on the server now. You can close the app: the final report comes to this chat and to your connected channels."); return; }
+        if (res.status >= 400 && res.status < 500) throw new Error(d.error || "The team could not be started.");
+        serverFailed = d.error || `server error ${res.status}`;
+      } catch (e) {
+        if (e instanceof TypeError) serverFailed = e.message; else throw e;
+      }
+      if (serverFailed) say(chat.id, `ℹ️ The server could not start the team (${serverFailed.slice(0, 100)}). Running it in this tab instead: keep the tab open.`);
       const report = await runTeamGoal({ uid: user.uid, chatId: chat.id, goal, ctx: brainPrompt(brainOf(chat.id), goal, { noSkills: true }), host: teamHost(chat) });
       await sayNext(chat, report);
     } catch (err) {
