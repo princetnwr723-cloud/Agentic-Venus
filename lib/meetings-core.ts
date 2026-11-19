@@ -34,13 +34,16 @@ export type Segment = { speaker: string; text: string; t: number };
 
 /**
  * Transcript JSON from the meeting bot service. Accepted shapes (all tolerated):
- *  - Meeting BaaS: [{speaker, start_time, words:[{word, start_time, end_time}]}] (also wrapped in {transcript|transcripts|bot_data:{transcripts}})
+ *  - Meeting BaaS v2 transcription file: {result:{utterances:[{speaker, text, start, words:[{word,start,end}]}]}}
+ *  - Meeting BaaS v1: [{speaker, start_time, words:[{word, start_time, end_time}]}] (also wrapped in {transcript|transcripts|bot_data:{transcripts}})
  *  - word lists with {participant:{name}, words:[{text, start_timestamp:{relative}}]}
  *  - a simple [{speaker, text, start}] list
  */
 export function normalizeTranscript(raw: unknown): Segment[] {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
   const list: unknown[] = Array.isArray(raw) ? raw
+    : Array.isArray(r.result?.utterances) ? r.result.utterances
+    : Array.isArray(r.utterances) ? r.utterances
     : Array.isArray(r.transcript) ? r.transcript
     : Array.isArray(r.transcripts) ? r.transcripts
     : Array.isArray(r.bot_data?.transcripts) ? r.bot_data.transcripts
@@ -50,11 +53,11 @@ export function normalizeTranscript(raw: unknown): Segment[] {
   for (const item of list.slice(0, 20_000)) {
     const o = (item && typeof item === "object" ? item : {}) as Record<string, any>;
     const speaker = String(o.participant?.name ?? o.speaker ?? o.speaker_name ?? o.participant?.id ?? "Speaker").slice(0, 60) || "Speaker";
-    let text = "", t = 0;
-    if (Array.isArray(o.words) && o.words.length) {
-      text = o.words.map((w: any) => String(w?.text ?? w?.word ?? "")).join(" ").replace(/\s+([,.!?;:])/g, "$1");
-      t = Number(o.words[0]?.start_timestamp?.relative ?? o.words[0]?.start_time ?? o.words[0]?.start ?? o.start_time ?? o.start ?? 0) || 0;
-    } else { text = String(o.text ?? ""); t = Number(o.start ?? o.start_time ?? o.t ?? 0) || 0; }
+    const hasWords = Array.isArray(o.words) && o.words.length > 0;
+    let text = typeof o.text === "string" ? o.text : "";
+    if (!text.trim() && hasWords) text = o.words.map((w: any) => String(w?.text ?? w?.word ?? "")).join(" ").replace(/\s+([,.!?;:])/g, "$1");
+    const w0 = hasWords ? o.words[0] : undefined;
+    const t = Number(o.start ?? o.start_time ?? o.t ?? w0?.start_timestamp?.relative ?? w0?.start_time ?? w0?.start ?? 0) || 0;
     text = text.replace(/\s+/g, " ").trim();
     if (!text) continue;
     const last = out[out.length - 1];
