@@ -1,7 +1,8 @@
 // Meetings, server side: sends a notetaker bot (Meeting BaaS) into Zoom / Google Meet / Teams, receives the "meeting is over, here is the
 // transcript" webhook, has the owner's agent write the notes, posts them to the chat and turns the owner's action items into proposals
 // (the owner still says yes or no to each one: see watchers-server.ts).
-// Needs ONE secret: MEETINGBAAS_API_KEY (see .env.example). MEETINGBAAS_API_URL and MEETING_WEBHOOK_SECRET are optional.
+// Uses the Meeting BaaS v2 API (dashboard.meetingbaas.com keys). Needs ONE secret: MEETINGBAAS_API_KEY (see .env.example).
+// MEETING_WEBHOOK_SECRET is optional.
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { callProvider } from "@/lib/ai-providers-server";
@@ -23,16 +24,9 @@ export type MeetingDoc = {
   createdAt: number; updatedAt: number; note?: string; notes?: MeetingNotes; speakers?: string[]; proposalsSent?: number;
 };
 
-// Meeting BaaS runs in regions and an API key only works on the platform it was made on (an EU account's key is refused elsewhere
-// with "WrongPlatformApiKey"). Set MEETINGBAAS_API_URL to the API address of your account, or leave it empty and the right one is found.
-const HOSTS = ["https://api.meetingbaas.com", "https://eu.api.meetingbaas.com", "https://us.api.meetingbaas.com"];
-let goodHost = "";
-const configuredBase = () => {
-  const v = String(process.env.MEETINGBAAS_API_URL || "").trim().replace(/\/+$/, "");
-  return /^https:\/\/[^\s/]+$/i.test(v) ? v : "";
-};
+const API_BASE = "https://api.meetingbaas.com";
 const apiKey = () => String(process.env.MEETINGBAAS_API_KEY || process.env.MEETING_BAAS_API_KEY || "").trim();
-/** The secret that signs the webhook URL. Defaults to the API key, so no second setting is needed. */
+/** The secret that signs the callback URL. Defaults to the API key, so no second setting is needed. */
 export const webhookSecret = () => String(process.env.MEETING_WEBHOOK_SECRET || "").trim() || apiKey();
 export const meetingsApiKey = apiKey;
 export const meetingsConfigured = () => Boolean(apiKey());
@@ -41,33 +35,22 @@ const fail = (message: string, status = 400) => Object.assign(new Error(message)
 async function botApi(path: string, init: RequestInit = {}): Promise<Response> {
   const key = apiKey();
   if (!key) throw fail("The meeting bot is not set up on this server (MEETINGBAAS_API_KEY is missing).", 503);
-  const fixed = configuredBase();
-  const hosts = fixed ? [fixed] : Array.from(new Set([goodHost, ...HOSTS].filter(Boolean)));
-  let last: Response | null = null;
-  for (const host of hosts) {
-    let r: Response;
-    try {
-      r = await fetch(host + path, {
-        ...init,
-        headers: { "x-meeting-baas-api-key": key, Accept: "application/json", "Content-Type": "application/json", ...(init.headers ?? {}) },
-        signal: AbortSignal.timeout(20_000),
-      });
-    } catch { continue; }
-    if ((r.status === 401 || r.status === 403) && hosts.length > 1) {
-      const text = await r.clone().text().catch(() => "");
-      if (/WrongPlatform/i.test(text)) { last = r; continue; } // this key belongs to another region: try the next one
-    }
-    if (r.status < 500) goodHost = host;
-    return r;
+  try {
+    return await fetch(API_BASE + path, {
+      ...init,
+      headers: { "x-meeting-baas-api-key": key, Accept: "application/json", "Content-Type": "application/json", ...(init.headers ?? {}) },
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (e) {
+    const cause = (e as { cause?: { code?: string } } | null)?.cause?.code;
+    throw fail(`Could not reach the meeting service (${cause || (e instanceof Error ? e.name : "network error")}). Try again in a minute.`, 502);
   }
-  if (last) return last;
-  throw fail("Could not reach the meeting service. Try again in a minute.", 502);
 }
 
-function errorText(j: Record<string, unknown>): string {
+function errorText(j: Record<string, unknown>): { text: string; code: string } {
   const v = j.message ?? j.error ?? j.detail ?? "";
   const text = typeof v === "string" ? v : v ? JSON.stringify(v) : "";
-  return text.replace(/\s+/g, " ").slice(0, 160);
+  return { text: text.replace(/\s+/g, " ").slice(0, 160), code: typeof j.code === "string" ? j.code : "" };
 }
 
 export async function joinMeeting(uid: string, a: { url: string; chatId?: string; title?: string; botName?: string; site?: string }): Promise<MeetingDoc> {
@@ -84,21 +67,27 @@ export async function joinMeeting(uid: string, a: { url: string; chatId?: string
   if (!chatId) chatId = (await loadAgent(uid)).chatId;
   const agent = await loadAgent(uid, chatId);
   const botName = String(a.botName || `${agent.name} (notetaker)`).slice(0, 80);
-  const webhook = `${site}/api/meetings/webhook?t=${meetingWebhookToken(webhookSecret())}`;
+  const token = meetingWebhookToken(webhookSecret());
+  const callbackUrl = `${site}/api/meetings/webhook?t=${token}`;
 
-  const res = await botApi("/bots", {
+  const res = await botApi("/v2/bots", {
     method: "POST",
     body: JSON.stringify({
-      meeting_url: m.url, bot_name: botName, reserved: false,
-      webhook_url: webhook, extra: { uid, chatId },
+      meeting_url: m.url, bot_name: botName, recording_mode: "audio_only",
+      transcription_enabled: true, transcription_config: { provider: "gladia" },
+      callback_enabled: true, callback_config: { url: callbackUrl, method: "POST", secret: token },
+      extra: { uid, chatId },
     }),
   });
-  const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  const botId = String(j.bot_id ?? j.id ?? "");
-  if (!res.ok || !botId) {
-    const why = errorText(j);
-    const hint = /WrongPlatform/i.test(why) ? " This key belongs to another Meeting BaaS region: set MEETINGBAAS_API_URL to the API address of your account." : res.status === 401 || res.status === 403 ? " Check MEETINGBAAS_API_KEY." : res.status === 402 ? " The free hours may be used up." : res.status === 429 ? " Too many requests, try again in a minute." : "";
-    throw fail(`The meeting service refused the bot (HTTP ${res.status}${why ? ": " + why : ""}).${hint}`, res.status === 401 || res.status === 403 ? 502 : 400);
+  const j = (await res.json().catch(() => ({}))) as Record<string, any>;
+  const botId = String(j.data?.bot_id ?? j.bot_id ?? "");
+  if (!res.ok || j.success === false || !botId) {
+    const { text, code } = errorText(j);
+    const hint = res.status === 401 || res.status === 403 ? " Check MEETINGBAAS_API_KEY (use a key from dashboard.meetingbaas.com with Full access)."
+      : /INSUFFICIENT_TOKENS/i.test(code) || res.status === 402 ? " The free tokens may be used up."
+      : /ALREADY_EXISTS/i.test(code) ? " A notetaker is already in this meeting."
+      : res.status === 429 ? " Too many requests, try again in a minute." : "";
+    throw fail(`The meeting service refused the bot (HTTP ${res.status}${text ? ": " + text : ""}${code ? " [" + code + "]" : ""}).${hint}`, res.status === 401 || res.status === 403 ? 502 : 400);
   }
   const now = Date.now();
   const doc: MeetingDoc = { botId, uid, chatId, url: m.url, platform: m.platform, title: String(a.title || "").slice(0, 120), botName, status: "joining", createdAt: now, updatedAt: now };
@@ -124,25 +113,44 @@ async function setStatus(botId: string, status: MeetingDoc["status"], note?: str
   await meetings().doc(botId).set(clean({ status, updatedAt: Date.now(), ...(note ? { note } : {}) }), { merge: true });
 }
 
-/** Fallback: ask the bot service for the transcript when the webhook did not carry it. */
-async function fetchTranscript(botId: string): Promise<unknown> {
+/** Downloads a signed artifact file (valid for 4 hours) and parses it as JSON. */
+async function downloadJson(url: string): Promise<unknown> {
+  if (!/^https:\/\//i.test(url)) return [];
   try {
-    const r = await botApi(`/bots/meeting_data?bot_id=${encodeURIComponent(botId)}`);
+    const r = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!r.ok) return [];
+    if (Number(r.headers.get("content-length") || 0) > 20_000_000) return [];
     return await r.json().catch(() => []);
   } catch { return []; }
 }
 
+/** The finished-bot payload carries a link to the transcription file; if it does not, ask the bot service for it. */
+async function fetchTranscript(botId: string, completed: unknown): Promise<unknown> {
+  let url = "";
+  const c = (completed && typeof completed === "object" ? completed : {}) as Record<string, unknown>;
+  if (typeof c.transcription === "string") url = c.transcription;
+  if (!url) {
+    try {
+      const r = await botApi(`/v2/bots/${encodeURIComponent(botId)}`);
+      if (r.ok) {
+        const j = (await r.json().catch(() => null)) as Record<string, any> | null;
+        const d = j?.data ?? j;
+        if (typeof d?.transcription === "string") url = d.transcription;
+      }
+    } catch { /* no transcript link: handled by the caller */ }
+  }
+  return url ? downloadJson(url) : [];
+}
+
 /** The meeting is over and the transcript is here: write the notes with the owner's own model, post them, propose the owner's action items. */
-export async function processTranscript(botId: string, rawTranscript: unknown, site: string): Promise<void> {
+export async function processTranscript(botId: string, completed: unknown, site: string): Promise<void> {
   const snap = await meetings().doc(botId).get();
   if (!snap.exists) return;
   const m = snap.data() as MeetingDoc;
   if (m.status === "done" || m.status === "processing") return; // webhooks can arrive twice
   await setStatus(botId, "processing");
   try {
-    let segs = normalizeTranscript(rawTranscript);
-    if (!segs.length) segs = normalizeTranscript(await fetchTranscript(botId));
+    const segs = normalizeTranscript(await fetchTranscript(botId, completed));
     if (!segs.length) { await setStatus(botId, "failed", "The meeting had no speech to write down."); await say(m.uid, m.chatId, "📝 The meeting ended, but nobody was heard, so there are no notes."); return; }
 
     const agent = await loadAgent(m.uid, m.chatId);
@@ -170,9 +178,12 @@ export async function processTranscript(botId: string, rawTranscript: unknown, s
   }
 }
 
-export type MeetingEvent = { event?: string; data?: { bot_id?: string; transcript?: unknown; error?: unknown; status?: { code?: string } } };
+export type MeetingEvent = {
+  event?: string;
+  data?: { bot_id?: string; transcription?: unknown; error_code?: unknown; error_message?: unknown; status?: { code?: string } };
+};
 
-/** One webhook event from the bot service. The route has already checked that it is genuine. */
+/** One event from the bot service (the bot's own callback). The route has already checked that it is genuine. */
 export async function handleMeetingEvent(ev: MeetingEvent, site: string): Promise<void> {
   const botId = String(ev.data?.bot_id ?? "");
   if (!botId) return;
@@ -197,12 +208,13 @@ export async function handleMeetingEvent(ev: MeetingEvent, site: string): Promis
       if (m.status === "joining" || m.status === "ended") await setStatus(botId, "joining");
       return;
     }
-    case "complete": await processTranscript(botId, ev.data?.transcript, site); return;
-    case "failed": {
+    case "bot.completed": await processTranscript(botId, ev.data, site); return;
+    case "bot.failed": {
       if (m.status === "done" || m.status === "processing") return;
-      const errRaw = ev.data?.error;
-      const code = typeof errRaw === "string" && errRaw ? errRaw.slice(0, 80) : "unknown";
-      await setStatus(botId, "failed", `The bot could not finish the meeting (${code}).`);
+      const codeRaw = ev.data?.error_code, msgRaw = ev.data?.error_message;
+      const code = typeof codeRaw === "string" && codeRaw ? codeRaw.slice(0, 80) : "unknown";
+      const detail = typeof msgRaw === "string" ? msgRaw.slice(0, 160) : "";
+      await setStatus(botId, "failed", `The bot could not finish the meeting (${code}${detail ? ": " + detail : ""}).`);
       await say(m.uid, m.chatId, `⚠️ The notetaker could not join or stay in the meeting (${code}). Check that the link works and that it was admitted from the waiting room.`);
       return;
     }
