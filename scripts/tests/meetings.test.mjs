@@ -121,3 +121,24 @@ test("bot status codes map to ours, unknown ones are ignored", () => {
   assert.equal(statusFromCode(""), null);
   assert.equal(statusFromCode(undefined), null);
 });
+
+test("Meeting BaaS v2 transcription file: utterances with real speaker names", () => {
+  const v2 = { bot_id: "b1", provider: "gladia", result: { utterances: [
+    { text: "Hello everyone, welcome.", language: "en", start: 0.5, end: 2.1, speaker: "John Doe", words: [{ word: "Hello", start: 0.5, end: 0.8 }] },
+    { text: "I will send the quote.", start: 3, end: 5, speaker: "John Doe" },
+    { text: "Great.", start: 400, end: 401, speaker: "Jane Smith", words: [] },
+  ], languages: ["en"] } };
+  const segs = normalizeTranscript(v2);
+  assert.equal(segs.length, 2);
+  assert.equal(segs[0].speaker, "John Doe");
+  assert.equal(segs[0].text, "Hello everyone, welcome. I will send the quote.");
+  assert.equal(segs[1].t, 400);
+  assert.equal(normalizeTranscript({ result: { utterances: [] } }).length, 0);
+});
+
+test("callback secret: the x-mb-secret value is our token", () => {
+  const secret = "another-long-secret-value-abcdef123456", apiKey = "mb-key-xyz";
+  const token = meetingWebhookToken(secret);
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token, headerKey: "" }), true);
+  assert.equal(verifyMeetingWebhook({ secret, apiKey, token: "nope", headerKey: "" }), false);
+});
