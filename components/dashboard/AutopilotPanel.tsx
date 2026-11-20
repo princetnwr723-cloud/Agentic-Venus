@@ -2,17 +2,37 @@
 
 // One floating panel for the three "team teammate" features:
 //   Proposals  - what the agent noticed (deadlines, meetings, failed routines) and wants to prepare; you say yes or no
-//   Meetings   - send the notetaker into a Zoom / Meet / Teams call and read the notes
+//   Meetings   - the notetaker: auto-join for your calendar meetings, what is coming up, send it into a call, read the notes
 //   Workspace  - share the agent with your team: invite people, set roles, link their Slack
 import { useCallback, useEffect, useState } from "react";
-import { Bell, Check, Loader2, Users, Video, X } from "lucide-react";
+import { Bell, CalendarClock, Check, Loader2, Users, Video, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { getActiveChat } from "@/lib/avatar-activity";
 
 type Proposal = { id: string; title: string; why: string; urgency: string; status: string; source: string };
 type Settings = { enabled: boolean; dailyCap: number; quietStart: number; quietEnd: number };
-type Meeting = { botId: string; platform: string; status: string; title?: string; note?: string; notes?: { summary: string } };
+type Meeting = { botId: string; platform: string; status: string; title?: string; note?: string; durationSec?: number; notes?: { summary: string; items?: unknown[] } };
+type Upcoming = { eventId: string; title: string; platform: string; startMs: number; endMs: number; state: "will_join" | "joined" | "skipped" | "private" | "off"; skip?: string };
+type Auto = { enabled: boolean; skipWords: string[] };
 type Org = { id: string; name: string; members: Array<{ uid: string; name: string; role: string; slackLinked: boolean }> };
 const ROLE_OPTIONS = ["admin", "member", "viewer"];
+const PLATFORM: Record<string, string> = { meet: "Google Meet", zoom: "Zoom", teams: "Teams", webex: "Webex" };
+const STATUS_LABEL: Record<string, string> = { joining: "joining", waiting: "in the lobby", in_call: "in the call", ended: "ended", processing: "writing notes", done: "notes ready", failed: "failed" };
+
+const countdown = (ms: number) => {
+  if (ms <= 30_000) return "now";
+  const m = Math.round(ms / 60_000);
+  if (m < 60) return `in ${Math.max(1, m)} min`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return h >= 24 ? `in ${Math.round(h / 24)}d` : `in ${h}h${r ? ` ${String(r).padStart(2, "0")}m` : ""}`;
+};
+const STATE_LABEL: Record<Upcoming["state"], { text: string; cls: string }> = {
+  will_join: { text: "will join", cls: "bg-emerald-500/15 text-emerald-400" },
+  joined: { text: "joined", cls: "bg-emerald-500/15 text-emerald-400" },
+  skipped: { text: "skipped", cls: "bg-white/10 text-zinc-400" },
+  private: { text: "private", cls: "bg-white/10 text-zinc-400" },
+  off: { text: "auto-join off", cls: "bg-white/10 text-zinc-400" },
+};
 
 export default function AutopilotPanel() {
   const { user } = useAuth();
@@ -25,6 +45,12 @@ export default function AutopilotPanel() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [url, setUrl] = useState("");
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const [auto, setAuto] = useState<Auto | null>(null);
+  const [skipText, setSkipText] = useState("");
+  const [upcoming, setUpcoming] = useState<Upcoming[]>([]);
+  const [calConnected, setCalConnected] = useState<boolean | null>(null);
+  const [calAgent, setCalAgent] = useState("");
+  const [now, setNow] = useState(() => Date.now());
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [orgName, setOrgName] = useState("");
   const [code, setCode] = useState("");
@@ -32,7 +58,7 @@ export default function AutopilotPanel() {
 
   const call = useCallback(async (path: string, body: Record<string, unknown>) => {
     if (!user) throw new Error("Sign in first.");
-    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) }, body: JSON.stringify({ uid: user.uid, name: user.displayName || (user.email ?? "").split("@")[0], ...body }) });
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (await user.getIdToken()) }, body: JSON.stringify({ uid: user.uid, name: user.displayName || (user.email ?? "").split("@")[0], ...(path === "/api/meetings" ? { chatId: getActiveChat() ?? undefined } : {}), ...body }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok || d.ok === false) throw new Error(d.error || `Request failed (${res.status}).`);
     return d;
@@ -46,9 +72,33 @@ export default function AutopilotPanel() {
   }, [call]);
   useEffect(() => { if (open) void load(); }, [open, load]);
 
+  // the calendar side of the Meetings tab (one Google Calendar call, so only while that tab is open)
+  const loadCalendar = useCallback(async () => {
+    try {
+      const [a, u] = await Promise.all([call("/api/meetings", { action: "auto_get" }), call("/api/meetings", { action: "upcoming" })]);
+      setAuto(a.settings as Auto); setSkipText((a.settings as Auto).skipWords.join(", "));
+      setUpcoming(u.meetings as Upcoming[]); setCalConnected(Boolean(u.connected)); setCalAgent(typeof u.agentName === "string" ? u.agentName : "");
+    } catch (e) { setMsg(e instanceof Error ? e.message : "Could not load the calendar."); }
+  }, [call]);
+  useEffect(() => {
+    if (!open || tab !== "meetings") return;
+    void loadCalendar();
+    const refresh = window.setInterval(() => void loadCalendar(), 60_000);
+    const clock = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => { window.clearInterval(refresh); window.clearInterval(clock); };
+  }, [open, tab, loadCalendar]);
+
   async function run(label: string, fn: () => Promise<unknown>) {
     setBusy(label); setMsg("");
     try { await fn(); await load(); } catch (e) { setMsg(e instanceof Error ? e.message : "Something failed."); } finally { setBusy(""); }
+  }
+  async function setAutoJoin(patch: Partial<Auto>) {
+    setBusy("auto"); setMsg("");
+    try {
+      const d = await call("/api/meetings", { action: "auto_set", ...patch });
+      setAuto(d.settings as Auto); setSkipText((d.settings as Auto).skipWords.join(", "));
+      await loadCalendar();
+    } catch (e) { setMsg(e instanceof Error ? e.message : "Could not save."); } finally { setBusy(""); }
   }
   if (!user) return null;
   const pending = props.filter((p) => p.status === "pending").length;
@@ -98,16 +148,54 @@ export default function AutopilotPanel() {
             {tab === "meetings" && (
               <div className="space-y-3">
                 {configured === false && <div className="rounded-lg bg-amber-500/15 px-3 py-2 text-amber-100">The meeting bot is not set up on this server yet (add MEETINGBAAS_API_KEY and redeploy).</div>}
+
+                <div className="rounded-lg bg-white/5 px-3 py-2">
+                  <label className="flex items-center justify-between gap-3">
+                    <span>Join my calendar meetings by itself<br /><span className="text-xs text-zinc-400">A few minutes before each Google Meet, Zoom or Teams meeting in your Google Calendar. Everyone sees “{calAgent || "your agent"} (notetaker)” in the call.</span></span>
+                    <input type="checkbox" disabled={busy === "auto"} checked={Boolean(auto?.enabled)} onChange={(e) => void setAutoJoin({ enabled: e.target.checked })} className="h-5 w-5" />
+                  </label>
+                  <div className="mt-2 flex items-center gap-2 text-xs text-zinc-400">
+                    <span className="shrink-0">Skip titles with</span>
+                    <input value={skipText} onChange={(e) => setSkipText(e.target.value)} onBlur={() => { const words = skipText.split(",").map((w) => w.trim()).filter(Boolean); void setAutoJoin({ skipWords: words }); }} placeholder="private, personal" className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2 py-1 text-zinc-100" />
+                  </div>
+                  {calAgent && calConnected !== false && <p className="mt-2 text-xs text-zinc-400">Using this chat’s agent: {calAgent}. To use another one, open that chat and switch this on there.</p>}
+                  {calConnected === false && <p className="mt-2 text-xs text-amber-200">Google Calendar is not connected to {calAgent ? `“${calAgent}”` : "this agent"} yet. Connect it in Connectors of this chat, then the meetings show up here.</p>}
+                </div>
+
+                <div>
+                  <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-zinc-400"><CalendarClock size={13} /> Coming up</p>
+                  {calConnected !== false && upcoming.length === 0 && <p className="text-zinc-400">No video meetings in the next 24 hours.</p>}
+                  <div className="space-y-1.5">
+                    {upcoming.map((u) => {
+                      const st = STATE_LABEL[u.state];
+                      const ongoing = u.startMs <= now;
+                      return (
+                        <div key={u.eventId + u.startMs} className="flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-medium">{u.title}</div>
+                            <div className="text-xs text-zinc-400">{PLATFORM[u.platform] || u.platform} · {ongoing ? "started" : countdown(u.startMs - now)} · {new Date(u.startMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                          </div>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] ${st.cls}`}>{st.text}</span>
+                          {(u.state === "will_join" || u.state === "off") && <button disabled={busy === "skip"} onClick={() => run("skip", async () => { await call("/api/meetings", { action: "skip", eventId: u.eventId, startMs: u.startMs, skip: true }); await loadCalendar(); })} className="shrink-0 rounded-lg bg-white/10 px-2 py-1 text-xs hover:bg-white/15">Skip</button>}
+                          {u.state === "skipped" && <button disabled={busy === "skip"} onClick={() => run("skip", async () => { await call("/api/meetings", { action: "skip", eventId: u.eventId, startMs: u.startMs, skip: false }); await loadCalendar(); })} className="shrink-0 rounded-lg bg-white/10 px-2 py-1 text-xs hover:bg-white/15">Undo</button>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <div className="flex gap-2">
-                  <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Paste a Zoom, Google Meet or Teams link" className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2" />
+                  <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Or paste a Zoom, Google Meet or Teams link" className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2" />
                   <button disabled={!url.trim() || busy === "join"} onClick={() => run("join", async () => { await call("/api/meetings", { action: "join", url: url.trim() }); setUrl(""); setMsg("The notetaker is joining. Admit it from the waiting room if there is one."); })} className="rounded-lg bg-emerald-600 px-3 py-2 hover:bg-emerald-500 disabled:opacity-50">{busy === "join" ? <Loader2 size={14} className="animate-spin" /> : "Send bot"}</button>
                 </div>
+
                 {meetings.length === 0 && <p className="text-zinc-400">No meetings yet.</p>}
                 {meetings.map((m) => (
                   <div key={m.botId} className="rounded-lg border border-white/10 p-3">
-                    <div className="font-medium">{m.title || `${m.platform} meeting`} <span className="text-xs text-zinc-400">· {m.status}</span></div>
+                    <div className="font-medium">{m.title || `${PLATFORM[m.platform] || m.platform} meeting`} <span className="text-xs text-zinc-400">· {STATUS_LABEL[m.status] || m.status}{m.durationSec ? ` · ${Math.max(1, Math.round(m.durationSec / 60))} min` : ""}{m.notes?.items ? ` · ${m.notes.items.length} action items` : ""}</span></div>
                     {m.notes?.summary && <div className="mt-1 text-zinc-300">{m.notes.summary}</div>}
                     {m.note && <div className="mt-1 text-xs text-amber-200">{m.note}</div>}
+                    {(m.status === "joining" || m.status === "waiting" || m.status === "in_call") && <button disabled={busy === m.botId} onClick={() => run(m.botId, async () => { await call("/api/meetings", { action: "leave", botId: m.botId }); setMsg("The notetaker was asked to leave. The notes follow in the chat."); })} className="mt-2 rounded-lg bg-white/10 px-3 py-1 text-xs hover:bg-white/15">{busy === m.botId ? <Loader2 size={12} className="inline animate-spin" /> : "Leave meeting"}</button>}
                   </div>
                 ))}
               </div>
