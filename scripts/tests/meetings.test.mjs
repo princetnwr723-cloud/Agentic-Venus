@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { cleanMeetingUrl, extractMeetingUrl, extractionPrompt, itemsForAgent, itemsToSignals, normalizeTranscript, notesMessage, parseMeetingNotes, speakersOf, statusFromCode, transcriptToText, verifyMeetingWebhook, meetingWebhookToken, verifySvix } from "../../lib/meetings-core.ts";
+import { autoKey, cleanAutoSettings, cleanMeetingUrl, countdown, extractMeetingUrl, extractionPrompt, fmtDuration, itemsForAgent, itemsToSignals, normalizeTranscript, notesMessage, parseCalendarMeetings, parseMeetingNotes, shouldJoinNow, speakersOf, statusFromCode, talkStats, transcriptToText, verifyMeetingWebhook, meetingWebhookToken, verifySvix } from "../../lib/meetings-core.ts";
 import { signalsToProposals, DEFAULT_SETTINGS } from "../../lib/watchers-core.ts";
 
 test("only real meeting links are accepted", () => {
@@ -111,7 +111,10 @@ test("webhook check: URL token or the service's API-key header", () => {
 
 test("bot status codes map to ours, unknown ones are ignored", () => {
   assert.equal(statusFromCode("joining_call").status, "joining");
-  assert.equal(statusFromCode("in_waiting_room").status, "joining");
+  assert.equal(statusFromCode("in_waiting_room").status, "waiting");
+  assert.equal(statusFromCode("queued").status, "joining");
+  assert.equal(statusFromCode("transcribing").status, "ended");
+  assert.equal(statusFromCode("completed").status, "completed");
   assert.equal(statusFromCode("in_call_recording").status, "in_call");
   assert.equal(statusFromCode("in_call_not_recording").status, "in_call");
   assert.equal(statusFromCode("call_ended").status, "ended");
@@ -141,4 +144,64 @@ test("callback secret: the x-mb-secret value is our token", () => {
   const token = meetingWebhookToken(secret);
   assert.equal(verifyMeetingWebhook({ secret, apiKey, token, headerKey: "" }), true);
   assert.equal(verifyMeetingWebhook({ secret, apiKey, token: "nope", headerKey: "" }), false);
+});
+
+test("notes: the richer fields are parsed and tolerated when missing", () => {
+  const full = '{"summary":"Launch plan.","decisions":["Ship Friday"],"action_items":[{"task":"Send the quote to Acme","owner":"Priya","due":"Friday","priority":"high"}],"open_questions":["Who pays for the venue?"],"risks":["Vendor may be late"],"topics":[{"at":"0:30","title":"Launch date"},{"at":"","title":""}],"sentiment":"positive, focused","follow_up":{"subject":"Launch recap","body":"Hi all,\\nShip on Friday."}}';
+  const n = parseMeetingNotes(full);
+  assert.deepEqual(n.questions, ["Who pays for the venue?"]);
+  assert.deepEqual(n.risks, ["Vendor may be late"]);
+  assert.equal(n.topics.length, 1);
+  assert.equal(n.sentiment, "positive, focused");
+  assert.equal(n.followUp.subject, "Launch recap");
+  const old = parseMeetingNotes('{"summary":"S.","decisions":[],"action_items":[]}');
+  assert.equal(old.questions, undefined); assert.equal(old.followUp, undefined);
+  const msg = notesMessage("Launch sync", n, 1, { durationSec: 2520, talk: [{ speaker: "Priya", seconds: 900, share: 0.6, words: 900, turns: 10 }, { speaker: "Raj", seconds: 600, share: 0.4, words: 600, turns: 8 }] });
+  assert.match(msg, /⏱ 42m/); assert.match(msg, /Still open/); assert.match(msg, /Priya\s+██████░░░░\s+60%/); assert.match(msg, /> \*\*Launch recap\*\*/);
+});
+
+test("talk time is computed from the transcript, not from the model", () => {
+  const segs = normalizeTranscript({ result: { utterances: [
+    { text: "one two three four", start: 0, end: 10, speaker: "A" },
+    { text: "five six", start: 10, end: 20, speaker: "B" },
+    { text: "seven", start: 20, end: 40, speaker: "A" },
+  ] } });
+  assert.equal(segs[0].end, 10);
+  const st = talkStats(segs);
+  assert.equal(st.durationSec, 40);
+  assert.equal(st.speakers[0].speaker, "A"); assert.equal(Math.round(st.speakers[0].share * 100), 75);
+  assert.equal(st.speakers[0].turns, 2);
+  assert.equal(fmtDuration(35), "35s"); assert.equal(fmtDuration(3900), "1h 05m"); assert.equal(fmtDuration(600), "10m");
+  assert.deepEqual(talkStats([]).speakers, []);
+});
+
+test("calendar: only real video meetings, with the skip words and the join window", () => {
+  const NOW = Date.parse("2026-11-19T10:00:00Z");
+  const iso = (min) => new Date(NOW + min * 60_000).toISOString();
+  const cal = { items: [
+    { id: "e1", summary: "Standup", start: { dateTime: iso(3) }, end: { dateTime: iso(33) }, hangoutLink: "https://meet.google.com/abc-defg-hij" },
+    { id: "e2", summary: "Private dentist call", start: { dateTime: iso(3) }, end: { dateTime: iso(33) }, location: "https://zoom.us/j/12345" },
+    { id: "e3", summary: "Offsite", start: { date: "2026-11-19" }, end: { date: "2026-11-20" }, hangoutLink: "https://meet.google.com/abc-defg-hij" },
+    { id: "e4", summary: "Declined", start: { dateTime: iso(3) }, end: { dateTime: iso(33) }, hangoutLink: "https://meet.google.com/abc-defg-hij", attendees: [{ self: true, responseStatus: "declined" }] },
+    { id: "e5", summary: "Gone", status: "cancelled", start: { dateTime: iso(3) }, hangoutLink: "https://meet.google.com/abc-defg-hij" },
+    { id: "e6", summary: "Webex sync", start: { dateTime: iso(3) }, location: "https://acme.webex.com/meet/ravi" },
+    { id: "e7", summary: "Teams review", start: { dateTime: iso(90) }, end: { dateTime: iso(120) }, description: '<a href="https://teams.microsoft.com/l/meetup-join/19%3ameeting_x/0?context=y">Join</a>' },
+    { id: "e8", summary: "No link", start: { dateTime: iso(5) } },
+  ] };
+  const ms = parseCalendarMeetings(cal, { skipWords: ["private"] });
+  assert.deepEqual(ms.map((m) => m.eventId), ["e1", "e2", "e7"]);
+  assert.equal(ms[0].platform, "meet"); assert.equal(ms[1].skip, "private"); assert.equal(ms[2].platform, "teams");
+  assert.equal(shouldJoinNow(ms[0], NOW), true);
+  assert.equal(shouldJoinNow(ms[2], NOW), false, "90 minutes ahead is too early");
+  assert.equal(shouldJoinNow(ms[0], NOW + 25 * 60_000), false, "more than 20 minutes late");
+  assert.equal(shouldJoinNow(ms[0], NOW - 4 * 60_000), false, "more than 6 minutes early");
+  assert.equal(autoKey("e1", 1), autoKey("e1", 1)); assert.notEqual(autoKey("e1", 1), autoKey("e1", 2));
+  assert.deepEqual(parseCalendarMeetings(null, { skipWords: [] }), []);
+});
+
+test("auto-join settings and countdown", () => {
+  assert.deepEqual(cleanAutoSettings(undefined), { enabled: false, skipWords: ["private", "personal", "confidential"] });
+  assert.deepEqual(cleanAutoSettings({ enabled: true, skipWords: [" Salary ", "salary", "", "x".repeat(50)] }), { enabled: true, skipWords: ["salary", "x".repeat(30)] });
+  assert.equal(cleanAutoSettings({ enabled: "yes" }).enabled, false);
+  assert.equal(countdown(10_000), "now"); assert.equal(countdown(12 * 60_000), "in 12 min"); assert.equal(countdown(125 * 60_000), "in 2h 05m"); assert.equal(countdown(3 * 24 * 3600_000), "in 3d");
 });
