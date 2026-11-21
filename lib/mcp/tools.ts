@@ -1,6 +1,6 @@
 // Server only. Connects the MCP protocol to AgenticVenus' own tool registry (the same tools the agent uses).
-// Rules: connect.* is never exposed; write tools run ONLY when the person ticked "allow actions" on the login screen
-// (and Claude still asks them before each call); every write is logged in the audit trail.
+// Rules: connect.* is never exposed; write tools run ONLY when the person turned on "Actions" (on the login screen or on the
+// Connect to Claude page at /mcp), and Claude still asks them before each call; every write is logged in the audit trail.
 import { getAdminDb } from "@/lib/firebase-admin";
 import { audit } from "@/lib/audit";
 import { buildCatalog, callTool } from "@/lib/tools/registry";
@@ -56,7 +56,7 @@ export async function runMcpTool(uid: string, scope: string, nativeName: string,
     return {
       isError: true,
       text: `Not done: this action changes something (${r.needsApproval.summary.split("\n")[0]}) and write access is OFF for this connection. ` +
-        `Tell the person: open AgenticVenus → Connect to Claude, disconnect, connect again and tick "Allow actions".`,
+        `Tell the person: open the AgenticVenus "Connect to Claude" page (their site address followed by /mcp), find this app under "Connected apps" and press "Actions ON karo". No need to disconnect.`,
     };
   }
   if (r.ok && r.risk === "write") await audit(uid, { kind: "tool_write", chatId: MCP_CHAT, text: `mcp ${name} ${JSON.stringify(args).slice(0, 220)}` });
