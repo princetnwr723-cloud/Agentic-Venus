@@ -2,7 +2,7 @@
 // Only SHA-256 hashes of codes and tokens are stored. These collections are NOT in firestore.rules, so only the server
 // (Admin SDK) can touch them. Add a Firestore TTL policy on the "expireAt" field of mcpCodes and mcpTokens to auto-clean.
 import type { Firestore, Transaction } from "firebase-admin/firestore";
-import { ACCESS_TTL_S, CODE_TTL_MS, REFRESH_TTL_S, isValidRedirectUri, pkceMatches, randomToken, sha256 } from "./oauth-core.ts";
+import { ACCESS_TTL_S, CODE_TTL_MS, REFRESH_TTL_S, isValidRedirectUri, pkceMatches, randomToken, scopeFor, sha256 } from "./oauth-core.ts";
 
 export class McpOAuthError extends Error {
   readonly code: string;
@@ -118,5 +118,17 @@ export async function listConnections(db: Firestore, uid: string) {
 export async function revokeClient(db: Firestore, uid: string, clientId: string) {
   const snap = await tokens(db).where("uid", "==", uid).where("clientId", "==", clientId).get();
   for (const s of snap.docs) await tokens(db).doc(s.id).delete();
+  return snap.docs.length;
+}
+
+/**
+ * "Actions ON/OFF": changes the scope of every access and refresh token of this app for this user.
+ * No new login is needed. The very next tool call sees the new scope, because verifyAccess reads it from the token.
+ * Returns how many tokens were changed (0 means this app is not connected).
+ */
+export async function setClientWrite(db: Firestore, uid: string, clientId: string, write: boolean) {
+  const scope = scopeFor(write);
+  const snap = await tokens(db).where("uid", "==", uid).where("clientId", "==", clientId).get();
+  for (const s of snap.docs) await tokens(db).doc(s.id).update({ scope });
   return snap.docs.length;
 }
