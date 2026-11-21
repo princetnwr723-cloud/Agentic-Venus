@@ -7,6 +7,7 @@ import { tickVenus } from "@/lib/venus-run-server";
 import { tickBusiness } from "@/lib/business-server";
 import { tickWatchers } from "@/lib/watchers-server";
 import { tickMeetings } from "@/lib/meetings-server";
+import { tickCalendar } from "@/lib/calendar-server";
 import { tickTeamRuns } from "@/lib/team-server";
 import type { Reply } from "@/lib/agent/types";
 
@@ -20,6 +21,7 @@ export const maxDuration = 60;
 //   - a card nobody answered for 24 hours          -> the agent is told, and wraps up
 //   - a Business Hub team job                       -> the next steps start, finished ones are collected
 //   - a calendar meeting about to start             -> the notetaker joins it (when the owner turned auto-join on); open meetings move forward
+//   - the owner's calendar                          -> kept up to date; a brief before each meeting; the plan for the day every morning
 export async function POST(req: Request) {
   const denied = cronDenied(req);
   if (denied) return denied;
@@ -63,7 +65,8 @@ export async function POST(req: Request) {
     const teams = await tickTeamRuns(site, now).catch(() => ({ checked: 0 }));
     // The meeting notetaker: join calendar meetings that are about to start, follow the open ones, catch a missed "meeting is over" message
     const meetings = await tickMeetings(site, now).catch(() => ({ joined: 0, refreshed: 0 }));
-    return NextResponse.json({ ok: true, ...out, venus, business, watchers, teams, meetings });
+    const calendar = await tickCalendar(now).catch(() => ({ users: 0, synced: 0, briefs: 0, agendas: 0 }));
+    return NextResponse.json({ ok: true, ...out, venus, business, watchers, teams, meetings, calendar });
   } catch (err) {
     return NextResponse.json({ ok: false, ...out, error: err instanceof Error ? err.message : "Agent tick failed." }, { status: 500 });
   }
