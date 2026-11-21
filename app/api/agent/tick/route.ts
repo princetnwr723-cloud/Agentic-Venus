@@ -9,6 +9,7 @@ import { tickWatchers } from "@/lib/watchers-server";
 import { tickMeetings } from "@/lib/meetings-server";
 import { tickCalendar } from "@/lib/calendar-server";
 import { tickTeamRuns } from "@/lib/team-server";
+import { tickGroupTurns } from "@/lib/group-server";
 import type { Reply } from "@/lib/agent/types";
 
 export const runtime = "nodejs";
@@ -19,6 +20,7 @@ export const maxDuration = 60;
 //   - a run held by a budget latch                 -> continues when the limit has reset
 //   - a takeover with no heartbeat / past 15 min   -> the screen is handed back to the agent
 //   - a card nobody answered for 24 hours          -> the agent is told, and wraps up
+//   - a group chat turn that is waiting for a teammate    -> finished work runs are posted in the chat, the next teammate speaks
 //   - a Business Hub team job                       -> the next steps start, finished ones are collected
 //   - a calendar meeting about to start             -> the notetaker joins it (when the owner turned auto-join on); open meetings move forward
 //   - the owner's calendar                          -> kept up to date; a brief before each meeting; the plan for the day every morning
@@ -63,10 +65,11 @@ export async function POST(req: Request) {
     // Proactive watchers (mail / calendar / GitHub / routines -> proposals) and dashboard team runs that work in the background
     const watchers = await tickWatchers(site, now).catch(() => ({ checked: 0, sent: 0 }));
     const teams = await tickTeamRuns(site, now).catch(() => ({ checked: 0 }));
+    const groups = await tickGroupTurns(site, now).catch(() => ({ checked: 0 }));
     // The meeting notetaker: join calendar meetings that are about to start, follow the open ones, catch a missed "meeting is over" message
     const meetings = await tickMeetings(site, now).catch(() => ({ joined: 0, refreshed: 0 }));
     const calendar = await tickCalendar(now).catch(() => ({ users: 0, synced: 0, briefs: 0, agendas: 0 }));
-    return NextResponse.json({ ok: true, ...out, venus, business, watchers, teams, meetings, calendar });
+    return NextResponse.json({ ok: true, ...out, venus, business, watchers, teams, groups, meetings, calendar });
   } catch (err) {
     return NextResponse.json({ ok: false, ...out, error: err instanceof Error ? err.message : "Agent tick failed." }, { status: 500 });
   }
