@@ -2,7 +2,7 @@
 import { PROTOCOL_VERSIONS } from "./oauth-core.ts";
 
 export type McpTool = { name: string; description: string; inputSchema: Record<string, unknown>; annotations?: Record<string, unknown> };
-export type ToolOutcome = { text: string; isError: boolean };
+export type ToolOutcome = { text: string; isError: boolean; image?: { mediaType: string; data: string } };
 export type RpcDeps = {
   info: { name: string; version: string; instructions?: string };
   listTools: () => Promise<McpTool[]>;
@@ -44,7 +44,11 @@ export async function handleRpc(msg: unknown, deps: RpcDeps): Promise<RpcRespons
       if (params.arguments !== undefined && !isObj(params.arguments)) return fail(id, -32602, "arguments must be an object.");
       const out = await deps.callTool(name, (params.arguments as Record<string, unknown>) ?? {});
       const text = out.text.length > MAX_TEXT ? out.text.slice(0, MAX_TEXT) + "\n…(cut)" : out.text;
-      return ok(id, { content: [{ type: "text", text }], isError: out.isError });
+      const content: Array<Record<string, unknown>> = [{ type: "text", text }];
+      if (out.image && /^image\/(png|jpeg|webp)$/.test(out.image.mediaType) && out.image.data.length < 4_000_000) {
+        content.push({ type: "image", data: out.image.data, mimeType: out.image.mediaType });
+      }
+      return ok(id, { content, isError: out.isError });
     }
     return fail(id, -32601, `Method not found: ${method}`);
   } catch (e) {
