@@ -12,6 +12,8 @@ import { latchReason } from "@/lib/agent/latch-server";
 import { isOwner } from "@/lib/owner";
 import { notifyOwner } from "@/lib/channels";
 import { byId, CATALOG, personaOf } from "@/lib/team-catalog";
+import { parseReply } from "@/lib/group-core";
+import { memoryFor, saveNotes } from "@/lib/group-memory";
 import { clip, jobOutcome, nextActions, oneLine, parseJson, reportText, sanitizePlan, type JobStep } from "@/lib/business-core";
 import type { TeamRunDoc } from "@/lib/steps";
 
@@ -40,7 +42,8 @@ async function keyRefFor(uid: string, provider: string, raw: string, runId: stri
   return ref;
 }
 
-async function loadChatModel(uid: string, chatId: string, runId: string) {
+/** Also used by the group chat engine (lib/group-server.ts): the chat's own model and key, with temporary vault references for the background work. */
+export async function loadChatModel(uid: string, chatId: string, runId: string) {
   const chat = (await userDoc(uid).collection("chats").doc(chatId).get()).data() as { provider?: ProviderId; model?: string } | undefined;
   if (!chat?.provider || !chat.model) throw Object.assign(new Error("Open the chat once and pick a model first."), { status: 400 });
   const keys = ((await userDoc(uid).get()).data() as { apiKeys?: Partial<Record<ProviderId, string>> } | undefined)?.apiKeys ?? {};
@@ -96,11 +99,11 @@ async function mutate(id: string, fn: (j: TeamJob) => boolean): Promise<TeamJob 
 const say = (uid: string, chatId: string, text: string) =>
   userDoc(uid).collection("chats").doc(chatId).update({ messages: FieldValue.arrayUnion({ role: "assistant", content: text, at: Date.now() }) }).catch(() => {});
 
-const stepTask = (j: TeamJob, i: number): string => {
+const stepTask = (j: TeamJob, i: number, mem: string): string => {
   const s = j.steps[i], m = byId(s.member) ?? CATALOG[0];
   const deps = s.after.map((k, n) => `RESULT OF EARLIER STEP ${n + 1} (${j.steps[k].name}):\n${clip(j.steps[k].result ?? "", 1800)}`).join("\n\n");
   const tool = m.tool === "pc" ? "Real websites, lists, logins or downloads: use pc.run (the background computer)." : m.tool === "video" ? "A video: use the Venus video tools." : m.tool === "research" ? "Use web search and cite links." : "";
-  return clip(`${personaOf(m)}\n\nTHE TEAM'S OVERALL GOAL\n${clip(j.goal, 600)}\n\nYOUR STEP (step ${i + 1})\n${clip(s.task, 1800)}\n${tool ? `\n${tool}\n` : ""}${deps ? `\n${deps}\n` : ""}\nRULES: Never invent facts, names or contact details. Anything that sends mail or posts is held for the owner's approval by the system, so just describe it. Finish with a short result for the team: what you did, links or file names, and a "Needs you" line if something is missing.`, 7800);
+  return clip(`${personaOf(m)}\n\nTHE TEAM'S OVERALL GOAL\n${clip(j.goal, 600)}\n\nYOUR STEP (step ${i + 1})\n${clip(s.task, 1800)}\n${tool ? `\n${tool}\n` : ""}${deps ? `\n${deps}\n` : ""}${mem ? `\n${mem}\n` : ""}\nRULES: Never invent facts, names or contact details. Anything that sends mail or posts is held for the owner's approval by the system, so just describe it. Finish with a short result for the team: what you did, links or file names, and a "Needs you" line if something is missing. Optional, on its own line at the very end: NOTE: <one lasting fact about the owner or the project that you will want next time; never a password or key>.`, 7800);
 };
 
 // ---------------------------------------------------------------- start / advance / stop
@@ -152,7 +155,12 @@ export async function advanceTeamRun(id: string, site: string): Promise<void> {
     if (tooOld) { await finishStep(id, s.i, "failed", { note: "Timed out after 24 hours." }); continue; }
     const r = await S.getRun(j.uid, s.runId).catch(() => null);
     if (!r) await finishStep(id, s.i, "failed", { note: "The background run could not be found." });
-    else if (r.status === "done") await finishStep(id, s.i, "done", { result: String(r.result ?? "") });
+    else if (r.status === "done") {
+      // lasting notes the member wrote are kept for next time (not when the run read untrusted web or mail content); control lines never reach the report
+      const p = parseReply(String(r.result ?? ""), [], s.member);
+      if (p.notes.length && !(r as { tainted?: boolean }).tainted) await saveNotes(j.uid, j.chatId, s.member, p.notes);
+      await finishStep(id, s.i, "done", { result: p.text });
+    }
     else if (r.status === "error" || r.status === "stopped") await finishStep(id, s.i, "failed", { note: r.error?.message || (r.status === "stopped" ? "Stopped." : "The agent stopped with an error.") });
     else if (r.status === "paused" && r.pending && !(s as { pendingNoted?: boolean }).pendingNoted) {
       const won = await mutate(id, (x) => { const y = x.steps[s.i] as JobStep & { name: string }; if (!y || y.pendingNoted) return false; y.pendingNoted = true; return true; });
@@ -174,7 +182,7 @@ export async function advanceTeamRun(id: string, site: string): Promise<void> {
       if (!claimed) continue;
       active++;
       try {
-        const runId = await startRun(claimed.uid, { chatId: claimed.chatId, task: stepTask(claimed, i), provider: claimed.provider as ProviderId, model: claimed.model, keyRef: claimed.keyRef, fallbacks: claimed.fallbacks, origin: claimed.origin || site, maxRounds: 40 });
+        const runId = await startRun(claimed.uid, { chatId: claimed.chatId, task: stepTask(claimed, i, await memoryFor(claimed.uid, claimed.chatId, claimed.steps[i].member).catch(() => "")), provider: claimed.provider as ProviderId, model: claimed.model, keyRef: claimed.keyRef, fallbacks: claimed.fallbacks, origin: claimed.origin || site, maxRounds: 40 });
         await mutate(id, (x) => { const s = x.steps[i]; if (!s) return false; s.runId = runId; return true; });
       } catch (e) { await finishStep(id, i, "failed", { note: `Could not start: ${e instanceof Error ? e.message.slice(0, 200) : "unknown error"}` }); }
     }
@@ -220,4 +228,3 @@ export async function tickTeamRuns(site: string, _now = Date.now()): Promise<{ c
   for (const d of s.docs) await advanceTeamRun(d.id, site).catch((e) => console.error("team tick failed", e));
   return { checked: s.size };
 }
-
