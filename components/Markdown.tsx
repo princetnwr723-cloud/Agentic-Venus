@@ -6,6 +6,7 @@ import { hostOk, imgAllowed, useImageUrl } from "@/components/rich/image-url";
 import { Collage, RICH_LANGS, RICH_LOADING, RichFence } from "@/components/rich/RichBlocks";
 import VMapCard from "@/components/rich/VMapCard";
 import VLeadsCard from "@/components/rich/VLeadsCard";
+import VCalendarCard from "@/components/rich/VCalendarCard";
 
 /* ------------------------------------------------------------------ */
 /* Images                                                              */
@@ -434,6 +435,10 @@ function FenceBlock({ lang, code, closed }: { lang: string; code: string; closed
   if (lang === "vleads") {
     if (!closed) return <Drawing what="Building lead list…" />;
     return <VLeadsCard code={code} fallback={<CodeBlock code={code} lang="vleads (could not draw)" />} />;
+  }
+  if (lang === "vcal") {
+    if (!closed) return <Drawing what="Building calendar…" />;
+    return <VCalendarCard code={code} fallback={<CodeBlock code={code} lang="vcal (could not draw)" />} />;
   }
   if (RICH_LANGS.has(lang)) {
     if (!closed) return <Drawing what={RICH_LOADING[lang] ?? "Building…"} />;
