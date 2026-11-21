@@ -164,7 +164,7 @@ export default function TeamPanel({ uid, chatId, chatName, onClose, onTalk }: {
               <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
                 {msgs.length === 0 && (
                   <div className="space-y-2 p-2 text-xs text-muted">
-                    <p>This is your team's group chat. Write a message and the right teammate answers; teammates can hand work to each other, and anyone with a computer, code, video or web skill does real work in the background while you keep chatting.</p>
+                    <p>This is your team&apos;s group chat. Write a message and the right teammate answers; teammates can hand work to each other, and anyone with a computer, code, video or web skill does real work in the background while you keep chatting.</p>
                     <p><span className="text-ink">@Hunter</span> asks one member · <span className="text-ink">@everyone</span> is a round table · no @ and the team picks who answers.</p>
                     <p><span className="text-ink">/pin text</span> pins a fact for everyone · <span className="text-ink">/goal text</span> starts a planned multi-step goal · <span className="text-ink">/stop</span> stops all work.</p>
                   </div>
