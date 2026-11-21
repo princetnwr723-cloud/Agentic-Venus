@@ -17,6 +17,8 @@ export type NativeReq = {
   system: { stable: string; volatile: string };
   messages: AgentMsg[]; tools: ToolDef[]; maxTokens: number; names: NameMap;
   signal?: AbortSignal; cache?: boolean; longCache?: boolean;
+  /** most tools sent in one request (default MAX_TOOLS) */
+  toolCap?: number;
   /** when set, the answer is streamed and every new piece of visible text is passed here */
   onText?: (delta: string) => void;
 };
@@ -33,6 +35,52 @@ const zero = (): Usage => ({ inTok: 0, outTok: 0, cacheRead: 0, cacheWrite: 0 })
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const uid = (round: string, i: number) => `call_${round}_${i}`;
 const joinText = (m: AgentMsg) => m.content.filter((b): b is Extract<Block, { type: "text" }> => b.type === "text").map((b) => b.text).join("\n");
+
+// ---------------- tool limit ----------------
+// OpenAI, Gemini and most OpenAI-compatible gateways refuse a request with more than 128 tools
+// ("'tools': maximum number of items is 128"). The catalog can be bigger (connectors, MCP, plugins), so every
+// request is cut to a safe number: the tools the run needs always stay, the rest are ranked by the task text.
+export const MAX_TOOLS = 120;
+const SAFE_TOOLS = 60; // used for the one retry when a provider still says "too many tools"
+const MUST_KEEP = new Set(["ask_user", "request_approval", "request_secret", "request_takeover"]);
+const TOOL_STOP = new Set(["the", "and", "for", "with", "that", "this", "you", "your", "from", "have", "will", "can", "please", "bhai", "kro", "karo", "kar", "hai", "ka", "ki", "ke", "ko", "me", "se", "aur", "kya", "tum", "aap", "mujhe", "kal", "aaj"]);
+const words = (t: string) => t.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]+/g, " ").split(" ").filter((w) => w.length >= 3 && !TOOL_STOP.has(w));
+const stem = (w: string) => w.slice(0, 5);
+const EXTRA: Array<[RegExp, string]> = [
+  [/meet|invite|schedul|calendar|appointment|mitting/i, "calendar meeting schedule invite event"],
+  [/mail|gmail|inbox|invite/i, "email mail send"],
+  [/image|photo|pic|tasveer/i, "image photo"],
+  [/video|reel/i, "video"],
+  [/search|dhundo|find|khoj/i, "search web"],
+];
+
+export function capTools(tools: ToolDef[], messages: AgentMsg[], limit = MAX_TOOLS): ToolDef[] {
+  if (tools.length <= limit) return tools;
+  const chosen = new Set<string>();
+  const add = (n: string) => { if (chosen.size < limit) chosen.add(n); };
+  const have = new Set(tools.map((t) => t.name));
+  // 1) the stop-and-ask tools and the plan tools: the run cannot work without them
+  for (const t of tools) if (MUST_KEEP.has(t.name) || t.name.startsWith("plan.")) add(t.name);
+  // 2) every tool already used in this run (the provider needs its declaration for the old calls)
+  for (const m of messages) for (const b of m.content) if (b.type === "tool_use" && have.has(b.name)) add(b.name);
+  // 3) the rest: best match with the owner's request first
+  const firstUser = messages.find((m) => m.role === "user");
+  const lastUser = [...messages].reverse().find((m) => m.role === "user" && joinText(m).trim());
+  const query = [firstUser ? joinText(firstUser) : "", lastUser ? joinText(lastUser) : ""].join(" ").slice(-6000);
+  const qw = new Set(words(query).map(stem));
+  for (const [re, add2] of EXTRA) if (re.test(query)) for (const w of words(add2)) qw.add(stem(w));
+  const scored = tools.map((t, i) => {
+    const nameW = words(t.name.replace(/[._-]/g, " ")).map(stem);
+    const descW = new Set(words(t.description.slice(0, 300)).map(stem));
+    let score = 0;
+    for (const w of Array.from(qw)) { if (nameW.includes(w)) score += 3; else if (descW.has(w)) score += 1; }
+    return { t, i, score };
+  }).sort((a, b) => b.score - a.score || a.i - b.i);
+  for (const x of scored) add(x.t.name);
+  return tools.filter((t) => chosen.has(t.name));
+}
+
+const withCap = (r: NativeReq): ToolDef[] => capTools(r.tools, r.messages, r.toolCap ?? MAX_TOOLS);
 
 // ---------------- Anthropic ----------------
 export function buildAnthropic(r: NativeReq) {
@@ -77,7 +125,7 @@ export function buildOpenAI(r: NativeReq) {
   const o3 = r.provider === "openai";
   return {
     model: r.model, messages: out,
-    ...(r.tools.length ? { tools: r.tools.map((t) => ({ type: "function", function: { name: r.names.toNative(t.name), description: t.description, parameters: t.schema } })), tool_choice: "auto" } : {}),
+    ...(r.tools.length ? { tools: withCap(r).map((t) => ({ type: "function", function: { name: r.names.toNative(t.name), description: t.description, parameters: t.schema } })), tool_choice: "auto" } : {}),
     ...(o3 ? { max_completion_tokens: r.maxTokens } : { max_tokens: r.maxTokens }),
   };
 }
@@ -122,7 +170,7 @@ export function buildGemini(r: NativeReq) {
   const sys = [r.system.stable, r.system.volatile].filter((s) => s.trim()).join("\n\n");
   return {
     contents, ...(sys ? { systemInstruction: { parts: [{ text: sys }] } } : {}),
-    ...(r.tools.length ? { tools: [{ functionDeclarations: r.tools.map((t) => ({ name: r.names.toNative(t.name), description: t.description, parameters: geminiSchema(t.schema) })) }] } : {}),
+    ...(r.tools.length ? { tools: [{ functionDeclarations: withCap(r).map((t) => ({ name: r.names.toNative(t.name), description: t.description, parameters: geminiSchema(t.schema) })) }] } : {}),
     generationConfig: { maxOutputTokens: r.maxTokens },
   };
 }
@@ -231,7 +279,18 @@ async function callStreaming(r: NativeReq): Promise<ModelTurn> {
   }
 }
 
+/** A provider that still says "too many tools" gets one more try with a much shorter list. */
+const tooManyTools = (e: unknown) => e instanceof ProviderError && e.status === 400 && /maximum number of items|too many tools|tools?.{0,40}(at most|exceed|limit|maximum)/i.test(e.message);
+
 export async function callNative(r: NativeReq): Promise<ModelTurn> {
+  try { return await callNativeOnce(r); }
+  catch (e) {
+    if (r.provider !== "anthropic" && tooManyTools(e) && r.tools.length > SAFE_TOOLS && (r.toolCap ?? MAX_TOOLS) > SAFE_TOOLS) return callNativeOnce({ ...r, toolCap: SAFE_TOOLS });
+    throw e;
+  }
+}
+
+async function callNativeOnce(r: NativeReq): Promise<ModelTurn> {
   if (r.onText) {
     try { return await callStreaming(r); }
     catch (e) { if (!streamUnsupported(e)) throw e; /* this provider or model refuses streaming: ask normally */ }
