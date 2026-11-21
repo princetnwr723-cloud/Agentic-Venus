@@ -2,7 +2,7 @@ import type { Def } from "./plugins";
 
 const flag = (v: unknown): boolean | undefined => (v === true || v === "true" ? true : v === false || v === "false" ? false : undefined);
 
-// Tools of the meeting bot and of the owner's calendar. Joining a call is an action in the outside world, so it is held for the owner's approval.
+// Tools of the meeting bot and of the owner's calendar. Joining a call, and making, moving or cancelling a meeting, are actions in the outside world, so they are held for the owner's approval.
 export const MEETING_TOOLS: Def[] = [
   {
     name: "calendar.show", risk: "read", params: "range?:string (today, tomorrow, this week, next week, this month, next 7 days, a weekday, or a date like 2026-11-24), from?:string (YYYY-MM-DD), to?:string (YYYY-MM-DD)",
@@ -31,6 +31,42 @@ export const MEETING_TOOLS: Def[] = [
       if (!ctx) throw new Error("Not available here.");
       const { freeTime } = await import("@/lib/calendar-server");
       return freeTime(ctx.uid, ctx.chatId, { date: String(a.date ?? "today"), minutes: Number(a.minutes) || 30 });
+    },
+  },
+  {
+    name: "calendar.create", risk: "write", params: "title:string, date:string (today, tomorrow, a weekday, or YYYY-MM-DD), time:string (the start, like 11:00, 11am, 3:30 pm or 15:00), minutes?:number (length, default 30), invite?:string (the e-mail addresses to invite, comma separated), description?:string (agenda or notes), location?:string, meet?:boolean (add a Google Meet link, default true), reminder?:number (popup reminder this many minutes before, default 10, 0 = none), force?:boolean (create even if it overlaps another event)",
+    description: "Put a new meeting or event on the owner's Google Calendar, with a Google Meet link, and e-mail the invitation to the people given. Use it when the owner says set / schedule / book / fix a meeting (\"meeting set kro\", \"invite bhejo\"). The tool checks the owner's free time itself and refuses a clash with the free slots instead; do not check first. Each invitee needs an e-mail address: if the owner gave only a name, ask for the address with ask_user. If the owner did not say the title, the length or the time, ask only for what you truly cannot guess (a time is always needed). The invitations are sent by Google from the owner's account. Afterwards tell the owner the day, time, Meet link and who was invited.",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { createEvent } = await import("@/lib/calendar-actions");
+      return createEvent(ctx.uid, ctx.chatId, { title: a.title, date: a.date, time: a.time, minutes: a.minutes, invite: a.invite, description: a.description, location: a.location, meet: flag(a.meet), reminder: a.reminder, force: flag(a.force) === true });
+    },
+  },
+  {
+    name: "calendar.invite", risk: "write", params: "invite:string (e-mail addresses to add, comma separated), title?:string (the meeting, or part of its title), id?:string (the event id, when several meetings match)",
+    description: "Add people to a meeting that is already on the owner's calendar. Google e-mails them the invitation. Each person needs an e-mail address (ask the owner with ask_user if only a name was given).",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { inviteToEvent } = await import("@/lib/calendar-actions");
+      return inviteToEvent(ctx.uid, ctx.chatId, { id: a.id, title: a.title, invite: a.invite });
+    },
+  },
+  {
+    name: "calendar.move", risk: "write", params: "title?:string (the meeting, or part of its title), id?:string (the event id, when several meetings match), date?:string (the NEW day), time?:string (the NEW start), minutes?:number (the NEW length), force?:boolean (even if it overlaps another event)",
+    description: "Move a meeting on the owner's calendar to another day or time, or change its length (reschedule, \"meeting aage badha do\"). What is not given stays as it was. Google tells the guests about the new time. Refuses a clash and shows the free slots instead.",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { moveEvent } = await import("@/lib/calendar-actions");
+      return moveEvent(ctx.uid, ctx.chatId, { id: a.id, title: a.title, date: a.date, time: a.time, minutes: a.minutes, force: flag(a.force) === true });
+    },
+  },
+  {
+    name: "calendar.cancel", risk: "write", params: "title?:string (the meeting, or part of its title), id?:string (the event id, when several meetings match)",
+    description: "Cancel (delete) a meeting from the owner's calendar. Google tells the guests that it is cancelled. Only the meeting the owner named; never cancel anything they did not ask for.",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { cancelEvent } = await import("@/lib/calendar-actions");
+      return cancelEvent(ctx.uid, ctx.chatId, { id: a.id, title: a.title });
     },
   },
   {
