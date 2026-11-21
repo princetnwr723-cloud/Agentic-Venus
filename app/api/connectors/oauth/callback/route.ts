@@ -6,6 +6,7 @@ import { identifyAccount } from "@/lib/tools/oauth-identify";
 import { extendToken, pkceVerifier, tokenRequest } from "@/lib/tools/oauth-token";
 import { syncConnectorAnnouncements } from "@/lib/connector-announce";
 import { oauthResultPage } from "@/lib/oauth-result";
+import { startCalendar } from "@/lib/calendar-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -105,6 +106,8 @@ export async function GET(req: Request) {
       [`connectorStatus.${provider.id}`]: { status: "connected", connectedAt: Date.now(), scopes: provider.perShop && t.scope ? t.scope.split(",").map((x) => x.trim()).filter(Boolean) : provider.scopes, refreshable: Boolean(t.refresh_token) || Boolean(provider.exchange), account },
     });
     await syncConnectorAnnouncements(d.uid, d.chatId, { added: [`oauth:${provider.id}`] }).catch(() => {}); // posts "Agent updated" in the chat
+    // Google gives the calendar too: build the AgenticVenus calendar now and show it in the chat (never blocks or breaks the connection)
+    if (provider.id === "google") await startCalendar(d.uid, d.chatId).catch(() => {});
 
     return oauthResultPage(req, true, `${provider.label} connected.`, { provider: provider.id, chatId: d.chatId });
   } catch (e) { return fail(req, e instanceof Error ? e.message : "OAuth callback failed."); }
