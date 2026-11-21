@@ -111,20 +111,22 @@ export function kickVenus(uid: string, pid: string, chatId: string | undefined, 
 export class VenusStartError extends Error { status: number; constructor(m: string, status = 400) { super(m); this.status = status; } }
 
 /** Starts a video in the background. `project` is the prepared project (brief, length, look ...); the run owns it from here. */
-export async function startVenusRun(uid: string, project: VenusProject, o: { origin: string; source: "chat" | "agent" | "routine"; quiet?: boolean }): Promise<string> {
+export async function startVenusRun(uid: string, project: VenusProject, o: { origin: string; source: "chat" | "agent" | "routine"; quiet?: boolean; claudeDriven?: boolean }): Promise<string> {
   const S = venusStore();
   if (!supabaseConfigured()) throw new VenusStartError("Venus Pro needs Supabase for video storage. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel and redeploy.");
   const u = (await userDoc(uid).get()).data() as { apiKeys?: Record<string, string>; e2bKey?: string } | undefined;
   if (!u?.e2bKey) throw new VenusStartError("Venus Pro needs an E2B key. Add it under API keys first.");
-  if (!u.apiKeys?.[project.provider]) throw new VenusStartError("No API key is saved for this chat's model.");
+  // claudeDriven (MCP): Claude wrote the storyboard, so the script and design steps are skipped and no server model or key is needed
+  if (!o.claudeDriven && !u.apiKeys?.[project.provider]) throw new VenusStartError("No API key is saved for this chat's model.");
   if (!project.chatId) throw new VenusStartError("A background video belongs to a chat.");
   const mine = (await S.listRuns(uid, 12)).filter((r) => r.chatId === project.chatId && (r.status === "queued" || r.status === "running"));
   if (mine.length >= 1) throw new VenusStartError("Venus Pro is already making a video in this chat. Wait for it to finish, or stop it.", 429);
   const now = Date.now();
-  const p: VenusProject = { ...project, status: "running", stage: "studio", error: undefined, updatedAt: now, server: true };
+  const first = o.claudeDriven ? "design" : "studio";
+  const p: VenusProject = { ...project, status: "running", stage: first, error: undefined, updatedAt: now, server: true };
   await saveProjectServer(uid, p);
   const doc: VenusRunDoc = {
-    id: p.id, chatId: project.chatId, title: p.title, status: "queued", stage: "studio", createdAt: now, updatedAt: now, lease: null, slices: 0, origin: o.origin,
+    id: p.id, chatId: project.chatId, title: p.title, status: "queued", stage: first, createdAt: now, updatedAt: now, lease: null, slices: 0, origin: o.origin,
     label: "Starting…", value: null, source: o.source, ...(o.quiet ? { quiet: true } : {}),
   };
   await S.createRun(uid, doc);
