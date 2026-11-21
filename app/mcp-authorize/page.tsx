@@ -93,8 +93,9 @@ export default function McpAuthorize() {
           <>
             <p className="mb-3 text-center text-xs text-muted">Signed in: {user.email || "your account"}</p>
             <ul className="mb-3 space-y-1 text-sm text-muted">
-              <li>• Search, padhna, files aur research jaise tools (sirf dekhna)</li>
-              <li>• Tumhari chats aur saved passwords nahi dikhte</li>
+              <li>â¢ Search, padhna, files aur research jaise tools (sirf dekhna)</li>
+              <li>â¢ Claude tumhari chats ki list dekhega aur jo chat tum chuno uska PC, Venus Code, team, connected apps aur schedules chalayega</li>
+              <li>â¢ Saved passwords aur API keys Claude ko kabhi nahi dikhte</li>
             </ul>
             <label className="mb-4 flex cursor-pointer items-start gap-2 rounded-lg border border-line p-3 text-sm">
               <input type="checkbox" checked={write} onChange={(e) => setWrite(e.target.checked)} className="mt-0.5" />
