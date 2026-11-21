@@ -1,7 +1,48 @@
 import type { Def } from "./plugins";
 
-// Tools of the meeting bot. Joining a call is an action in the outside world, so it is held for the owner's approval.
+const flag = (v: unknown): boolean | undefined => (v === true || v === "true" ? true : v === false || v === "false" ? false : undefined);
+
+// Tools of the meeting bot and of the owner's calendar. Joining a call is an action in the outside world, so it is held for the owner's approval.
 export const MEETING_TOOLS: Def[] = [
+  {
+    name: "calendar.show", risk: "read", params: "range?:string (today, tomorrow, this week, next week, this month, next 7 days, a weekday, or a date like 2026-11-24), from?:string (YYYY-MM-DD), to?:string (YYYY-MM-DD)",
+    description: "Show the owner's calendar in the chat as a calendar card with the real meetings and what the notetaker does with each. Use it whenever the owner asks about their calendar, schedule, meetings, plans or what is coming up. The calendar is read from Google Calendar once and kept up to date by itself.",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { showCalendar } = await import("@/lib/calendar-server");
+      return showCalendar(ctx.uid, ctx.chatId, { range: String(a.range ?? ""), from: String(a.from ?? ""), to: String(a.to ?? "") });
+    },
+  },
+  {
+    name: "calendar.sync", risk: "read", params: "",
+    description: "Read the owner's Google Calendar again right now (use it after the owner says they changed or added something).",
+    run: async (_a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { syncCalendar } = await import("@/lib/calendar-server");
+      const r = await syncCalendar(ctx.uid, ctx.chatId);
+      if (!r.connected) return "Google Calendar is not connected to this chat yet. Tell the owner to say \"connect Google\" or press Connect on Google Workspace in Connectors.";
+      return r.ok ? `The calendar is up to date: ${r.count} events, ${r.meetings} meetings (time zone ${r.tz}).` : `The calendar could not be read: ${r.error ?? "unknown error"}`;
+    },
+  },
+  {
+    name: "calendar.free", risk: "read", params: "date?:string (today, tomorrow, a weekday or YYYY-MM-DD), minutes?:number (shortest free block, default 30)",
+    description: "The owner's free time on one day between 09:00 and 18:00, to answer \"am I free ...\" and to suggest a time for a meeting.",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { freeTime } = await import("@/lib/calendar-server");
+      return freeTime(ctx.uid, ctx.chatId, { date: String(a.date ?? "today"), minutes: Number(a.minutes) || 30 });
+    },
+  },
+  {
+    name: "calendar.settings", risk: "write", params: "agenda?:boolean (the morning plan), brief_minutes?:number (a short brief this many minutes before every meeting, 0 = off), auto_join?:boolean (the notetaker joins calendar meetings by itself)",
+    description: "Change what the agent does with the owner's calendar by itself: the morning plan, the brief before each meeting, and joining meetings with the notetaker.",
+    run: async (a, _cred, ctx) => {
+      if (!ctx) throw new Error("Not available here.");
+      const { setCalendarPrefs } = await import("@/lib/calendar-server");
+      const mins = a.brief_minutes === undefined || a.brief_minutes === "" ? undefined : Number(a.brief_minutes);
+      return setCalendarPrefs(ctx.uid, ctx.chatId, { agenda: flag(a.agenda), briefMin: Number.isFinite(mins) ? mins : undefined, autoJoin: flag(a.auto_join) });
+    },
+  },
   {
     name: "meeting.join", risk: "write", params: "url:string (a Zoom, Google Meet or Microsoft Teams link), title?:string",
     description: "Send the notetaker bot into a video meeting. It listens and writes down the call; when the call ends, the notes (summary, decisions, action items, open questions, risks, talk time) arrive in this chat and each action item becomes a proposal the owner can approve.",
