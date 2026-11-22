@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyJobToken } from "@/lib/job-token";
+import { enterHops } from "@/lib/hops";
 import { runSlice, store } from "@/lib/agent/worker";
 
 export const runtime = "nodejs";
@@ -7,6 +8,7 @@ export const maxDuration = 60;
 
 // One slice of one run. Only the server itself calls this, with a job token that is bound to this uid, chat AND run id.
 export async function POST(req: Request) {
+  enterHops(req); // how deep in a chain of calls to this site we are (Vercel refuses the 6th)
   const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
   const job = verifyJobToken(token);
   if (!job) return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
