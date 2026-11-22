@@ -1,5 +1,5 @@
-// Server only. The real actions behind lib/mcp/native.ts: the chat's cloud computer (E2B), Venus Code, the headless browser, the team,
-// the group chat and Venus Pro. Everything is looked up per chat of the signed-in account (users/{uid}/chats/{chat}); no other account is reachable.
+// Server only. The real actions behind lib/mcp/native.ts: the chat's cloud computer (E2B), Venus Code, the headless browser, the team
+// and Venus Pro. Everything is looked up per chat of the signed-in account (users/{uid}/chats/{chat}); no other account is reachable.
 import { getAdminDb } from "@/lib/firebase-admin";
 import { resolveValue } from "@/lib/vault";
 import { connect, performAction, shellCheck, shellStart, takeScreenshot, type PcAction } from "@/lib/e2b-server";
@@ -7,6 +7,7 @@ import { ASSETS, ROOT, checkpoint, codeState, ensureWorkspace, runTool, startCod
 import { runBrowser, type BrowserOp } from "@/lib/browser-server";
 import { consumeFeature } from "@/lib/billing-server";
 import { byId, TOOL_LABEL } from "@/lib/team-catalog";
+import { sceneCodePrompt } from "@/lib/venus-prompts";
 import { readGroupState, saveNotes, savePins, setWorking } from "@/lib/group-memory";
 import type { GMsg } from "@/lib/group-core";
 import type { ChatDetail, ChatInfo, NativeDeps } from "./native.ts";
@@ -106,9 +107,20 @@ export function makeNativeDeps(site: { origin?: string; baseUrl?: string }): Nat
       if (r.mutated && call.name !== "bash_output") await checkpoint(sb, ws, `Claude: ${call.name}${call.attrs.path ? " " + call.attrs.path : ""}`).catch(() => null);
       return { text: r.text, ...(r.image ? { image: r.image } : {}) };
     },
-    async browser(url, ops) {
+    async browser(uid, url, ops) {
+      // the fast hidden browser first (no Cloud PC, no cold start once it is set up); the built-in server browser when it is not available
+      try {
+        const { scoutBrowse, scoutClose } = await import("@/lib/scout");
+        const out = await scoutBrowse(uid, { url, session: "mcp", ops });
+        await scoutClose(uid, "mcp");
+        return out;
+      } catch { /* fall back */ }
       const r = await runBrowser({ url, ops: ops as unknown as BrowserOp[] });
       return r.snapshot;
+    },
+    sceneGuide(aspect, seconds) {
+      const g = sceneCodePrompt({ scene: { type: "custom", seconds, headline: "(text for the scene)", brief: "(describe the picture and the motion you want)" }, aspect, frames: Math.round(seconds * 30), concept: "" });
+      return "HOW TO USE: send the scene to venus__make_video as {type:\"custom\", seconds, brief, headline, ...any fields your code reads from p, code:\"<the TSX below you write>\"}. Only the TSX goes in `code`. Ignore the line about replying with a ```tsx block: put the code in the `code` field.\n\n" + g;
     },
     async roster(uid, chat) {
       await load(uid, chat);
