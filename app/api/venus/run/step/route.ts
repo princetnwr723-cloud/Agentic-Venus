@@ -10,13 +10,14 @@ export async function POST(req: Request) {
   const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
   const job = verifyJobToken(token);
   if (!job) return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-  const body = (await req.json().catch(() => ({}))) as { pid?: unknown };
+  const body = (await req.json().catch(() => ({}))) as { pid?: unknown; depth?: unknown };
   const pid = String(body.pid ?? "");
+  const depth = Math.min(50, Math.max(0, Math.floor(Number(body.depth) || 0)));
   if (job.jobId !== jobIdOf(pid)) return NextResponse.json({ error: "This token is for another video." }, { status: 403 });
   const run = await venusStore().getRun(job.uid, pid);
   if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
   try {
-    const r = await runSliceServer(job.uid, pid, { origin: run.origin || new URL(req.url).origin });
+    const r = await runSliceServer(job.uid, pid, { origin: run.origin || new URL(req.url).origin, depth });
     return NextResponse.json({ ok: true, ...r });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : "Slice failed." }, { status: 500 });
