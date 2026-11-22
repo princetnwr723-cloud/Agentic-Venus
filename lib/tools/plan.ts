@@ -5,6 +5,7 @@ import type { Def } from "./plugins";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { noteStatus, planStepState, type PlanStep } from "@/lib/steps";
 import type { ToolCtx } from "./types";
+import { GOAL_TOOLS } from "./goal";
 
 type Step = PlanStep;
 const s = (v: unknown, n = 300) => String(v ?? "").trim().slice(0, n);
@@ -52,7 +53,7 @@ function render(steps: Step[]): string {
   return `${rows}\n${tail}`;
 }
 
-export const PLAN_TOOLS: Def[] = [
+const PLAN_ONLY: Def[] = [
   {
     name: "plan.set", risk: "read", params: "steps:string[] (EVERY step of the task in order, each concrete and checkable, max 40), title?:string (short name of the task)",
     description: "Start the checklist for a task with 3 or more steps or many items. Do this FIRST, then work through the steps in order. The owner sees these steps live in a Progress panel.",
@@ -125,3 +126,6 @@ export const PLAN_TOOLS: Def[] = [
     },
   },
 ];
+
+// goals (long-term, self-driving work) are registered here so the tool registry needs no change
+export const PLAN_TOOLS: Def[] = [...PLAN_ONLY, ...GOAL_TOOLS];
