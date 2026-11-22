@@ -1,11 +1,12 @@
 // Venus Pro as agent tools: the server agent (and every routine) can make a video that keeps rendering with every tab closed.
 // The video runs through the same background runner as the dashboard's "make a video" (lib/venus-run-server.ts).
 import type { Def } from "./plugins";
+import { SCOUT_TOOLS } from "./scout";
 
 const s = (v: unknown, n = 4000) => String(v ?? "").trim().slice(0, n);
 const need = <T,>(ctx: T | undefined): T => { if (!ctx) throw new Error("Videos can only be made from a chat."); return ctx; };
 
-export const VENUS_TOOLS: Def[] = [
+const VIDEO_TOOLS: Def[] = [
   {
     name: "venus.make_video", risk: "write",
     params: 'brief:string (what the video is about, the story, the tone), seconds?:number (length, default 45), aspect?:string ("16:9" | "9:16" | "1:1", default "16:9"), voice?:boolean (narration, default true), captions?:boolean (default true), quality?:string ("720p" | "1080p")',
@@ -56,3 +57,6 @@ export const VENUS_TOOLS: Def[] = [
     },
   },
 ];
+
+/** Venus Pro video tools, and the fast research browser (it lives here so the tool list needs no other change). */
+export const VENUS_TOOLS: Def[] = [...VIDEO_TOOLS, ...SCOUT_TOOLS];
