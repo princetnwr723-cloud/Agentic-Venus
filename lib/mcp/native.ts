@@ -2,6 +2,7 @@
 // roster and Venus Pro with a storyboard that Claude writes itself. Pure: every server action comes in through `deps`, so it is testable.
 // Rule: Claude's own model is the brain. Nothing here calls the chat's saved model or API key.
 import { planClaudeVideo } from "./video-core.ts";
+import { checkCode } from "../venus-schema.ts";
 import type { ToolOutcome } from "./rpc.ts";
 import { clip, findMember, looksSecret, oneLine, parseReply, transcript, type GMember, type GMsg } from "../group-core.ts";
 
@@ -20,7 +21,8 @@ export type NativeDeps = {
   shell: (uid: string, chat: string, command: string) => Promise<string>;
   shellOutput: (uid: string, chat: string, job: string) => Promise<string>;
   code: (uid: string, chat: string, call: CodeCall) => Promise<{ text: string; image?: { mediaType: string; data: string } }>;
-  browser: (url: string, ops: Record<string, unknown>[]) => Promise<string>;
+  browser: (uid: string, url: string, ops: Record<string, unknown>[]) => Promise<string>;
+  sceneGuide: (aspect: string, seconds: number) => string;
   roster: (uid: string, chat: string) => Promise<string>;
   groupMembers: (uid: string, chat: string) => Promise<GMember[]>;
   groupMsgs: (uid: string, chat: string, n: number) => Promise<GMsg[]>;
@@ -78,10 +80,16 @@ export const NATIVE_SPECS: NativeSpec[] = [
     to: { type: "array", items: { type: "string" } }, note: str("lasting note for this member"), pin: str("fact pinned for the whole group"),
   }, ["member", "text"], true),
   spec("group.working", "Show in the group chat that a member is busy (a small status like 'finding leads') or clear it with an empty text. Clear it when the work is done.", { member: str("member id"), text: str("status, empty to clear") }, ["member"], true),
-  spec("venus.make_video", "Make a finished video with Venus Pro. YOU write the storyboard (no model runs on the AgenticVenus server for the script). It then renders in the background (10-30 min) and the owner gets the link in the chat. " +
-    "scenes = list of {type, seconds, ...}. Types: title{headline,subhead?} kinetic{text,emphasis?} bullets{headline,items[]} stat{label,value,prefix?,suffix?,caption?} bar-chart{headline,data:[{label,value}]} line-chart{headline,data} quote{text,author?} " +
+  spec("venus.scene_guide", "READ THIS BEFORE writing a video. The exact rules, the helper kit and a code example for writing your OWN animated scene (Remotion/React code). Nothing in a Venus Pro video is fixed: you design every scene's animation and motion graphics yourself.", {
+    aspect: { type: "string", enum: ["16:9", "9:16", "1:1"] }, seconds: num("length of the scene, default 5"),
+  }, [], false, false),
+  spec("venus.scene_check", "Check the code of a custom scene BEFORE sending the video: returns OK or exactly what to fix (forbidden calls, wrong imports, missing export default, too long).", { code: str("the scene's TSX code") }, ["code"], false, false),
+  spec("venus.make_video", "Make a finished video with Venus Pro. YOU are the director, motion designer and editor: write the storyboard AND the animation of every scene yourself (no model runs on the AgenticVenus server for the script or design). " +
+    "BEST RESULT: make the important scenes {type:\"custom\", seconds, brief, headline?, code:\"<your Remotion TSX>\"} with your own animation, motion graphics, shapes, camera moves and timing (call venus__scene_guide first, test the code with venus__scene_check). The scene reads its text and numbers from the other fields of the scene (p). " +
+    "The library types below are only quick shortcuts for simple scenes. It then renders in the background (10-30 min) and the owner gets the link in the chat. " +
+    "Other scene types: title{headline,subhead?} kinetic{text,emphasis?} bullets{headline,items[]} stat{label,value,prefix?,suffix?,caption?} bar-chart{headline,data:[{label,value}]} line-chart{headline,data} quote{text,author?} " +
     "split{headline?,left:{title,points},right:{title,points}} timeline{headline,steps:[{label,text}]} ranking{headline,items:[{title,note?}]} image{headline?,imageQuery} footage{headline?,footageQuery} outro{headline,subhead?,handle?}. " +
-    "Optional per scene: transition, camera, sounds. Optional storyboard-level: palette{bg1,bg2,accent,accent2,text,muted}, fonts, bg, audio{mood}. Voice-over is off unless voice:true (needs an OpenAI key in the account).", {
+    "Optional per scene: transition, camera, sounds. Optional storyboard-level: palette{bg1,bg2,accent,accent2,text,muted}, fonts, bg, audio{mood}. Voice-over is off unless voice:true (needs an OpenAI key in the account). A custom scene without code is shown as a plain text scene, so always send code for custom scenes.", {
     title: str("video title"), aspect: { type: "string", enum: ["16:9", "9:16", "1:1"] }, theme: { type: "string", enum: ["midnight", "sunset", "emerald", "gold", "paper", "neon"] },
     voice: { type: "boolean" }, captions: { type: "boolean" }, quality: { type: "string", enum: ["720p", "1080p"] },
     scenes: { type: "array", items: { type: "object" }, description: "the scenes (3-60)" },
@@ -115,11 +123,20 @@ export async function runNative(name: string, args: Record<string, unknown>, ctx
       if (!list.length) return { text: "This account has no chats yet. Ask the person to create a chat in AgenticVenus first.", isError: false };
       return { text: `${list.length} chats. Ask the person which one to use, then pass its id as "chat":\n` + list.map(line).join("\n"), isError: false };
     }
+    if (name === "venus.scene_guide") {
+      const asp = s(args.aspect, 8);
+      return { text: deps.sceneGuide(/^(16:9|9:16|1:1)$/.test(asp) ? asp : "16:9", Math.min(60, Math.max(2, Number(args.seconds) || 5))), isError: false };
+    }
+    if (name === "venus.scene_check") {
+      const code = s(args.code, 60_000);
+      const bad = checkCode(code);
+      return { text: bad ? `NOT OK: ${bad}` : "OK: the code passes the safety and format check. It is rendered for real when the video runs; if a scene fails to render it is shown as a plain text scene.", isError: false };
+    }
     if (name === "browser.run") {
       const url = s(args.url, 2000);
       if (!url) return fail("url is required.");
       const ops = (Array.isArray(args.ops) ? args.ops : []).slice(0, 12).filter((o): o is Record<string, unknown> => !!o && typeof o === "object" && /^(click|type|click_label|type_label|press|scroll|wait)$/.test(s((o as Record<string, unknown>).op, 20)));
-      return { text: await deps.browser(url, ops), isError: false };
+      return { text: await deps.browser(uid, url, ops), isError: false };
     }
 
     const chat = s(args.chat, 80);
