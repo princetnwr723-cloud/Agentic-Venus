@@ -140,7 +140,7 @@ echo started
  * Credentials/browser profiles are intentionally excluded; those are stored encrypted
  * in the Vault/browser-profile layer instead.
  */
-const shellQuote = (v: string) => "'" + v.replace(/'/g, "'\''") + "'";
+const shellQuote = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
 
 export async function backupComputerState(apiKeyInput: string, sandboxId: string, uid: string, chatId: string): Promise<string> {
   const sandbox = await connect(apiKeyInput, sandboxId);
@@ -273,10 +273,51 @@ export async function getScreenUrl(apiKey: string, sandboxId: string): Promise<s
 
 export type Screenshot = { data: string; mediaType: string; width: number; height: number };
 
+// ---- Screen helpers: they talk to the desktop directly with an explicit DISPLAY, so they also work right after a resume ----
+const DISPLAY_PREFIX = "export DISPLAY=:0; ";
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const isLocalSandbox = (sandbox: DesktopSandbox) => isLocalSandboxId(String((sandbox as unknown as { sandboxId?: string }).sandboxId ?? ""));
+
+/** Starts a program on the desktop and detaches it, so it keeps running after this command has ended. */
+async function startOnDesktop(sandbox: DesktopSandbox, command: string): Promise<void> {
+  const r = await exec(sandbox, `${DISPLAY_PREFIX}setsid nohup bash -c ${shellQuote(command)} >/dev/null 2>&1 < /dev/null & sleep 2; echo started`, 20_000);
+  if (!r.stdout.includes("started")) throw new Error(`Could not start the program: ${(r.stderr || r.stdout).slice(-200)}`);
+}
+
+/** One xdotool call on the desktop (mouse and keyboard). */
+async function xdo(sandbox: DesktopSandbox, args: string, timeoutMs = 20_000): Promise<void> {
+  const r = await exec(sandbox, `${DISPLAY_PREFIX}xdotool ${args}`, timeoutMs);
+  if (r.exitCode !== 0) throw new Error(`The screen action failed: ${(r.stderr || r.stdout || "xdotool error").trim().slice(-200)}`);
+}
+
+async function screenshotViaShell(sandbox: DesktopSandbox): Promise<Buffer> {
+  const cmd = `${DISPLAY_PREFIX}F=/tmp/venus-shot.png; rm -f $F; (scrot -o $F || import -window root $F) >/dev/null 2>&1; if [ -s $F ]; then echo VENUS_SHOT_BEGIN; base64 -w0 $F; echo; echo VENUS_SHOT_END; else echo VENUS_SHOT_FAILED; fi`;
+  const r = await exec(sandbox, cmd, 30_000);
+  const m = /VENUS_SHOT_BEGIN\s*([A-Za-z0-9+/=]+)\s*VENUS_SHOT_END/.exec(r.stdout);
+  if (!m) throw new Error(`The desktop gave no picture${r.stderr ? ": " + r.stderr.slice(-160) : " (is the desktop running?)"}`);
+  const buf = Buffer.from(m[1], "base64");
+  if (buf.length < 100) throw new Error("The desktop gave an empty picture.");
+  return buf;
+}
+
 export async function takeScreenshot(apiKey: string, sandboxId: string): Promise<Screenshot> {
   const sandbox = await connect(apiKey, sandboxId);
-  const bytes = await (sandbox as unknown as { screenshot: () => Promise<Uint8Array> }).screenshot();
-  const buf = Buffer.from(bytes);
+  let buf: Buffer | null = null;
+  let problem = "";
+  if (!isLocalSandboxId(sandboxId)) {
+    for (let i = 0; i < 3 && !buf; i++) {
+      try { buf = await screenshotViaShell(sandbox); } catch (e) { problem = errMsg(e); if (i < 2) await sleep(1500); }
+    }
+  }
+  if (!buf) {
+    try {
+      const bytes = await (sandbox as unknown as { screenshot: () => Promise<Uint8Array> }).screenshot();
+      buf = Buffer.from(bytes);
+    } catch (e) {
+      throw new Error(`Could not take a screenshot${problem ? " (" + problem + ")" : ""}: ${errMsg(e)}`);
+    }
+  }
+  if (!buf) throw new Error("Could not take a screenshot.");
   const isPng = buf.length > 24 && buf.toString("ascii", 1, 4) === "PNG";
   return {
     data: buf.toString("base64"),
@@ -377,16 +418,27 @@ function normalizeUrl(input: string): string {
 }
 
 export async function openUrl(sandbox: DesktopSandbox, url: string) {
-  const d = sandbox as unknown as { open?: (target: string) => Promise<unknown> };
+  if (isLocalSandbox(sandbox)) {
+    const d = sandbox as unknown as { open?: (target: string) => Promise<unknown> };
+    try {
+      if (typeof d.open === "function") { await d.open(url); return; }
+    } catch { /* fall through */ }
+    const safeLocal = url.replace(/'/g, "%27");
+    await exec(sandbox, `DISPLAY=:0 nohup xdg-open '${safeLocal}' >/dev/null 2>&1 &`, 15_000);
+    return;
+  }
+  // Chrome opens the link in the window that is already running, or starts a new one.
+  const quoted = shellQuote(url);
   try {
-    if (typeof d.open === "function") { await d.open(url); return; }
-  } catch { /* fall through */ }
-  const safe = url.replace(/'/g, "%27");
-  await exec(sandbox, `DISPLAY=:0 nohup xdg-open '${safe}' >/dev/null 2>&1 &`, 15_000);
+    await startOnDesktop(sandbox, `google-chrome --no-sandbox --no-first-run --no-default-browser-check ${quoted}`);
+  } catch {
+    await startOnDesktop(sandbox, `xdg-open ${quoted}`);
+  }
 }
 
 export async function performAction(apiKey: string, sandboxId: string, action: PcAction): Promise<string> {
   const sandbox = await connect(apiKey, sandboxId);
+  const local = isLocalSandboxId(sandboxId);
   const d = sandbox as unknown as {
     leftClick: (x: number, y: number) => Promise<void>;
     doubleClick: (x: number, y: number) => Promise<void>;
@@ -399,36 +451,58 @@ export async function performAction(apiKey: string, sandboxId: string, action: P
   const y = Math.round(action.y ?? 0);
 
   switch (action.type) {
-    case "click": await d.leftClick(x, y); return `click (${x}, ${y})`;
-    case "double_click": await d.doubleClick(x, y); return `double-click (${x}, ${y})`;
-    case "right_click": await d.rightClick(x, y); return `right-click (${x}, ${y})`;
-    case "type": await d.write(action.text ?? ""); return `type "${(action.text ?? "").slice(0, 60)}"`;
+    case "click": {
+      if (local) await d.leftClick(x, y); else await xdo(sandbox, `mousemove ${x} ${y} click 1`);
+      return `click (${x}, ${y})`;
+    }
+    case "double_click": {
+      if (local) await d.doubleClick(x, y); else await xdo(sandbox, `mousemove ${x} ${y} click --repeat 2 --delay 90 1`);
+      return `double-click (${x}, ${y})`;
+    }
+    case "right_click": {
+      if (local) await d.rightClick(x, y); else await xdo(sandbox, `mousemove ${x} ${y} click 3`);
+      return `right-click (${x}, ${y})`;
+    }
+    case "type": {
+      const text = action.text ?? "";
+      if (local) {
+        await d.write(text);
+      } else if (text) {
+        const b64 = Buffer.from(text, "utf8").toString("base64");
+        const r = await exec(sandbox, `${DISPLAY_PREFIX}echo ${b64} | base64 -d > /tmp/venus-type.txt && xdotool type --delay 15 --file /tmp/venus-type.txt; code=$?; rm -f /tmp/venus-type.txt; exit $code`, Math.min(120_000, 20_000 + text.length * 40));
+        if (r.exitCode !== 0) throw new Error(`Typing failed: ${(r.stderr || r.stdout || "xdotool error").trim().slice(-200)}`);
+      }
+      return `type "${text.slice(0, 60)}"`;
+    }
     case "key": {
       const keys = action.keys ?? "";
-      await d.press(keys.includes("+") ? keys.split("+").map(normalizeKey) : normalizeKey(keys));
+      const parts = (keys.includes("+") ? keys.split("+") : [keys]).map(normalizeKey);
+      if (parts.length === 0 || parts.some((k) => !/^[A-Za-z0-9_]+$/.test(k))) throw new Error(`Unknown key "${keys}".`);
+      if (local) await d.press(parts.length > 1 ? parts : parts[0]); else await xdo(sandbox, `key --clearmodifiers ${parts.join("+")}`);
       return `press ${keys}`;
     }
     case "scroll": {
       const direction = action.direction === "up" ? "up" : "down";
-      await d.scroll(direction, action.amount ?? 3);
+      const amount = Math.min(30, Math.max(1, Math.round(action.amount ?? 3)));
+      if (local) await d.scroll(direction, amount); else await xdo(sandbox, `click --repeat ${amount} --delay 40 ${direction === "up" ? 4 : 5}`);
       return `scroll ${direction}`;
     }
     case "wait": {
       const seconds = Math.min(Math.max(action.seconds ?? 2, 1), 5);
-      await new Promise((r) => setTimeout(r, seconds * 1000));
+      await sleep(seconds * 1000);
       return `wait ${seconds}s`;
     }
     case "open_url": {
       const url = normalizeUrl(action.url ?? "");
       await openUrl(sandbox, url);
-      await new Promise((r) => setTimeout(r, 4000));
+      await sleep(4000);
       return `open ${url}`;
     }
     case "search": {
       const q = (action.query ?? "").trim();
       if (!q) throw new Error("search needs a query.");
       await openUrl(sandbox, `https://duckduckgo.com/?q=${encodeURIComponent(q)}`);
-      await new Promise((r) => setTimeout(r, 4000));
+      await sleep(4000);
       return `search "${q.slice(0, 80)}"`;
     }
     case "launch": {
@@ -438,8 +512,8 @@ export async function performAction(apiKey: string, sandboxId: string, action: P
       const apps: Record<string, string> = { chrome, "google-chrome": chrome, firefox: "firefox", terminal: "xfce4-terminal", code, vscode: code, files: "thunar" };
       const c = apps[app];
       if (!c) throw new Error("Unknown app. Use chrome, firefox, terminal, code or files.");
-      await exec(sandbox, `DISPLAY=:0 nohup ${c} >/dev/null 2>&1 &`, 15_000);
-      await new Promise((r) => setTimeout(r, 3500));
+      if (local) await exec(sandbox, `DISPLAY=:0 nohup ${c} >/dev/null 2>&1 &`, 15_000); else await startOnDesktop(sandbox, c);
+      await sleep(3500);
       return `launch ${app}`;
     }
     default:
