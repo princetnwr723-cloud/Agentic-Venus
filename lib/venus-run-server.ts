@@ -102,10 +102,21 @@ export async function releaseStudioOf(uid: string, chatId: string | undefined): 
 }
 
 // ---------------------------------------------------------------- start / kick / stop
-export function kickVenus(uid: string, pid: string, chatId: string | undefined, origin: string): void {
+/** How many slices may call each other in one chain. A longer chain of self-calls makes Vercel answer 508 INFINITE_LOOP_DETECTED. */
+const MAX_CHAIN = 3;
+
+/**
+ * Starts the next slice of a video. `depth` is the length of the chain of self-calls so far (0 = a fresh request from the browser or the scheduler).
+ * When the chain is long enough it stops here and wakes the run for the scheduler tick (/api/agent/tick), which starts a fresh chain.
+ */
+export function kickVenus(uid: string, pid: string, chatId: string | undefined, origin: string, depth = 0): void {
+  if (depth >= MAX_CHAIN) {
+    runAfter(venusStore().setQueue(uid, pid, Date.now() + 5_000));
+    return;
+  }
   let token: string;
   try { token = signJob(uid, chatId || "venus", jobIdOf(pid), 2 * 3600_000); } catch { return; }
-  runAfter(fetch(`${origin}/api/venus/run/step`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ pid }) }));
+  runAfter(fetch(`${origin}/api/venus/run/step`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ pid, depth }) }));
 }
 
 export class VenusStartError extends Error { status: number; constructor(m: string, status = 400) { super(m); this.status = status; } }
@@ -148,7 +159,7 @@ export async function stopVenusRun(uid: string, pid: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------- one slice
-export async function runSliceServer(uid: string, pid: string, o: { origin: string }): Promise<{ status: string }> {
+export async function runSliceServer(uid: string, pid: string, o: { origin: string; depth?: number }): Promise<{ status: string }> {
   const S = venusStore();
   const first = await S.getRun(uid, pid);
   if (!first) return { status: "gone" };
@@ -193,7 +204,7 @@ export async function runSliceServer(uid: string, pid: string, o: { origin: stri
     io: {
       postToChat: async (text, at) => { await chatRef(uid, chatId).update({ messages: FieldValue.arrayUnion({ role: "assistant", content: text, at }) }).catch(() => {}); },
       notify: (text) => runAfter(notifyOwner(uid, chatId, text)),
-      kick: () => kickVenus(uid, pid, chatId, o.origin),
+      kick: () => kickVenus(uid, pid, chatId, o.origin, (o.depth ?? 0) + 1),
       downloadUrl: async (path) => {
         const r = await raw("/api/venus/media", { action: "url", uid, path, download: "venus-video.mp4" }, 15_000);
         return r.ok ? String(r.data?.url ?? "") : "";
