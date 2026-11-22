@@ -13,6 +13,8 @@ import { effectivePlan, type PlanDoc } from "@/lib/billing-server";
 import { isOwner } from "@/lib/owner";
 import { planById } from "@/lib/plans";
 import { signJob } from "@/lib/job-token";
+import { canKickDirect } from "@/lib/hops";
+import { relayKick } from "@/lib/kick-relay";
 import { audit } from "@/lib/audit";
 import { notifyOwner, runAfter } from "@/lib/channels";
 import { callProvider } from "@/lib/ai-providers-server";
@@ -66,6 +68,13 @@ export function kick(uid: string, runId: string, chatId: string, origin: string)
   catch (e) {
     const why = e instanceof Error ? e.message : "no job token";
     void giveUp(uid, runId, "config", `The background agent could not start (${why}). Set ROUTINE_RUNNER_SECRET (32+ characters) in Vercel -> Settings -> Environment Variables and redeploy.`);
+    return;
+  }
+  if (!canKickDirect()) {
+    // Already deep in a chain of calls to this site (Vercel refuses the 6th with 508): start the next slice from outside instead.
+    runAfter(relayKick(uid, chatId, `${origin}/api/agent/step`, token, JSON.stringify({ runId })).then(async (sent) => {
+      if (!sent) await store().setQueue(uid, runId, "run", Date.now() + 20_000).catch(() => {}); // no computer can send it: the scheduler picks it up
+    }));
     return;
   }
   runAfter(
