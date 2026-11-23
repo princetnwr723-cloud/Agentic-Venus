@@ -16,6 +16,7 @@ import { signJob } from "@/lib/job-token";
 import { canKickDirect } from "@/lib/hops";
 import { relayKick } from "@/lib/kick-relay";
 import { audit } from "@/lib/audit";
+import { captureError } from "@/lib/monitor";
 import { notifyOwner, runAfter } from "@/lib/channels";
 import { callProvider } from "@/lib/ai-providers-server";
 import type { ProviderId } from "@/lib/providers";
@@ -30,6 +31,7 @@ import { buildNameMap, toolDef } from "./tool-schema.ts";
 import { SUMMARY_PROMPT, DEFAULT_COMPACT } from "./compaction.ts";
 import { contextWindow } from "./budget.ts";
 import { costCap } from "./slice.ts";
+import { runCostBase } from "./cost-policy.ts";
 import { planGate } from "./plan-gate.ts";
 import { AUTO_NOTE } from "./autopilot.ts";
 import { preflight, runSliceCore } from "./slice.ts";
@@ -43,6 +45,12 @@ const billing = () =>
     const p = planById(effectivePlan(doc as PlanDoc | undefined, now));
     return { tokens: p.tokens, windowHours: p.windowHours, name: p.name };
   }, process.env.AGENT_BILLING_FAIL_OPEN === "true", isOwner); // the owner of the deployment is never metered or refused (lib/owner.ts)
+
+/** The plan the user is on right now (a lapsed or cancelled plan counts as free). */
+async function planIdOf(uid: string): Promise<string> {
+  const snap = await getAdminDb().collection("users").doc(uid).collection("billing").doc("plan").get();
+  return effectivePlan(snap.data() as PlanDoc | undefined, Date.now());
+}
 
 const SLICE_MS = () => Math.max(15, Number(process.env.AGENT_SLICE_SECONDS) || 42) * 1000;
 const MAX_SLICES = 200;
@@ -257,8 +265,10 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
     };
 
     const window = contextWindow(run.model);
+    // the per-run cost cap depends on the plan (Free is small, paid plans get more; see cost-policy.ts). The owner is never capped.
+    const runPlan = ownerRun ? "ultra" : await planIdOf(uid).catch(() => "free");
     const opts = {
-      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: ownerRun ? Number.MAX_SAFE_INTEGER : costCap(run), autoApprove: Boolean(run.autoApprove),
+      ...DEFAULT_LOOP, tools, system: { stable, volatile }, maxRounds: run.maxRounds, deadline: startedAt + SLICE_MS(), maxCostMicros: ownerRun ? Number.MAX_SAFE_INTEGER : costCap(run, runCostBase(runPlan)), autoApprove: Boolean(run.autoApprove),
       compact: { ...DEFAULT_COMPACT, windowTokens: window }, fromNative: names.fromNative,
     };
 
@@ -275,6 +285,8 @@ export async function runSlice(uid: string, runId: string, o: { origin: string; 
   } catch (e) {
     const c = classifyError(e);
     const message = e instanceof Error ? e.message.slice(0, 300) : "The run failed.";
+    // our own crashes (code "unknown") alert the operator; a bad key or a provider outage is the owner's / the provider's matter and is only logged
+    await captureError(e, { where: "agent/worker", uid, runId, chatId: run.chatId, level: c.code === "unknown" ? "error" : "warning" }).catch(() => undefined);
     await emit({ kind: "error", text: message });
     // a crash before the loop started: the run is over, but never silently
     await finish({ status: "error", endedAt: Date.now(), error: { code: c.code, message } }, null).catch(() => {});

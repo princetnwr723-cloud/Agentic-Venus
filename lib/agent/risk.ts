@@ -28,8 +28,8 @@ export type RiskResult = {
   outbound: boolean;
 };
 
-const DANGER_WORDS = /\b(delete|remove|erase|destroy|drop|wipe|purge|purchase|buy|order|pay|payment|payments|checkout|charge|refund|transfer|wire|withdraw|donate|subscribe|unsubscribe|cancel|revoke|terminate|format|overwrite|force push|reset hard|invoice)\b/i;
-const MONEY = /([$€£₹]\s?\d|\b\d[\d,.]*\s?(usd|eur|gbp|inr|rs|rupees?|dollars?|euros?)\b)/i;
+const DANGER_WORDS = /\b(delete|remove|erase|destroy|drop|wipe|purge|purchase|buy|order|pay|payment|payments|checkout|charge|refund|transfer|wire|withdraw|donate|subscribe|unsubscribe|cancel|revoke|terminate|format|overwrite|force push|reset hard|invoice|kharid\w*|khareed\w*|bhugtan|paise\s+bhej\w*|paisa\s+bhej\w*|delete\s+kar\w*|hata\s+do|transfer\s+kar\w*|cancel\s+kar\w*|order\s+kar\w*|payment\s+kar\w*)\b/i;
+const MONEY = /([$€£₹]\s?\d|\b\d[\d,.]*\s?(usd|eur|gbp|inr|rs|rupees?|rupaye|rupay|rupiya|paise|dollars?|euros?)\b)/i;
 // A tool that hands something to someone / somewhere outside this system.
 const OUTBOUND_NAME = /\b(send|send many|post|reply|publish|share|tweet|upload|forward|broadcast|notify|message|sms|whatsapp|email|mail|slackbot|webhook|put files|push|call|dm)\b/i;
 const COMMS_NAME = /\b(send|send many|post|reply|publish|share|tweet|forward|broadcast|notify|message|sms|whatsapp|email|mail|slackbot|draft|dm)\b/i;
