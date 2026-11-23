@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { authFromRequest } from "@/lib/job-token";
+import { enforceUserLimit, requestStatus } from "@/lib/request";
+import { cardLimitFor, cardSaveProblem, paymentRequestProblem } from "@/lib/payments-mode";
 import { getAdminDb } from "@/lib/firebase-admin";
 import { resolveDeep, vaultDelete, vaultGet, vaultPut } from "@/lib/vault";
 import { connect, exec } from "@/lib/e2b-server";
@@ -14,6 +16,7 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+const MAX_BODY = 64 * 1024; // a card, a login or a proxy is tiny
 const fail = (m: string, st = 500) => NextResponse.json({ error: m }, { status: st });
 const ID = /^[A-Za-z0-9_-]{1,60}$/;
 const s = (v: unknown, n = 200) => String(v ?? "").trim().slice(0, n);
@@ -47,9 +50,11 @@ process.exit(0);
 
 export async function POST(req: Request) {
   try {
+    if (Number(req.headers.get("content-length") || 0) > MAX_BODY) return fail("Request body is too large.", 413);
     const raw = await req.json().catch(() => ({}));
     const auth = await authFromRequest(req, raw?.uid);
     const uid = auth.uid;
+    enforceUserLimit(req, uid, Boolean(auth.job));
     const body = (await resolveDeep(uid, raw)) as Record<string, any>;
     const action = String(body.action || "");
     if (auth.job !== JOB_ACTIONS.has(action)) {
@@ -133,7 +138,11 @@ export async function POST(req: Request) {
           if (cvc.length < 3 || cvc.length > 4) return fail("The security code must be 3 or 4 digits.", 400);
           const site = normSite(s(body.site, 200));
           if (!site && body.anySite !== true) return fail("Enter the site this card may be used on, or tick “any site”.", 400);
-          const limit = parseAmount(body.limit), budget = parseAmount(body.budget), daily = parseAmount(body.daily);
+          let limit = parseAmount(body.limit);
+          const budget = parseAmount(body.budget), daily = parseAmount(body.daily);
+          const beta = cardSaveProblem({ site, anySite: body.anySite === true && !site, limit });
+          if (beta) return fail(beta, 400);
+          limit = cardLimitFor(limit);
           payload = { number, exp: em[1] + "/" + em[2].slice(-2), cvc, name: s(body.name, 80), zip: s(body.zip, 12) };
           extra = {
             site, anySite: !site, hint: `${brandOf(number)} •••• ${number.slice(-4)}`, last4: number.slice(-4), brand: brandOf(number),
@@ -164,6 +173,15 @@ export async function POST(req: Request) {
             if (!st && body.anySite !== true) return fail("A card needs a site, or choose “any site”.", 400);
             upd.site = st;
             upd.anySite = !st;
+          }
+          // beta rules also apply to edits, but only when the edit touches the site or the per-payment limit (a rename always works)
+          if (body.site !== undefined || body.anySite !== undefined || body.limit !== undefined) {
+            const nextSite = upd.site !== undefined ? String(upd.site) : (m.site ?? "");
+            const asked = body.limit !== undefined ? parseAmount(body.limit) : (m.limit ?? 0);
+            const bad = cardSaveProblem({ site: nextSite, anySite: !nextSite, limit: asked });
+            if (bad) return fail(bad, 400);
+            const lim = cardLimitFor(asked);
+            if (body.limit !== undefined || lim !== asked) upd.limit = lim > 0 ? lim : FieldValue.delete();
           }
           if (body.resetSpent === true) { upd.spent = 0; upd.daySpent = 0; upd.dayKey = FieldValue.delete(); }
         }
@@ -317,6 +335,8 @@ export async function POST(req: Request) {
         const problem = cardSiteProblem(m, host);
         if (problem) return fail(problem, 403);
         const amount = parseAmount(body.amount);
+        const modeProblem = paymentRequestProblem(amount);
+        if (modeProblem) return fail(modeProblem, 403);
         const chk = checkSpend(m, amount);
         if (!chk.ok) return fail(chk.error + " Nothing was asked of the user.", 403);
         const detected = maxAmount(body.detected);
@@ -423,6 +443,6 @@ export async function POST(req: Request) {
         return fail("Unknown action.", 400);
     }
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "vPassword request failed.");
+    return fail(err instanceof Error ? err.message : "vPassword request failed.", requestStatus(err));
   }
 }
