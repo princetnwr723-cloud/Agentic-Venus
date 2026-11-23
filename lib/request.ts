@@ -1,5 +1,6 @@
 import { authFromRequest, verifyJobToken } from "@/lib/job-token";
 import { resolveDeep } from "@/lib/vault";
+import { rateLimitOn, retryAfterSeconds, sharedLimiter, userRuleFor } from "@/lib/rate-limit";
 
 const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
@@ -14,6 +15,20 @@ export function requestStatus(error: unknown, fallback = 500): number {
   if (error instanceof RequestError) return error.status;
   const status = (error as { status?: unknown } | null)?.status;
   return typeof status === "number" && status >= 400 && status <= 599 ? status : fallback;
+}
+
+/**
+ * Per signed-in user and route family (see lib/rate-limit.ts for the numbers). Background-job tokens are not counted: they are started
+ * by the server and are already bounded by the plan, the run cost cap and the computer-time limit.
+ * Routes that read their own body (vPassword) call this directly.
+ */
+export function enforceUserLimit(req: Request, uid: string, isJob = false): void {
+  if (isJob || !rateLimitOn()) return;
+  let path = "/";
+  try { path = new URL(req.url).pathname; } catch { /* a request without a usable address is counted under the default rule */ }
+  const rule = userRuleFor(path);
+  const h = sharedLimiter().hit(`u:${uid}:${rule.name}`, rule);
+  if (!h.ok) throw new RequestError(`Too many requests. Please wait ${retryAfterSeconds(h.retryAfterMs)} seconds and try again.`, 429);
 }
 
 async function readBoundedText(req: Request, maxBytes: number): Promise<string> {
@@ -77,6 +92,7 @@ export async function readBody(req: Request, opts: { allowJob?: boolean | string
     throw new RequestError(message, status);
   }
   if (auth.job && !opts.allowJob) throw new RequestError("Background-job tokens are not accepted on this endpoint.", 403);
+  enforceUserLimit(req, auth.uid, Boolean(auth.job));
   if (auth.job && typeof opts.allowJob === "string") {
     const j = verifyJobToken((req.headers.get("authorization") || "").replace(/^Bearer\s+/i, ""));
     if (!j || !j.jobId.startsWith(opts.allowJob)) throw new RequestError("This background-job token is not accepted on this endpoint.", 403);

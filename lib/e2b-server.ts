@@ -4,7 +4,9 @@ import { createSignedDownload, createSignedUpload } from "@/lib/supabase-server"
 import { assertDeviceOnline, localSandbox } from "@/lib/local-relay";
 import { deviceFromKey, isLocalKey, isLocalSandboxId, sandboxIdOf } from "@/lib/local-relay-core";
 
-const SANDBOX_TIMEOUT_MS = 60 * 60 * 1000;
+// How long a cloud computer may sit unused before E2B pauses it (every connect() pushes this forward again). Default 60 minutes;
+// E2B_IDLE_MINUTES lowers it to save money (minimum 5, maximum 240). Lower only if no long background job runs without calls.
+const SANDBOX_TIMEOUT_MS = Math.min(240, Math.max(5, Number(process.env.E2B_IDLE_MINUTES) || 60)) * 60 * 1000;
 
 type DesktopSandbox = InstanceType<typeof SandboxClass>;
 

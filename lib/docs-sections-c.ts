@@ -106,7 +106,7 @@ export const SECTIONS_C: Group[] = [
     items: [
       { t: "Runs page", p: "Every run is listed with its steps and an estimated cost." },
       { t: "Step trace", p: "Open a run to see each action in order." },
-      { t: "Evaluation suite", p: "A fixed 40-task suite measures success rate over time." },
+      { t: "Evaluation suite", p: "A fixed suite of 200+ tasks (safety and prompt-injection, payments, Hinglish, connectors, memory, leads, forms, coding, video, teams) measures success rate over time." },
       { t: "Regression checks", p: "Changes are tested before release." },
       { t: "Feedback", p: "Tell the agent what was wrong and it saves the lesson." },
     ],

@@ -9,7 +9,8 @@
 // v8: longer answers (output-token ladder), Anthropic prompt caching, lighter fallback model when the main one stays overloaded.
 // v9: proxy for the browser (vPassword proxy entry), Google account session loaded up front, payments only with a server-side approval ticket, budgets, anti-bot Chrome flags.
 // v10: before a payment is asked for, the runner reads the product from the page (name, price, usual price, rating, small picture) so the chat can show an order card.
-export const PC_RUNNER_VERSION = "10";
+// v11: human-like mouse and typing (a curved mouse path before a click, typing with natural pauses) so sites that block robots let the owner's own agent work. Off with VENUS_HUMAN_INPUT=0.
+export const PC_RUNNER_VERSION = "11";
 
 export const PC_RUNNER_SOURCE = String.raw`import fs from "node:fs";
 import path from "node:path";
@@ -482,11 +483,27 @@ async function tagAll(page) {
   const text = items.map((i) => "[" + i.id + "] " + i.tag + (i.type ? "(" + i.type + ")" : "") + ' "' + i.label + '"' + (i.value ? ' value="' + i.value + '"' : "") + (i.href ? " -> " + i.href : "")).join("\n");
   return {text: text, items: items};
 }
-async function snapshot(page, log) {
+async function snapshotBase(page, log) {
   const t = await tagAll(page);
   const body = await page.evaluate(function () { return document.body ? document.body.innerText : ""; }).catch(() => "");
   const title = await page.title().catch(() => "");
   return [log.length ? "ACTIONS:\n" + log.join("\n") + "\n" : "", "URL: " + page.url(), "TITLE: " + title, "ELEMENTS (use these numbers in ops):\n" + (t.text || "(none found)"), "PAGE TEXT:\n" + body.replace(/\n\s*\n+/g, "\n").slice(0, 2500)].filter(Boolean).join("\n").slice(0, 7000);
+}
+// v11: a human check (captcha, "press and hold", "verify you are human") is named in what the model sees, so it asks the owner instead of clicking around it
+async function detectCaptcha(page) {
+  try {
+    return await page.evaluate(function () {
+      var frames = Array.prototype.slice.call(document.querySelectorAll("iframe")).some(function (i) { return /recaptcha|hcaptcha|turnstile|challenges\.cloudflare|arkoselabs|funcaptcha/i.test(i.src || ""); });
+      var text = (document.body ? document.body.innerText : "").slice(0, 3000);
+      var words = /verify (that )?you are (a )?human|are you a robot|not a robot|unusual traffic|press and hold|security check/i.test(text);
+      return frames || words;
+    });
+  } catch (e) { return false; }
+}
+async function snapshot(page, log) {
+  const base = await snapshotBase(page, log);
+  if (!(await detectCaptcha(page))) return base;
+  return "HUMAN CHECK: this page shows a captcha or a robot check. Do NOT try to solve it, bypass it or click around it. Use ask_user to ask the owner to solve it in the visible desktop window, then continue.\n\n" + base;
 }
 function resolveLabel(items, t) {
   const want = String(t.label || "").trim().toLowerCase();
@@ -555,12 +572,56 @@ async function dismissBanners(page) {
     });
   } catch (e) {}
 }
+// ---- v11: human-like input. Every helper is best-effort and falls back to the plain action, so it can never make a task fail.
+const HUMAN = process.env.VENUS_HUMAN_INPUT !== "0";
+const HM = {last: null};
+function rnd(a, b) { return a + Math.random() * (b - a); }
+async function humanMove(loc) {
+  if (!HUMAN) return;
+  try {
+    var page = loc.page();
+    var box = await loc.boundingBox({timeout: 1500});
+    if (!box || box.width < 2 || box.height < 2) return;
+    var tx = box.x + box.width * rnd(0.3, 0.7), ty = box.y + box.height * rnd(0.3, 0.7);
+    var from = HM.last || {x: rnd(40, 300), y: rnd(40, 300)};
+    var steps = Math.max(8, Math.min(30, Math.round(Math.hypot(tx - from.x, ty - from.y) / 25)));
+    var cx = (from.x + tx) / 2 + rnd(-60, 60), cy = (from.y + ty) / 2 + rnd(-60, 60);
+    for (var i = 1; i <= steps; i++) {
+      var t = i / steps, u = 1 - t;
+      await page.mouse.move(u * u * from.x + 2 * u * t * cx + t * t * tx, u * u * from.y + 2 * u * t * cy + t * t * ty);
+      if (i % 6 === 0) await sleep(rnd(5, 25));
+    }
+    HM.last = {x: tx, y: ty};
+    await sleep(rnd(40, 160));
+  } catch (e) {}
+}
+async function humanType(page, text) {
+  var long = text.length > 300;
+  for (var i = 0; i < text.length; i++) {
+    await page.keyboard.type(text.charAt(i), {delay: 0});
+    await sleep(long ? rnd(4, 14) : rnd(35, 120) + (text.charAt(i) === " " ? rnd(0, 80) : 0));
+    if (!long && Math.random() < 0.04) await sleep(rnd(150, 400));
+  }
+}
 async function smartClick(loc) {
+  await humanMove(loc);
   try { await loc.click({timeout: 5000}); return; } catch (e1) {}
   try { await loc.scrollIntoViewIfNeeded({timeout: 2000}); await loc.click({timeout: 4000, force: true}); return; } catch (e2) {}
   await loc.evaluate(function (el) { el.click(); });
 }
 async function smartType(loc, page, text) {
+  // short text is typed like a person; if the field does not end up with exactly this text, the instant fill below is used
+  if (HUMAN && text.length > 0 && text.length <= 200) {
+    try {
+      await humanMove(loc);
+      await loc.click({timeout: 3000});
+      await page.keyboard.press("Control+A");
+      await page.keyboard.press("Backspace");
+      await humanType(page, text);
+      var got = await loc.inputValue({timeout: 1500}).catch(function () { return null; });
+      if (got === text) return;
+    } catch (e0) {}
+  }
   try { await loc.fill(text, {timeout: 5000}); return; } catch (e1) {}
   await loc.click({timeout: 4000, force: true});
   await page.keyboard.press("Control+A");
@@ -639,7 +700,8 @@ async function browse(a, ops) {
         await el().setInputFiles(p);
         log.push("uploaded " + path.basename(p));
       } else if (kind === "type_focus") {
-        await page.keyboard.type(String(op.text || ""), {delay: 15});
+        if (HUMAN && String(op.text || "").length <= 200) await humanType(page, String(op.text || ""));
+        else await page.keyboard.type(String(op.text || ""), {delay: 15});
         log.push("typed into the focused field");
       } else if (kind === "back") {
         await page.goBack({timeout: 8000}).catch(() => {});
