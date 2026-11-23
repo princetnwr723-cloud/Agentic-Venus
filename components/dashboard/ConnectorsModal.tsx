@@ -7,6 +7,7 @@ import { OAUTH_PROVIDERS } from "@/lib/tools/oauth-catalog";
 import { apiPayload, findPreset } from "@/lib/tools/api-presets";
 import { brandDomain } from "@/lib/tools/brand";
 import { ServiceLogo } from "@/components/dashboard/ConnectCard";
+import McpCatalogBrowser, { type CatalogItem } from "@/components/dashboard/McpCatalogBrowser";
 
 type TestResult = { ok: boolean; label?: string; error?: string; needsOAuth?: boolean; resourceMetadata?: string };
 type Hit = { name: string; title: string; description: string; url: string; auth: "oauth" | "token" | "none"; source: string };
@@ -37,7 +38,8 @@ export default function ConnectorsModal({
   onTest: (kind: string, token: string) => Promise<TestResult>;
   onSave: (kind: string, token: string) => Promise<void>;
 }) {
-  const [tab, setTab] = useState<"plugins" | "custom">("plugins");
+  const [tab, setTab] = useState<"plugins" | "browse" | "custom">("plugins");
+  const [isOwnerUser, setIsOwnerUser] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
@@ -62,7 +64,7 @@ export default function ConnectorsModal({
       const token = await getToken();
       const res = await fetch("/api/connectors/status", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ chatId, sync }) });
       const d = await res.json();
-      if (res.ok) setStatus({ broken: d.broken ?? [], accounts: d.accounts ?? {}, custom: d.custom ?? {} });
+      if (res.ok) { setStatus({ broken: d.broken ?? [], accounts: d.accounts ?? {}, custom: d.custom ?? {} }); setIsOwnerUser(Boolean(d.owner)); }
     } catch { /* the window still works without it */ }
   }
   useEffect(() => { if (open) void callStatus(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [open, chatId, connectors]);
@@ -163,6 +165,13 @@ export default function ConnectorsModal({
     if (r.ok) { setName(""); setMcpUrl(""); setMcpToken(""); setShowTok(false); }
   }
 
+  // One button for the whole catalog: a sign-in server opens its login page, anything else is connected (and falls back to sign-in by itself if the server asks for it).
+  async function connectCatalog(h: CatalogItem, token: string) {
+    const kind = `mcp:${safeId(h.slug)}`;
+    if (!token && h.auth === "oauth") { await startMcpOAuth(kind, h.url, h.url); return; }
+    await connect(kind, JSON.stringify({ url: h.url, auth: token || undefined }), h.url);
+  }
+
   // API key: connects directly. The check afterwards only reports; it never blocks.
   async function addApi() {
     const nm = name.trim();
@@ -192,13 +201,22 @@ export default function ConnectorsModal({
           <button onClick={close} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
         <div className="mb-4 flex rounded-full border border-line bg-panel2 p-1 text-xs">
-          {([["plugins", "Plugins & chat apps"], ["custom", "Custom · MCP / API"]] as const).map(([k, l]) => (
+          {([["plugins", "Apps"], ["browse", "Browse all"], ["custom", "Custom"]] as const).map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} className={`flex-1 rounded-full px-3 py-1.5 ${tab === k ? "bg-white font-medium text-bg" : "text-muted"}`}>{l}</button>
           ))}
         </div>
         <p className="mb-4 text-xs leading-relaxed text-muted">Only this chat can use these. Tokens are stored encrypted. Once connected, the agent automatically knows its tools and when to use them. Anything that sends or changes something outside asks for your approval first. You can also just write in the chat: “connect Canva”.</p>
 
-        {tab === "plugins" ? (
+        {tab === "browse" ? (
+          <McpCatalogBrowser
+            post={authedPost}
+            isOwner={isOwnerUser}
+            busy={busy}
+            notes={msg}
+            connected={(h) => Boolean(connectors[`mcp:${safeId(h.slug)}`])}
+            onConnect={(h, token) => void connectCatalog(h, token)}
+          />
+        ) : tab === "plugins" ? (
           <div className="space-y-3">
             <div className="rounded-lg border border-line p-3">
               <div className="flex items-center justify-between"><span className="text-sm text-ink">{FREE_PACK.label}</span><span className="text-[11px] text-avatar-teal">Always on</span></div>
