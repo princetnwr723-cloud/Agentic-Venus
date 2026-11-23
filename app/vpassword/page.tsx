@@ -1,5 +1,6 @@
 "use client";
 
+import { PROXY_PRESETS, COUNTRIES, applyProxyChoice } from "@/lib/proxy-presets";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, KeyRound, ShieldCheck, Trash2 } from "lucide-react";
@@ -247,6 +248,17 @@ export default function VPasswordPage() {
             </>)}
             {kind === "proxy" && (<>
               <p className="text-xs leading-relaxed text-muted">The computer&apos;s browser goes through this proxy so shopping sites see a home-like IP instead of a data-centre IP. Use an http/https proxy (a residential proxy works best). The browser will not start without it if it fails the check.</p>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-faint">Quick fill:</span>
+                {PROXY_PRESETS.map((p) => (
+                  <button key={p.id} type="button" onClick={() => setF({ ...f, ...applyProxyChoice(f, p.id) })} className="rounded-full border border-line px-2.5 py-1 text-[11px] text-muted hover:text-ink">{p.name}</button>
+                ))}
+                <select className="rounded-full border border-line bg-bg px-2 py-1 text-[11px] text-muted" value="" onChange={(e) => { if (e.target.value) setF({ ...f, ...applyProxyChoice(f, undefined, e.target.value) }); }}>
+                  <option value="">Country…</option>
+                  {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}
+                </select>
+              </div>
+              <p className="text-[11px] leading-relaxed text-faint">A preset only fills the gateway address. Your username and password come from your own proxy account (check the address in your provider&apos;s dashboard, they change it sometimes). Many providers choose the country inside the username, for example <span className="text-muted">country-in</span>.</p>
               <div className="grid grid-cols-3 gap-2">
                 <select className={input} value={f.scheme} onChange={(e) => setF({ ...f, scheme: e.target.value })}><option value="http">http</option><option value="https">https</option></select>
                 <div className="col-span-2">{field("host", "Proxy host (for example proxy.example.com)")}</div>
