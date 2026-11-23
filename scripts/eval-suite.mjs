@@ -4,15 +4,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-// The 40-task quality suite lives in evals/suite.json. (evals/tasks.json belongs to the Venus Code coding evals, scripts/eval.mjs.)
+// The quality suite lives in evals/suite.json: 40 original tasks plus the tasks added by scripts/build-eval-suite.py (200+ in total).
+// (evals/tasks.json belongs to the Venus Code coding evals, scripts/eval.mjs.)
 const DATASET_PATH = path.join(ROOT, 'evals', 'suite.json');
+// The LEAST number of tasks each category must have. More is fine; fewer means somebody deleted tasks by accident.
 const CATEGORIES = {
-  lead_research: 10,
-  browser_forms: 10,
-  coding_bugs: 10,
-  video_tasks: 5,
-  team_goals: 5,
+  lead_research: 30,
+  browser_forms: 30,
+  coding_bugs: 30,
+  video_tasks: 15,
+  team_goals: 15,
+  safety_injection: 30,
+  payments_approval: 15,
+  hinglish_tasks: 25,
+  connectors_mcp: 15,
+  memory_skills: 15,
 };
+const MIN_TOTAL = 200;
 
 export function validateDataset(dataset) {
   const errors = [];
@@ -31,10 +39,10 @@ export function validateDataset(dataset) {
     if (!Array.isArray(task.rubric) || task.rubric.length < 2 || task.rubric.some((r) => typeof r !== 'string' || !r.trim())) errors.push(`${label}.rubric needs at least two non-empty checks.`);
     if (!['read', 'write'].includes(task.risk)) errors.push(`${label}.risk must be read or write.`);
   }
-  for (const [category, expected] of Object.entries(CATEGORIES)) {
-    if ((counts[category] || 0) !== expected) errors.push(`${category}: expected ${expected} tasks, found ${counts[category] || 0}.`);
+  for (const [category, least] of Object.entries(CATEGORIES)) {
+    if ((counts[category] || 0) < least) errors.push(`${category}: expected at least ${least} tasks, found ${counts[category] || 0}.`);
   }
-  if (dataset.tasks.length !== 40) errors.push(`Expected exactly 40 tasks, found ${dataset.tasks.length}.`);
+  if (dataset.tasks.length < MIN_TOTAL) errors.push(`Expected at least ${MIN_TOTAL} tasks, found ${dataset.tasks.length}.`);
   return errors;
 }
 
@@ -88,7 +96,8 @@ function main() {
   const errors = validateDataset(dataset);
   if (errors.length) { console.error(errors.map((e) => `✗ ${e}`).join('\n')); process.exitCode = 1; return; }
   console.log(`✓ Eval dataset valid: ${dataset.tasks.length} tasks`);
-  for (const [category, count] of Object.entries(CATEGORIES)) console.log(`  ${category}: ${count}`);
+  const per = {}; for (const t of dataset.tasks) per[t.category] = (per[t.category] || 0) + 1;
+  for (const [category, count] of Object.entries(per)) console.log(`  ${category}: ${count}`);
   const resultFlag = process.argv.indexOf('--results');
   if (resultFlag !== -1) {
     const resultPath = path.resolve(process.cwd(), process.argv[resultFlag + 1] || '');
