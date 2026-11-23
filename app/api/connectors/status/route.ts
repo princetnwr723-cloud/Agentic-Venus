@@ -3,6 +3,7 @@ import { getAdminDb } from "@/lib/firebase-admin";
 import { readBody, requestStatus } from "@/lib/request";
 import { resolveConnectorsSafe } from "@/lib/tools/connectors";
 import { syncConnectorAnnouncements } from "@/lib/connector-announce";
+import { isOwner } from "@/lib/owner";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -45,7 +46,9 @@ export async function POST(req: Request) {
     }
 
     const synced = b.sync === true ? await syncConnectorAnnouncements(uid, chatId).catch(() => ({ posted: false })) : { posted: false };
-    return NextResponse.json({ broken, accounts, connected, custom, posted: synced.posted });
+    // `owner` only decides whether the "Refresh now" button of the catalog is shown; the catalog route checks it again on the server
+    const owner = await isOwner(uid).catch(() => false);
+    return NextResponse.json({ broken, accounts, connected, custom, posted: synced.posted, owner });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "Status failed." }, { status: requestStatus(e) });
   }
