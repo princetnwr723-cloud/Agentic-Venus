@@ -72,7 +72,10 @@ test("code tools become the right Venus Code calls", async () => {
 test("browser.run needs no chat and drops unsafe ops (no secret/login ops)", async () => {
   const log = [];
   await run("browser.run", { url: "https://example.com", ops: [{ op: "click_label", label: "x" }, { op: "secret", id: 1, field: "password" }, "x"] }, false, log);
-  assert.deepEqual(log.find((l) => l[0] === "browser")[1], [{ op: "click_label", label: "x" }]);
+  // the fake records [name, ...args after uid]: the browser action is called as browser(uid, url, ops)
+  const call = log.find((l) => l[0] === "browser");
+  assert.equal(call[1], "https://example.com");
+  assert.deepEqual(call[2], [{ op: "click_label", label: "x" }]);
   assert.equal((await run("browser.run", {}, false)).isError, true);
 });
 

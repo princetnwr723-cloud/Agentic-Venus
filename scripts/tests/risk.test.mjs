@@ -72,3 +72,13 @@ test("riskNote and autoDecision agree", () => {
   assert.equal(riskNote({ name: "db.write", summary: "Save a row" }), "");
   assert.equal(autoDecision("mail.send", "Send mail", false, args), "ask");
 });
+
+test("Hinglish money and delete words need a human too", async () => {
+  const { classifyAction } = await import("../../lib/agent/risk.ts");
+  for (const summary of ["Amazon se laptop kharid lo", "5000 rupaye transfer karo", "supplier ko payment karo", "purani files delete kar do"]) {
+    const r = classifyAction({ name: "browser.run", summary });
+    assert.equal(r.decision, "ask", summary);
+  }
+  // an ordinary Hinglish summary stays low risk
+  assert.equal(classifyAction({ name: "web.read", summary: "Dukaan ka timing padh raha hu" }).decision, "approve");
+});
