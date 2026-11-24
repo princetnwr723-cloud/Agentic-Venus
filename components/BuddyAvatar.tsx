@@ -2,7 +2,7 @@
 
 import { useId, useMemo, type CSSProperties } from "react";
 import "./buddy.css";
-import { buddyInner, parseBuddy } from "@/lib/buddies";
+import { buddyInner, parseBuddy, stateClasses, type BuddyState } from "@/lib/buddies";
 
 function hash(s: string) {
   let h = 0;
@@ -14,6 +14,8 @@ function hash(s: string) {
  * One animated buddy.
  *  working  = "thinking": eyes dart, a little PC pops up, thought dots
  *  happy    = forced happy face + cheering jump (hovering does this too)
+ *  state    = idle | thinking | working | waiting | blocked | done
+ *  fur      = fluffy 3D fur look (default on, false = old flat look)
  *  animate  = true | false | "hover" (still until the pointer is over it)
  */
 export default function BuddyAvatar({
@@ -22,15 +24,20 @@ export default function BuddyAvatar({
   working = false,
   happy = false,
   animate = true,
+  state,
+  fur = true,
 }: {
   value: string;
   size?: number;
   working?: boolean;
   happy?: boolean;
   animate?: boolean | "hover";
+  state?: BuddyState;
+  fur?: boolean;
 }) {
   const uid = useId();
   const delay = (hash(uid) % 40) / 10;
+  const furId = fur ? "bf" + uid.replace(/[^a-zA-Z0-9]/g, "") : undefined;
   const parsed = parseBuddy(value);
 
   const id = parsed?.def.id ?? "";
@@ -38,9 +45,9 @@ export default function BuddyAvatar({
   const face = parsed?.face ?? "dot";
 
   const html = useMemo(
-    () => (parsed ? buddyInner(parsed.def, parsed.hex, parsed.face) : ""),
+    () => (parsed ? buddyInner(parsed.def, parsed.hex, parsed.face, furId) : ""),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, hex, face]
+    [id, hex, face, furId]
   );
 
   if (!parsed) return null;
@@ -48,8 +55,8 @@ export default function BuddyAvatar({
   const cls = [
     "bd shrink-0",
     `bd-m-${parsed.def.motion}`,
-    working ? "bd-working" : "",
-    happy && !working ? "bd-happy" : "",
+    state ? stateClasses(state) : working ? "bd-working" : happy ? "bd-happy" : "",
+    fur ? "bd-fur" : "",
     animate === false ? "bd-still" : animate === "hover" ? "bd-hoveronly" : "",
   ]
     .filter(Boolean)
