@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { X, ExternalLink } from "lucide-react";
+import Link from "next/link";
+import { X, ExternalLink, Store, ChevronRight } from "lucide-react";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { useKeys } from "@/lib/keys-context";
 import VaultHealth from "@/components/dashboard/VaultHealth";
@@ -64,6 +65,21 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
           </div>
           <button onClick={onClose} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><X size={18} /></button>
         </div>
+
+        <Link
+          href="/marketplace"
+          onClick={onClose}
+          className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-line bg-panel2 p-3 transition-colors hover:border-gold/60"
+        >
+          <span className="flex items-center gap-3">
+            <Store size={18} className="text-gold" />
+            <span>
+              <span className="block text-sm font-medium text-ink">Marketplace</span>
+              <span className="block text-xs text-muted">Free skills, agents and automations. Add them in one tap, or share your own.</span>
+            </span>
+          </span>
+          <ChevronRight size={16} className="shrink-0 text-muted" />
+        </Link>
 
         {tab === "plans" ? (
           <PlansPanel onNavigate={onClose} />
