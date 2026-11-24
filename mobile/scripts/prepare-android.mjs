@@ -1,4 +1,5 @@
-// Run once after `npx cap add android` (the workflow does it). Adds what the plugins and Firebase need to the Android project.
+// Run once after `npx cap add android` (the workflow does it). Adds what the plugins and Firebase need to the Android project,
+// and installs the native scheduler (mobile/native/android/*.java): exact alarms that run your routines on the phone, on time.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const main = path.join(root, "android", "app", "src", "main");
 const manifestPath = path.join(main, "AndroidManifest.xml");
+const PKG = "com.agenticvenus.app";
 
 if (!fs.existsSync(manifestPath)) {
   console.error("android/ folder not found. Run `npx cap add android` first.");
@@ -20,12 +22,16 @@ const PERMS = [
   "android.permission.FOREGROUND_SERVICE",
   "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
   "android.permission.WAKE_LOCK",
+  // scheduler: exact alarms, come back after a reboot, and ask to be exempt from battery saving
+  "android.permission.SCHEDULE_EXACT_ALARM",
+  "android.permission.RECEIVE_BOOT_COMPLETED",
+  "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
 ];
 for (const p of PERMS) {
   if (!xml.includes(p)) xml = xml.replace("</manifest>", `    <uses-permission android:name="${p}" />\n</manifest>`);
 }
 
-// 2. runner service + push defaults
+// 2. runner service + push defaults + scheduler receivers
 const APP_BLOCK = `
         <service android:name="io.capawesome.capacitorjs.plugins.foregroundservice.AndroidForegroundService" android:foregroundServiceType="dataSync" android:exported="false" />
         <receiver android:name="io.capawesome.capacitorjs.plugins.foregroundservice.NotificationActionBroadcastReceiver" android:exported="false" />
@@ -33,6 +39,20 @@ const APP_BLOCK = `
         <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="venus_alerts" />
 `;
 if (!xml.includes("AndroidForegroundService")) xml = xml.replace("</application>", APP_BLOCK + "    </application>");
+
+const SCHED_BLOCK = `
+        <receiver android:name=".VenusAlarmReceiver" android:exported="false" />
+        <receiver android:name=".VenusBootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+`;
+if (!xml.includes(".VenusAlarmReceiver")) xml = xml.replace("</application>", SCHED_BLOCK + "    </application>");
 
 // 3. the login link agenticvenus://auth?code=...
 const FILTER = `            <intent-filter>
@@ -59,7 +79,31 @@ fs.writeFileSync(
 `
 );
 
+// 5. the native scheduler: copy the Java files next to MainActivity and register the plugin
+const javaDir = path.join(main, "java", ...PKG.split("."));
+fs.mkdirSync(javaDir, { recursive: true });
+const srcDir = path.join(root, "native", "android");
+for (const f of fs.readdirSync(srcDir).filter((n) => n.endsWith(".java"))) {
+  fs.copyFileSync(path.join(srcDir, f), path.join(javaDir, f));
+}
+fs.writeFileSync(
+  path.join(javaDir, "MainActivity.java"),
+  `package ${PKG};
+
+import android.os.Bundle;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(VenusSchedulerPlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}
+`
+);
+
 if (!fs.existsSync(path.join(root, "android", "app", "google-services.json"))) {
   console.warn("WARNING: android/app/google-services.json is missing, push notifications will not work.");
 }
-console.log("Android project prepared.");
+console.log("Android project prepared (scheduler installed).");
