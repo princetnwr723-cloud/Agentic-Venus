@@ -368,3 +368,7 @@
   60% { transform: translateX(-1.8%) rotate(-1.5deg); }
   80% { transform: translateX(1.8%) rotate(1.5deg); }
 }
+
+/* the fur picture fades in when it is ready */
+.bd-furimg { animation: bd-furin 0.35s ease-out both; }
+@keyframes bd-furin { from { opacity: 0; } to { opacity: 1; } }
