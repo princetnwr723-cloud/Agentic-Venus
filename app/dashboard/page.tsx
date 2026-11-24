@@ -249,7 +249,11 @@ export default function DashboardPage() {
     Promise.race([Promise.all([listChats(user.uid), listCustomAgents(user.uid)]), timeout])
       .then(([loadedChats, loadedAgents]) => {
         setChats(loadedChats); setCustomAgents(loadedAgents); setChatsLoaded(true);
-        if (loadedChats.length > 0) setActiveId(loadedChats[0].id);
+        if (loadedChats.length > 0) {
+          let want = "";
+          try { want = new URLSearchParams(window.location.search).get("chat") || ""; } catch { /* ignore */ }
+          setActiveId((loadedChats.find((c) => c.id === want) ?? loadedChats[0]).id);
+        }
         for (const c of loadedChats) if (c.pcSandboxId && c.pcPaused) patchSession(c.id, { status: "paused" });
       })
       .catch((err) => {
