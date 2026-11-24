@@ -3,7 +3,7 @@
 import { useEffect, useId, useState, type CSSProperties } from "react";
 import { buildTheme, type AvatarTheme } from "@/lib/avatar-theme";
 import { parseAvatar, type AvatarColor, type MascotExpr } from "@/lib/bots";
-import { isBuddy } from "@/lib/buddies";
+import { isBuddy, type BuddyState } from "@/lib/buddies";
 import BuddyAvatar from "@/components/BuddyAvatar";
 
 const STAR =
@@ -584,17 +584,29 @@ function Any({
   working,
   animate,
   happy,
+  state,
 }: {
   value: AvatarColor;
   size: number;
   working: boolean;
   animate: boolean | "hover";
   happy: boolean;
+  state?: BuddyState;
 }) {
   if (isBuddy(value)) {
-    return <BuddyAvatar value={value} size={size} working={working} animate={animate} happy={happy} />;
+    return (
+      <BuddyAvatar
+        value={value}
+        size={size}
+        working={working}
+        animate={animate}
+        happy={happy}
+        state={state}
+      />
+    );
   }
-  return <Mascot value={value} size={size} working={working} animate={animate !== false} />;
+  const busy = working || state === "thinking" || state === "working";
+  return <Mascot value={value} size={size} working={busy} animate={animate !== false} />;
 }
 
 export default function BotAvatar({
@@ -605,6 +617,7 @@ export default function BotAvatar({
   working = false,
   animate = true,
   happy = false,
+  state,
 }: {
   color: AvatarColor;
   paired?: AvatarColor;
@@ -613,15 +626,16 @@ export default function BotAvatar({
   working?: boolean;
   animate?: boolean | "hover";
   happy?: boolean;
+  state?: BuddyState;
 }) {
   if (paired) {
     return (
       <div className="relative shrink-0" style={{ width: size, height: size }}>
         <div className="absolute left-0 top-0">
-          <Any value={paired} size={size * 0.72} working={working} animate={animate} happy={happy} />
+          <Any value={paired} size={size * 0.72} working={working} animate={animate} happy={happy} state={state} />
         </div>
         <div className="absolute bottom-0 right-0 rounded-full ring-2 ring-panel">
-          <Any value={color} size={size * 0.72} working={working} animate={animate} happy={happy} />
+          <Any value={color} size={size * 0.72} working={working} animate={animate} happy={happy} state={state} />
         </div>
       </div>
     );
@@ -632,7 +646,7 @@ export default function BotAvatar({
       className={`shrink-0 ${ring ? "rounded-full ring-2 ring-gold/70" : ""}`}
       style={{ width: size, height: size }}
     >
-      <Any value={color} size={size} working={working} animate={animate} happy={happy} />
+      <Any value={color} size={size} working={working} animate={animate} happy={happy} state={state} />
     </div>
   );
 }
