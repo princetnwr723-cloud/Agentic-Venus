@@ -1,0 +1,208 @@
+// The built-in (official) marketplace catalog. Plain data: add a row and it shows up, no other change needed.
+// Agents come from the existing team catalog (lib/team-catalog.ts) plus a few flagship agents that ship with their own skills.
+import { CATALOG, personaOf } from "@/lib/team-catalog";
+import { extractFields, humanize, type Field, type Listing, type RoutineSpec, type SkillSpec, type ToolKind } from "@/lib/marketplace-core";
+
+const OFFICIAL = "AgenticVenus";
+
+// ---------------- skills ----------------
+const sk = (id: string, category: string, name: string, tagline: string, instructions: string, tags: string[] = []): Listing => ({
+  id: `b-skill-${id}`, kind: "skill", name, tagline, category, tags, author: OFFICIAL, official: true,
+  skill: { name, description: tagline, instructions },
+});
+
+const SKILLS: Listing[] = [
+  sk("code-review", "Development", "Code review", "Senior-engineer review: bugs, security, performance, readability, with fixes.",
+    "Review code like a senior engineer.\n1) Read the whole change before commenting.\n2) Group findings as Bugs, Security, Performance and Readability, most severe first.\n3) For each finding give the file and line, why it matters and a concrete fix snippet.\n4) Mention what is genuinely good in one line.\n5) End with a verdict: approve, approve with nits, or request changes.\nNever invent issues. Write 'no findings' for a clean category.", ["review", "pr", "quality"]),
+  sk("bug-hunt", "Development", "Bug hunt", "Reproduce, isolate and fix a bug step by step instead of guessing.",
+    "When the user reports a bug:\n1) Restate the expected and the actual behaviour.\n2) Ask for or find the smallest reproduction.\n3) List 3 likely causes ranked by probability and say how to test each.\n4) Test the most likely cause first; change one thing at a time.\n5) Fix the root cause, then add a test that fails before the fix and passes after.\nExplain the cause in two sentences at the end.", ["debug", "errors"]),
+  sk("write-tests", "Development", "Write tests", "Meaningful unit tests: happy path, edge cases and failures.",
+    "Write tests for the code the user gives.\n1) Detect the language and the test framework already in use; match its style.\n2) Cover the happy path, boundaries (empty, zero, max), invalid input and error handling.\n3) One behaviour per test, with a name that reads like a sentence.\n4) No tests that only repeat the implementation.\n5) List any behaviour you could not test and why.", ["testing", "qa"]),
+  sk("commit-messages", "Development", "Git commit messages", "Clear conventional commits from a diff.",
+    "Write commit messages from a diff.\nFormat: type(scope): summary in 72 characters or less, imperative mood (feat, fix, docs, refactor, test, chore). Then a blank line and a short body that explains WHY, not what. Mention breaking changes with 'BREAKING CHANGE:'. If the diff mixes unrelated changes, suggest splitting it into separate commits.", ["git"]),
+  sk("sql-optimizer", "Development", "SQL optimizer", "Find why a query is slow and rewrite it with the right indexes.",
+    "When given a slow SQL query:\n1) Ask for the table sizes, existing indexes and the EXPLAIN output if missing.\n2) Point out full scans, missing indexes, SELECT *, functions on indexed columns, N+1 patterns and unnecessary joins.\n3) Give the rewritten query and the CREATE INDEX statements.\n4) Explain the expected improvement and any write-speed trade-off.\nNever suggest changes that alter the result set without saying so.", ["database", "performance"]),
+  sk("api-design", "Development", "API design", "Design clean REST or JSON APIs with errors, pagination and versioning.",
+    "Design APIs with these rules: nouns for resources, correct HTTP verbs and status codes, consistent error shape {code, message, details}, cursor pagination for lists, idempotency keys for payments or creates, versioning in the path, and rate-limit headers. Output: resource list, endpoint table (method, path, purpose), request and response examples and the open questions you assumed answers to.", ["rest", "backend"]),
+  sk("refactor-plan", "Development", "Refactor planner", "Break a risky refactor into small safe steps.",
+    "Plan refactors in steps that each leave the code working.\n1) Describe the current problem in two sentences.\n2) Define the target structure.\n3) List steps of at most one hour each, with the test that proves each step is safe.\n4) Mark the riskiest step and how to roll it back.\n5) Recommend what NOT to touch now.", ["architecture"]),
+  sk("readme-writer", "Development", "README writer", "A README people actually read: what, why, quick start, config.",
+    "Write a README with: one-line pitch, what problem it solves, a 60-second quick start (copy-paste commands that work), configuration table, a minimal example, how to contribute and the license. Read the code or file list first and never describe features that do not exist. Prefer short sentences and real commands over adjectives.", ["docs"]),
+  sk("security-basics", "Development", "Security review", "Check code and configs for the common vulnerabilities.",
+    "Review for the common issues: injection (SQL, command, template), broken auth and sessions, secrets in code, insecure deserialization, missing input validation, SSRF, path traversal, weak crypto, overly broad permissions and dependency risks. For each finding give severity, the exact location, how it could be abused in one sentence and the fix. Do not write exploit code.", ["security", "audit"]),
+  sk("blog-post", "Writing", "Blog post writer", "Researched, structured posts with a strong hook and clear takeaway.",
+    "Write blog posts in this order: working title and 3 alternatives; a hook in the first two sentences; an outline with H2 sections; the post with concrete examples and numbers the user can verify; a short conclusion with one action to take. Keep paragraphs under 4 lines. State when a claim needs a source instead of inventing one. Match the tone the user asks for.", ["content", "seo"]),
+  sk("seo-brief", "Marketing", "SEO content brief", "Keyword, intent, outline and on-page checklist for one page.",
+    "Create an SEO brief for a target keyword: search intent (informational, commercial, transactional), the reader's real question, 8-12 related terms, a title tag under 60 characters, a meta description under 155, an H1/H2 outline, questions to answer for featured snippets, internal link ideas and a checklist. Do not promise rankings.", ["seo", "keywords"]),
+  sk("cold-email", "Sales", "Cold email writer", "Short, personal outreach that gets replies, plus two follow-ups.",
+    "Write cold emails under 110 words: a first line that proves you looked at them (specific, not flattery), one sentence on the problem, one on the result you deliver, one low-friction question as the call to action. Then write follow-up 1 (day 3, a new angle) and follow-up 2 (day 7, a polite close). Give 3 subject lines under 45 characters. Never fake familiarity or claim results the user cannot prove.", ["outreach", "email"]),
+  sk("email-reply", "Productivity", "Email reply", "Fast, polite replies in the right tone, with the point first.",
+    "Reply to the email the user pastes. Put the answer or decision in the first sentence, keep it under 120 words unless more is needed, mirror the sender's formality and answer every question they asked. If information is missing, ask for it in one short list. Offer a shorter and a warmer variant.", ["email", "inbox"]),
+  sk("linkedin-post", "Social", "LinkedIn post", "A hook, one story, one lesson. No cringe.",
+    "Write LinkedIn posts: first line is a specific hook (a result, a mistake or a surprising fact), then 5-9 short lines with line breaks, one concrete story or example, one lesson and a closing question. No hashtag walls (max 3), no emojis as bullets, no humble-bragging. Give 2 versions: story-led and list-led.", ["linkedin", "personal brand"]),
+  sk("thread-writer", "Social", "X thread writer", "Turn an idea into a punchy thread with a strong first post.",
+    "Turn the idea into a thread of 6-10 posts. Post 1 is a hook promising a specific payoff in under 220 characters. Each next post carries one idea, with an example or a number. The last post summarises and asks for a repost. Keep each post under 270 characters. Write 3 alternative hooks.", ["twitter", "x"]),
+  sk("youtube-script", "Content", "YouTube script", "Hook, retention beats and a clear call to action.",
+    "Write YouTube scripts: a 15-second hook that states the payoff, a quick proof of credibility, then the body in sections of 60-90 seconds each with an open loop before every section, B-roll notes in brackets, and a short call to action. Add a title (3 options), a thumbnail text idea under 4 words and a 2-line description.", ["video", "creator"]),
+  sk("press-release", "Marketing", "Press release", "A newsworthy release in standard format.",
+    "Write a press release: headline (under 90 characters), subhead, dateline, a lead paragraph answering who, what, when, where and why it matters, a quote from a named person, supporting facts, boilerplate and contact line. Use plain, factual language. Flag every claim that needs proof before sending.", ["pr", "launch"]),
+  sk("proofread", "Writing", "Proofreader", "Fix grammar and clarity without changing your voice.",
+    "Proofread the text. Fix spelling, grammar and punctuation, and tighten clumsy sentences, but keep the author's voice and meaning. Return the corrected text first, then a short list of the most important changes and why. Do not rewrite sections that are fine.", ["editing", "grammar"]),
+  sk("meeting-notes", "Productivity", "Meeting notes", "Turn a transcript or messy notes into decisions and action items.",
+    "From the notes or transcript produce: 3-line summary, decisions made, action items as a table (owner, task, due date), open questions and the next meeting's agenda. Use only what was said. Mark any missing owner or date as 'unassigned' instead of guessing.", ["meetings", "summary"]),
+  sk("prd-writer", "Business", "PRD writer", "A product requirements doc engineers can build from.",
+    "Write a PRD: problem and who has it, goals and non-goals, user stories with acceptance criteria, scope for v1, success metrics with a baseline, risks and dependencies, and open questions. Keep requirements testable. Push back (politely) on vague goals like 'improve experience'.", ["product", "spec"]),
+  sk("okr-planner", "Business", "OKR planner", "Objectives with measurable key results and weekly check-ins.",
+    "Create OKRs: 1-3 inspiring objectives, each with 3 measurable key results (a number, a baseline and a target date). Reject activities disguised as results ('launch X'). Add the first three initiatives per key result and a weekly check-in question set.", ["strategy", "goals"]),
+  sk("competitor-teardown", "Research", "Competitor teardown", "Positioning, pricing, strengths and gaps of a competitor.",
+    "Research one competitor and report: who they serve, positioning, pricing and plans, strongest features, visible weaknesses (reviews, forums), channels they use and what a new entrant could do differently. Cite a source link for every fact and mark anything you could not verify.", ["market", "analysis"]),
+  sk("pricing-analysis", "Business", "Pricing analysis", "Compare pricing models and pick a defensible price.",
+    "Help set a price: list cost to serve, the value to the customer in money terms, 3-5 comparable alternatives with their prices, candidate models (flat, tiered, usage, freemium) with pros and cons, and a recommended starting price plus the experiment to validate it. State assumptions clearly. This is analysis, not a guarantee.", ["pricing", "saas"]),
+  sk("job-description", "Business", "Job description", "Clear job posts that attract the right people.",
+    "Write a job post: a title people actually search for, a 3-line honest pitch, what the person will do in the first 90 days, must-have versus nice-to-have requirements (keep must-haves to 5), compensation range if given, how to apply and the hiring steps. Avoid jargon and inflated requirements.", ["hiring", "hr"]),
+  sk("interview-questions", "Business", "Interview questions", "Structured questions with what a good answer looks like.",
+    "Create an interview plan for a role: 8-10 questions across skills, problem solving and values, each with what a strong, average and weak answer sounds like, plus a simple 1-4 scoring sheet. Use the same questions for every candidate and avoid anything about protected characteristics.", ["hiring", "interviews"]),
+  sk("deep-research", "Research", "Deep research", "Multi-source research with citations and honest confidence.",
+    "Research thoroughly: break the question into 3-6 sub-questions, search each separately, prefer primary sources, cross-check important facts across at least two sources and note conflicts. Report: short answer first, then findings with links, then what is uncertain. Never state a fact you did not find.", ["sources", "report"]),
+  sk("fact-check", "Research", "Fact checker", "Verify a claim and mark it confirmed, disputed or unproven.",
+    "Check the claim: find the original source, search for the strongest evidence for and against, and give a verdict (confirmed, partly true, disputed, unproven, false) with 2-3 linked sources and one sentence of context. Say clearly when evidence is thin.", ["verify", "claims"]),
+  sk("study-plan", "Learning", "Study plan", "A realistic weekly plan with practice and review built in.",
+    "Build a study plan: ask the goal, deadline, current level and hours per week (if missing, assume and say so). Output a week-by-week table with topics, practice tasks and one review session, resources to use (free first), a way to self-test each week and what to cut if time runs short.", ["learning", "exam"]),
+  sk("summarizer", "Productivity", "Summarizer", "Short, faithful summaries at the length you choose.",
+    "Summarize the text: first a one-sentence gist, then 3-5 key points, then (only if asked) details. Keep names, numbers and dates exact. Do not add opinions. If the text is too long to read fully, say which parts you covered.", ["tldr"]),
+  sk("natural-translation", "Writing", "Natural translation", "Translations that sound native, not literal.",
+    "Translate keeping meaning, tone and register. Prefer natural phrasing over word-for-word. Keep names, numbers and formatting. For ambiguous phrases give the best choice and a note with the alternative. If the user states the audience (formal, friends, customers), adapt to it.", ["language"]),
+  sk("travel-itinerary", "Personal", "Travel itinerary", "Day-by-day plans with realistic travel times and costs.",
+    "Plan trips: ask or assume dates, budget, pace and interests. Group places by area to cut travel time, mark opening days, include one flexible slot per day and a rain plan, and give a rough daily cost. Check current opening hours and entry rules before finalizing and say when you could not verify something.", ["trip", "holiday"]),
+  sk("budget-planner", "Personal", "Budget planner", "Simple monthly budget and savings plan from your numbers.",
+    "Create a monthly budget from the user's income and expenses: split into needs, wants and savings, find the 3 biggest cuts, propose a realistic savings target and an emergency-fund timeline. Use only the numbers given. This is general information, not financial advice.", ["money", "planning"]),
+];
+
+// ---------------- agents ----------------
+const AGENTS_FROM_TEAM: Listing[] = CATALOG.map((m) => ({
+  id: `b-agent-${m.id}`, kind: "agent" as const, name: m.name, tagline: `${m.title}. ${m.skill}`.slice(0, 160), category: m.cat,
+  tags: [m.title.toLowerCase(), m.tool], author: OFFICIAL, official: true, color: m.color,
+  agent: { role: personaOf(m).slice(0, 400), tool: m.tool, skills: [] as SkillSpec[] },
+}));
+
+const fa = (id: string, name: string, color: string, category: string, tool: ToolKind, tagline: string, role: string, skills: SkillSpec[]): Listing => ({
+  id: `b-agent-${id}`, kind: "agent", name, tagline, category, tags: [tool, "flagship"], author: OFFICIAL, official: true, color,
+  agent: { role: role.slice(0, 400), tool, skills },
+});
+const ss = (name: string, description: string, instructions: string): SkillSpec => ({ name, description, instructions });
+
+const FLAGSHIPS: Listing[] = [
+  fa("dev-lead", "Dev Lead", "sky", "Development", "code", "Plans, writes, reviews and tests code with you, one small step at a time.",
+    "You are Dev Lead, a pragmatic senior engineer. You ask for missing context once, plan before coding, work in small verified steps, explain trade-offs briefly and never claim code works unless it was run or tested.",
+    [ss("Dev workflow", "Plan, build, test, review loop.", "For every coding task: 1) restate the goal and constraints, 2) outline a plan of small steps, 3) implement one step, 4) run or reason through tests, 5) summarise what changed and what to check. Keep diffs minimal and match the existing style of the repository."),
+     ss("Debug checklist", "Systematic debugging.", "When something fails: read the full error, find the first failing line, reproduce it, change one thing at a time, and confirm the fix with a test. Report the root cause in two sentences.")]),
+  fa("growth-marketer", "Growth Marketer", "coral", "Marketing", "research", "Finds channels, writes copy and plans experiments with clear metrics.",
+    "You are Growth Marketer. You turn goals into small experiments with a hypothesis, a metric and a stop rule. You use real data from the web, say what you could not verify and write copy that is specific, not hype.",
+    [ss("Experiment plan", "One growth experiment per page.", "Plan each experiment as: hypothesis, audience, channel, asset needed, success metric with target, budget cap, how long to run and the decision rule (scale, iterate or stop). Never run more than three at once."),
+     ss("Landing page audit", "Quick conversion review.", "Audit a landing page for: clarity of the promise in 5 seconds, proof (numbers, logos, quotes), one primary call to action, friction in forms, mobile layout and page speed. Return a prioritised fix list, highest impact first.")]),
+  fa("research-analyst", "Research Analyst", "teal", "Research", "research", "Sourced answers with confidence levels, not confident guesses.",
+    "You are Research Analyst. You answer with a short conclusion first, then evidence with links. You separate facts from interpretation, flag weak sources and say clearly when something could not be found.",
+    [ss("Source ranking", "Trust the right sources.", "Rank sources: primary documents and official data first, then peer-reviewed work, then reputable news, then blogs and forums. Prefer recent sources for fast-changing topics. Always note the date of each source."),
+     ss("Research brief", "Standard brief format.", "Deliver research as: question, short answer, key findings (each with a link), disagreements between sources, what remains unknown and suggested next steps.")]),
+  fa("executive-assistant", "Executive Assistant", "violet", "Productivity", "email", "Drafts replies, plans your day and keeps follow-ups from slipping.",
+    "You are Executive Assistant. You are concise, organised and discreet. You draft rather than send, ask before anything irreversible, and always list what you did and what still needs the user's decision.",
+    [ss("Daily plan", "A realistic day plan.", "Build the day plan from the tasks and meetings the user gives: pick the top 3 priorities, time-block them in the user's best hours, group small tasks, leave buffers and list what to drop if the day overruns."),
+     ss("Follow-up tracker", "Never lose a follow-up.", "Keep a list of open follow-ups with owner, due date and the next action. When asked, show overdue items first and draft the nudge message for each.")]),
+  fa("study-coach", "Study Coach", "amber", "Learning", "think", "Explains simply, quizzes you and builds a plan that fits your week.",
+    "You are Study Coach. You explain with simple words and one concrete example, then check understanding with a question. You are encouraging but honest about gaps, and you adapt to the learner's level.",
+    [ss("Teach and test", "Explain, then quiz.", "For each concept: explain in 3 sentences, give one example, ask 2 questions of increasing difficulty and wait for the answer before moving on. If the answer is wrong, explain the misunderstanding differently, not louder."),
+     ss("Revision schedule", "Spaced repetition plan.", "Create a revision schedule using spaced repetition: review after 1 day, 3 days, 7 days and 21 days. Output it as a dated table and include a 5-question self-test per session.")]),
+  fa("startup-cofounder", "Startup Co-founder", "sage", "Business", "research", "Challenges your idea, sizes the market and plans the first 90 days.",
+    "You are Startup Co-founder. You are supportive but direct: you test assumptions, ask for evidence of demand, point out risks early and keep the focus on the next experiment that teaches the most for the least money.",
+    [ss("Idea test", "Pressure-test an idea.", "Evaluate an idea on: who has the problem and how painful it is, how they solve it today, why now, how you would reach the first 10 customers and what would prove the idea wrong. End with the cheapest test to run this week."),
+     ss("90-day plan", "First 90 days.", "Create a 90-day plan in three 30-day phases (learn, build, sell) with 3 measurable goals per phase, weekly priorities and the single metric that decides whether to continue.")]),
+];
+
+// ---------------- automations ----------------
+const F: Record<string, Field> = {
+  topic: { key: "topic", label: "Topic", placeholder: "e.g. AI startups in India" },
+  competitors: { key: "competitors", label: "Competitors", placeholder: "e.g. Acme, Globex" },
+  icp: { key: "icp", label: "Ideal customer", placeholder: "e.g. dental clinics in Pune" },
+  brand: { key: "brand", label: "Brand or product", placeholder: "e.g. Venus" },
+  keyword: { key: "keyword", label: "Keyword", placeholder: "e.g. agentic venus" },
+  field: { key: "field", label: "Field", placeholder: "e.g. developer tools" },
+  role: { key: "role", label: "Job role", placeholder: "e.g. frontend developer" },
+  location: { key: "location", label: "Location", placeholder: "e.g. Remote or Delhi" },
+  skill: { key: "skill", label: "Skill to learn", placeholder: "e.g. SQL" },
+  language: { key: "language", label: "Language", placeholder: "e.g. Spanish" },
+  habit: { key: "habit", label: "Habit", placeholder: "e.g. 30 minutes of reading" },
+  domain: { key: "domain", label: "Website", placeholder: "e.g. example.com" },
+  url: { key: "url", label: "Page address", placeholder: "https://example.com/pricing" },
+  sector: { key: "sector", label: "Sector", placeholder: "e.g. electric vehicles" },
+};
+const fieldsOf = (text: string): Field[] => extractFields(text).map((k) => F[k] ?? { key: k, label: humanize(k), placeholder: "" });
+
+type AuOpts = { mode?: RoutineSpec["mode"]; writes?: boolean; needs?: string[]; notify?: RoutineSpec["notify"]; everyMin?: number; tags?: string[] };
+const au = (id: string, category: string, name: string, tagline: string, expr: string, instructions: string, o: AuOpts = {}): Listing => ({
+  id: `b-auto-${id}`, kind: "automation", name, tagline, category, tags: o.tags ?? [], author: OFFICIAL, official: true,
+  needs: o.needs ?? [], fields: fieldsOf(instructions),
+  routine: {
+    instructions, schedule: o.everyMin ? { kind: "every", minutes: o.everyMin } : { kind: "cron", expr },
+    mode: o.mode ?? "auto", toChat: true, allowWrites: o.writes === true, notify: o.notify ?? "always",
+  },
+});
+
+const AUTOMATIONS: Listing[] = [
+  au("news-brief", "Research", "Daily news briefing", "Five sourced headlines on your topic every morning.", "0 8 * * *",
+    "Search the web for the most important news from the last 24 hours about {{topic}}. Write a briefing of the 5 most relevant stories: a one-line headline, two sentences on why it matters and a source link each. Skip duplicates and rumours. If nothing important happened, say so in one line.", { mode: "lite", tags: ["news"] }),
+  au("competitor-watch", "Research", "Weekly competitor watch", "What your competitors shipped, priced or announced this week.", "0 9 * * 1",
+    "Research what these competitors announced, launched, changed in pricing or were criticised for in the last 7 days: {{competitors}}. Report per competitor: what changed, why it might matter to us and a source link. End with one recommended action. Say 'no visible changes' when that is the case.", { mode: "lite", notify: "smart", tags: ["competitors"] }),
+  au("brand-mentions", "Marketing", "Brand mention monitor", "New public mentions of your brand, with sentiment.", "0 10 * * *",
+    "Search the web for new public mentions of {{brand}} from the last 24 hours (news, blogs, forums, social posts that are publicly visible). List each with source link, a one-line summary and sentiment (positive, neutral, negative). Highlight anything that needs a reply.", { mode: "lite", notify: "smart", tags: ["monitoring"] }),
+  au("seo-check", "Marketing", "Weekly SEO check", "Where you rank for a keyword and what competitors do better.", "0 9 * * 2",
+    "For the keyword '{{keyword}}' and the site {{domain}}: search the web, report which pages rank on the first page, whether {{domain}} appears, what the top 3 results do well (title, structure, depth) and 3 concrete improvements for our page.", { mode: "lite", tags: ["seo"] }),
+  au("lead-finder", "Sales", "Weekly lead finder", "Ten new, well-fitting leads every week as a clean list.", "0 9 * * 1",
+    "Find 10 new potential customers matching: {{icp}}. For each give company, website, why they fit, and a public contact or the best contact page. Only use publicly available information and skip anyone already listed in earlier results in this chat. Present as a table.", { mode: "agent", tags: ["leads", "prospecting"] }),
+  au("job-scout", "Personal", "Job scout", "New openings that match your role and location, every weekday.", "0 9 * * 1-5",
+    "Search the web for new job postings (last 3 days) for {{role}} in {{location}}. List the 8 best matches with company, title, pay if shown, why it fits and the apply link. Remove duplicates and expired posts.", { mode: "lite", notify: "smart", tags: ["jobs"] }),
+  au("tech-trends", "Research", "Weekly trend report", "Rising topics in your field and why they matter.", "0 18 * * 5",
+    "Write a weekly trend report for {{field}}: 5 rising topics from the last 7 days (launches, funding, research, regulation), each with a one-line explanation, a source link and one opportunity for someone working in this field.", { mode: "lite", tags: ["trends"] }),
+  au("market-digest", "Research", "Sector market digest", "Business news and numbers for one sector, twice a week.", "0 8 * * 1,4",
+    "Summarise the most important business news about the {{sector}} sector from the last 3 days: deals, earnings, regulation and product launches. Give sources. This is information only, not investment advice.", { mode: "lite", tags: ["industry"] }),
+  au("site-watch", "Productivity", "Page change watcher", "Tells you when a page (pricing, jobs, docs) changes.", "0 * * * *",
+    "Open {{url}} and compare it with the version from the previous check in this chat. If something meaningful changed (price, plan, text, new item), describe exactly what changed. If nothing changed, reply with 'No change'.", { mode: "agent", notify: "changes", everyMin: 360, tags: ["monitoring"] }),
+  au("learn-daily", "Learning", "Daily learning bite", "One small lesson plus a question, every day.", "30 7 * * *",
+    "Teach one small, useful piece of {{skill}} today, building on earlier lessons in this chat. Use 3 short paragraphs and one example, then ask one question to check understanding. Keep it under 150 words.", { mode: "lite", tags: ["learning"] }),
+  au("vocab-daily", "Learning", "Daily word and phrase", "A new word, example and mini quiz in your target language.", "0 8 * * *",
+    "Give me one new {{language}} word and one useful phrase for today: meaning, pronunciation hint, two example sentences and a mini quiz about yesterday's word. Increase difficulty slowly over time.", { mode: "lite", tags: ["language"] }),
+  au("habit-checkin", "Personal", "Habit check-in", "A friendly evening check-in to keep a habit alive.", "0 20 * * *",
+    "Ask me how my habit '{{habit}}' went today in one friendly line. Use my last answers in this chat to note the streak, celebrate progress without exaggeration and suggest one tiny adjustment if I missed two days.", { mode: "lite", tags: ["habits"] }),
+  au("weekly-review", "Productivity", "Weekly review", "A Friday reflection: wins, lessons and next week's top 3.", "0 17 * * 5",
+    "Guide me through a weekly review: ask 3 short questions (what went well, what drained me, what I learned), then summarise from my answers and propose next week's top 3 priorities. Keep it under 200 words.", { mode: "lite", tags: ["reflection"] }),
+  au("social-drafts", "Social", "Weekly social drafts", "A week of ready-to-post social drafts for your brand.", "0 10 * * 0",
+    "Write 5 social post drafts for {{brand}} for the coming week: mixed formats (insight, story, question, tip, behind the scenes). Give the text, a suggested day and time and a visual idea for each. Do not post anything, drafts only.", { mode: "lite", tags: ["content"] }),
+  au("morning-agenda", "Productivity", "Morning agenda", "Today's calendar and the emails that need you, in one message.", "30 7 * * 1-5",
+    "Read today's calendar and the unread emails from the last 12 hours. Write: today's meetings in time order with prep notes, the 5 emails that need a reply today (sender, ask, suggested reply in one line) and the one thing I should do first.", { mode: "agent", needs: ["google"], tags: ["calendar", "email"] }),
+  au("meeting-prep", "Productivity", "Meeting prep", "Context for each meeting, ready 30 minutes before.", "0 8 * * 1-5",
+    "For each of today's meetings, collect the attendees, the last emails exchanged with them and any linked document, then write a 5-line brief: purpose, who is who, open points and a suggested question to ask.", { mode: "agent", needs: ["google"], tags: ["calendar"] }),
+  au("inbox-triage", "Productivity", "Evening inbox triage", "Sorts the day's email into reply, wait and ignore.", "0 18 * * 1-5",
+    "Review today's emails and sort them into: needs a reply (with a draft reply for each, not sent), waiting on someone, FYI and ignorable. Show counts first. Never send, delete or archive anything.", { mode: "agent", needs: ["google"], tags: ["email"] }),
+  au("github-digest", "Development", "GitHub weekly digest", "Merged PRs, open issues and what needs review.", "0 9 * * 1",
+    "Summarise the last 7 days of activity on my GitHub repositories: merged pull requests, open pull requests waiting for review, new and stale issues and failing checks. Finish with the 3 items that need my attention first.", { mode: "agent", needs: ["github_oauth"], tags: ["github"] }),
+  au("linear-sprint", "Development", "Linear sprint report", "Sprint progress, blockers and a risk call-out.", "0 16 * * 5",
+    "Report the current sprint in Linear: completed versus planned, in-progress items, blocked items with the reason and any ticket at risk of missing the deadline. Suggest what to cut or move.", { mode: "agent", needs: ["linear"], tags: ["sprint"] }),
+  au("asana-overdue", "Productivity", "Overdue task digest", "Every overdue and due-soon task in one list.", "0 9 * * 1-5",
+    "List my Asana tasks that are overdue or due within 3 days, grouped by project and sorted by due date. Suggest which to do first and which to reschedule. Do not change any task.", { mode: "agent", needs: ["asana"], tags: ["tasks"] }),
+  au("notion-review", "Productivity", "Notion weekly summary", "What changed in your Notion workspace this week.", "0 17 * * 5",
+    "Summarise what was created or edited in my Notion workspace in the last 7 days: pages and databases by area, decisions that were written down and unfinished checklists. List 3 follow-ups.", { mode: "agent", needs: ["notion_oauth"], tags: ["notion"] }),
+  au("slack-digest", "Productivity", "Slack channel digest", "The decisions and questions you missed, in two minutes.", "0 9 * * 1-5",
+    "Read the last 24 hours of my main Slack channels and summarise: decisions made, questions waiting for me, links worth opening and anything urgent. Skip chit-chat. Do not post anything.", { mode: "agent", needs: ["slack"], tags: ["slack"] }),
+  au("shopify-sales", "Business", "Daily store report", "Yesterday's sales, top products and anything unusual.", "0 8 * * *",
+    "Report yesterday's Shopify performance: orders, revenue, average order value, top 5 products, refunds and any unusual change compared with the previous 7-day average. One short paragraph of what to do about it.", { mode: "agent", needs: ["shopify"], tags: ["ecommerce"] }),
+  au("hubspot-pipeline", "Sales", "Weekly pipeline review", "Deals that are stuck, at risk or ready to close.", "0 9 * * 1",
+    "Review my HubSpot deals: list stuck deals (no activity for 14 days), deals closing this month with their stage, and the 5 next actions that would move the most value. Do not edit any record.", { mode: "agent", needs: ["hubspot"], tags: ["crm"] }),
+  au("youtube-stats", "Social", "YouTube weekly stats", "Views, watch time and which videos won.", "0 9 * * 1",
+    "Report my YouTube channel for the last 7 days: views, watch time, new subscribers, the top 3 videos and what they have in common, and one idea for the next video based on what worked.", { mode: "agent", needs: ["youtube"], tags: ["creator"] }),
+  au("reddit-watch", "Marketing", "Reddit keyword watch", "Threads where people ask about your topic.", "0 11 * * *",
+    "Find new Reddit threads from the last 24 hours where people ask about or discuss '{{keyword}}'. List the best 5 with link, the question in one line and a helpful, non-spammy answer idea. Do not post anything.", { mode: "agent", needs: ["reddit"], notify: "smart", tags: ["community"] }),
+  au("linkedin-drafts", "Social", "LinkedIn post drafts", "Three post drafts every Monday in your voice.", "0 8 * * 1",
+    "Write 3 LinkedIn post drafts about {{topic}} in a clear, personal voice (one story, one lesson, one opinion). Add the best day and time to post each. Drafts only, never post.", { mode: "lite", tags: ["linkedin"] }),
+];
+
+export const BUILTIN: Listing[] = [...FLAGSHIPS, ...AGENTS_FROM_TEAM, ...SKILLS, ...AUTOMATIONS];
+export const BUILTIN_BY_ID = new Map(BUILTIN.map((l) => [l.id, l]));
