@@ -1,10 +1,23 @@
 // Fluffy buddies: a real "fur" look for every buddy + the missing shapes + the 6 states.
+//
+//  - the fur itself is drawn by lib/fur-render.ts (real hair strokes) via lib/use-fur.ts
+//  - stateOverlays()  little badges / brows shown for Waiting, Blocked, Done
+//  - FLUFFY_*         new shapes (plant pot, watering can, dumbbell, palette, brain, devil, egg ghost)
 
 import { b, both, shine, type BuddyDef } from "@/lib/buddy-kit";
 
+// ---------------------------------------------------------------- states
+
 export type BuddyState = "idle" | "thinking" | "working" | "waiting" | "blocked" | "done";
 
-export const BUDDY_STATES: BuddyState[] = ["idle", "thinking", "working", "waiting", "blocked", "done"];
+export const BUDDY_STATES: BuddyState[] = [
+  "idle",
+  "thinking",
+  "working",
+  "waiting",
+  "blocked",
+  "done",
+];
 
 export const BUDDY_STATE_LABELS: Record<BuddyState, string> = {
   idle: "Idle",
@@ -15,44 +28,31 @@ export const BUDDY_STATE_LABELS: Record<BuddyState, string> = {
   done: "Done",
 };
 
+/** css classes that put the svg into one state (see components/buddy.css) */
 export function stateClasses(state: BuddyState | undefined): string {
   switch (state) {
-    case "thinking": return "bd-working bd-s-thinking";
-    case "working": return "bd-working bd-s-working";
-    case "waiting": return "bd-s-waiting";
-    case "blocked": return "bd-s-blocked";
-    case "done": return "bd-happy bd-s-done";
-    default: return "";
+    case "thinking":
+      return "bd-working bd-s-thinking";
+    case "working":
+      return "bd-working bd-s-working";
+    case "waiting":
+      return "bd-s-waiting";
+    case "blocked":
+      return "bd-s-blocked";
+    case "done":
+      return "bd-happy bd-s-done";
+    default:
+      return "";
   }
 }
 
 const n2 = (n: number) => String(+n.toFixed(2));
 
-export function furDefs(id: string): string {
-  return (
-    `<defs><filter id="${id}" x="-14%" y="-14%" width="128%" height="128%" color-interpolation-filters="sRGB">` +
-    `<feTurbulence type="fractalNoise" baseFrequency="0.6" numOctaves="3" seed="4" result="nz"/>` +
-    `<feDisplacementMap in="SourceGraphic" in2="nz" scale="4.2" xChannelSelector="R" yChannelSelector="G" result="fz"/>` +
-    `<feGaussianBlur in="SourceAlpha" stdDeviation="9" result="bw"/>` +
-    `<feDiffuseLighting in="bw" surfaceScale="18" diffuseConstant="1.3" lighting-color="#ffffff" result="lw"><feDistantLight azimuth="235" elevation="58"/></feDiffuseLighting>` +
-    `<feGaussianBlur in="SourceAlpha" stdDeviation="2.2" result="bt"/>` +
-    `<feDiffuseLighting in="bt" surfaceScale="4" diffuseConstant="1.2" lighting-color="#ffffff" result="lt"><feDistantLight azimuth="235" elevation="62"/></feDiffuseLighting>` +
-    `<feBlend in="lw" in2="lt" mode="multiply" result="ls"/>` +
-    `<feComposite in="ls" in2="fz" operator="in" result="lsIn"/>` +
-    `<feBlend in="fz" in2="lsIn" mode="multiply" result="lit"/>` +
-    `<feTurbulence type="fractalNoise" baseFrequency="1.1 0.5" numOctaves="2" seed="11" result="st0"/>` +
-    `<feGaussianBlur in="st0" stdDeviation="0.35" result="st"/>` +
-    `<feColorMatrix in="st" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.2 -0.46" result="dk"/>` +
-    `<feComposite in="dk" in2="fz" operator="in" result="dkIn"/>` +
-    `<feColorMatrix in="st" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 -0.9 0.5" result="lg"/>` +
-    `<feComposite in="lg" in2="fz" operator="in" result="lgIn"/>` +
-    `<feMerge><feMergeNode in="lit"/><feMergeNode in="dkIn"/><feMergeNode in="lgIn"/></feMerge>` +
-    `</filter></defs>`
-  );
-}
+// ---------------------------------------------------------------- state overlays
 
 const SPARK = "M0 -5 Q1 -1 5 0 Q1 1 0 5 Q-1 1 -5 0 Q-1 -1 0 -5Z";
 
+/** badges + brows. Always in the markup, css shows the right one per state. */
 export function stateOverlays(eyes: [number, number, number, number?]): string {
   const [ex, ey, gap, sc] = eyes;
   const s = sc ?? 1;
@@ -60,11 +60,16 @@ export function stateOverlays(eyes: [number, number, number, number?]): string {
   const x1 = single ? ex : ex - gap / 2;
   const x2 = ex + gap / 2;
 
-  const browL = `<path d="M${n2(x1 - 5.5 * s)} ${n2(ey - 10.5 * s)} L${n2(x1 + 4.5 * s)} ${n2(ey - 6.8 * s)}"/>`;
-  const browR = `<path d="M${n2(x2 - 4.5 * s)} ${n2(ey - 6.8 * s)} L${n2(x2 + 5.5 * s)} ${n2(ey - 10.5 * s)}"/>`;
+  // angry brows (only Blocked)
+  const browL =
+    `<path d="M${n2(x1 - 5.5 * s)} ${n2(ey - 10.5 * s)} L${n2(x1 + 4.5 * s)} ${n2(ey - 6.8 * s)}"/>`;
+  const browR =
+    `<path d="M${n2(x2 - 4.5 * s)} ${n2(ey - 6.8 * s)} L${n2(x2 + 5.5 * s)} ${n2(ey - 10.5 * s)}"/>`;
   const brows =
     `<g class="bd-ov bd-ov-brows" fill="none" stroke="#1d1b29" stroke-width="${n2(2.4 * s)}" stroke-linecap="round">` +
-    browL + (single ? "" : browR) + `</g>`;
+    browL +
+    (single ? "" : browR) +
+    `</g>`;
 
   const wait =
     `<g class="bd-ov bd-ov-wait"><circle cx="84" cy="14" r="11" fill="#ffffff" stroke="#8d93a1" stroke-width="2.4"/>` +
@@ -85,7 +90,8 @@ export function stateOverlays(eyes: [number, number, number, number?]): string {
   return brows + wait + block + done;
 }
 
-// ------------------------------------------------ new shapes (100 x 100 box)
+// ---------------------------------------------------------------- new shapes
+// 100 x 100 box. Keep parts chunky (thin lines get blurred away by the fur).
 
 export const FLUFFY_NATURE: BuddyDef[] = [
   b("plant-pot", "Plant pot", "#22b35a", [50, 74, 24, 1.1],
