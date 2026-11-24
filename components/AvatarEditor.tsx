@@ -13,7 +13,15 @@ import {
   type MascotExpr,
 } from "@/lib/bots";
 import { normHex } from "@/lib/avatar-theme";
-import { BUDDIES, makeBuddy, parseBuddy, searchBuddies } from "@/lib/buddies";
+import {
+  BUDDIES,
+  BUDDY_STATES,
+  BUDDY_STATE_LABELS,
+  makeBuddy,
+  parseBuddy,
+  searchBuddies,
+  type BuddyState,
+} from "@/lib/buddies";
 import {
   BUDDY_FACES,
   BUDDY_FACE_LABELS,
@@ -29,7 +37,7 @@ const SWATCHES = [
   "#8b5a3c", "#6b7280", "#c9ced8", "#ffffff", "#1f2937", "#b6ff3b",
 ];
 
-type Mood = "idle" | "thinking" | "happy";
+type Mood = BuddyState;
 type Tab = "buddies" | "mascots";
 type GroupFilter = BuddyGroup | "all";
 
@@ -106,9 +114,6 @@ export default function AvatarEditor({
   // same for a face you picked on purpose
   const [chosenFace, setChosenFace] = useState<BuddyFace | null>(null);
 
-  const working = mood === "thinking";
-  const happy = mood === "happy";
-
   const list = useMemo(() => searchBuddies(query, group), [query, group]);
 
   // ---- mascots (original) ----
@@ -141,14 +146,10 @@ export default function AvatarEditor({
 
   const moods: { id: Mood; label: string }[] =
     tab === "buddies"
-      ? [
-          { id: "idle", label: "Idle" },
-          { id: "thinking", label: "Thinking" },
-          { id: "happy", label: "Happy" },
-        ]
+      ? BUDDY_STATES.map((id) => ({ id, label: BUDDY_STATE_LABELS[id] }))
       : [
           { id: "idle", label: "Idle" },
-          { id: "thinking", label: "Working" },
+          { id: "working", label: "Working" },
         ];
 
   const title = buddy
@@ -159,7 +160,7 @@ export default function AvatarEditor({
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4 rounded-xl border border-line bg-bg p-3">
-        <BotAvatar color={value} size={110} working={working} happy={happy} />
+        <BotAvatar color={value} size={110} state={mood} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-ink">{title}</p>
           <p className="font-mono text-xs text-muted">{shownHex}</p>
@@ -197,7 +198,7 @@ export default function AvatarEditor({
             key={t.id}
             onClick={() => {
               setTab(t.id);
-              if (t.id === "mascots" && mood === "happy") setMood("idle");
+              if (t.id === "mascots" && mood !== "idle" && mood !== "working") setMood("idle");
             }}
             className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium ${
               tab === t.id ? "bg-panel2 text-ink" : "text-muted hover:text-ink"
@@ -257,7 +258,7 @@ export default function AvatarEditor({
                 </div>
               )}
             </div>
-            <p className="text-[11px] text-faint">Hover a buddy to see it happy.</p>
+            <p className="text-[11px] text-faint">Hover a buddy to see it happy. Use the state buttons above to preview Thinking, Working, Waiting, Blocked and Done.</p>
           </div>
 
           {buddy ? (
