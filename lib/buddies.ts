@@ -14,8 +14,21 @@ import { CREATURES } from "@/lib/buddy-creatures";
 import { THINGS } from "@/lib/buddy-things";
 import { NATURE } from "@/lib/buddy-nature";
 import { FOOD } from "@/lib/buddy-food";
+import {
+  FLUFFY_CREATURES,
+  FLUFFY_NATURE,
+  FLUFFY_THINGS,
+  furDefs,
+  stateOverlays,
+} from "@/lib/buddy-fluffy";
 
 export type { BuddyFace, BuddyGroup, BuddyValue, BuddyDef } from "@/lib/buddy-kit";
+export {
+  BUDDY_STATES,
+  BUDDY_STATE_LABELS,
+  stateClasses,
+  type BuddyState,
+} from "@/lib/buddy-fluffy";
 
 export type BuddyEntry = BuddyDef & { group: BuddyGroup };
 
@@ -24,9 +37,9 @@ const tag = (list: BuddyDef[], group: BuddyGroup): BuddyEntry[] =>
 
 export const BUDDIES: BuddyEntry[] = [
   ...tag(ANIMALS, "animals"),
-  ...tag(CREATURES, "creatures"),
-  ...tag(THINGS, "things"),
-  ...tag(NATURE, "nature"),
+  ...tag([...CREATURES, ...FLUFFY_CREATURES], "creatures"),
+  ...tag([...THINGS, ...FLUFFY_THINGS], "things"),
+  ...tag([...NATURE, ...FLUFFY_NATURE], "nature"),
   ...tag(FOOD, "food"),
 ];
 
@@ -228,14 +241,21 @@ const LAPTOP =
 const DOTS =
   `<g class="bd-dots" fill="#9aa0ad"><circle cx="76" cy="10" r="2.2"/><circle cx="83" cy="6" r="2.9" style="animation-delay:.2s"/><circle cx="91" cy="2" r="3.6" style="animation-delay:.4s"/></g>`;
 
-/** the inside of the <svg> (viewBox 0 0 100 100) for one buddy */
-export function buddyInner(def: BuddyDef, hexIn: string, face: BuddyFace): string {
+/**
+ * the inside of the <svg> (viewBox 0 0 100 100) for one buddy.
+ * furId = unique id (letters/digits) -> fluffy fur look. Leave it out for the flat look.
+ */
+export function buddyInner(def: BuddyDef, hexIn: string, face: BuddyFace, furId?: string): string {
   const hex = normHex(hexIn) ?? def.hex;
   const pal = palette(hex);
+  const shape = paint(def.svg, pal);
+  const body = furId ? `<g filter="url(#${furId})">${shape}</g>` : shape;
   return (
+    (furId ? furDefs(furId) : "") +
     `<ellipse class="bd-shadow" cx="50" cy="93" rx="27" ry="3.6" fill="#000" opacity=".18"/>` +
-    `<g class="bd-body">${paint(def.svg, pal)}${paint(faceSvg(def, face, hex), pal)}</g>` +
+    `<g class="bd-body">${body}${paint(faceSvg(def, face, hex), pal)}</g>` +
     LAPTOP +
-    DOTS
+    DOTS +
+    stateOverlays(def.eyes)
   );
 }
