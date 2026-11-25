@@ -1,0 +1,88 @@
+name: iOS TestFlight
+
+# For when you have a PAID Apple Developer account (99 USD per year). It builds a SIGNED app and sends it to TestFlight,
+# then you install it from the TestFlight app on your iPhone or iPad. No computer needed.
+# Before the first run:
+#   1. Create the app once in App Store Connect (bundle ID com.agenticvenus.app).
+#   2. App Store Connect -> Users and Access -> Integrations -> create an API key (access: App Manager) and download the .p8 file.
+#   3. Add these secrets (Settings -> Secrets and variables -> Actions):
+#        APP_URL                  your website
+#        APPSTORE_KEY_ID          the Key ID of that API key
+#        APPSTORE_ISSUER_ID       the Issuer ID shown above the keys list
+#        APPSTORE_KEY_P8          the full text of the .p8 file
+#        APPLE_TEAM_ID            your 10-character Team ID (developer.apple.com -> Membership details)
+# This workflow was written without being able to run it: expect to fix a message or two on the first run.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      APP_URL: ${{ secrets.APP_URL }}
+      KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+      ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        run: |
+          for v in APP_URL KEY_ID ISSUER_ID TEAM_ID; do [ -n "${!v}" ] || { echo "::error::Secret for $v is missing."; exit 1; }; done
+          [ -n "${{ secrets.APPSTORE_KEY_P8 }}" ] || { echo "::error::Secret APPSTORE_KEY_P8 is missing."; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install, create and prepare the iOS project
+        run: |
+          npm install
+          npm install @capacitor/ios@^7.0.0
+          npx cap add ios
+          node scripts/prepare-ios.mjs
+          npx cap sync ios
+
+      - name: Save the App Store Connect key
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s' "${{ secrets.APPSTORE_KEY_P8 }}" > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
+
+      - name: Archive (signed automatically with the key)
+        working-directory: mobile/ios/App
+        run: |
+          BUILD=$(date +%Y%m%d%H%M)
+          if [ -d App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
+          xcodebuild $TARGET -scheme App -configuration Release -sdk iphoneos \
+            -archivePath "$PWD/build/App.xcarchive" archive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8" \
+            -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic CURRENT_PROJECT_VERSION="$BUILD" | tail -n 40
+
+      - name: Export the .ipa
+        working-directory: mobile/ios/App
+        run: |
+          cat > build/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>destination</key><string>export</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/App.xcarchive -exportPath build/out \
+            -exportOptionsPlist build/ExportOptions.plist -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8" \
+            -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER_ID" | tail -n 30
+
+      - name: Upload to TestFlight
+        working-directory: mobile/ios/App
+        run: |
+          xcrun altool --upload-app -f build/out/App.ipa -t ios --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
