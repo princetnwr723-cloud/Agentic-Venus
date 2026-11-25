@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useId, useMemo, type CSSProperties } from "react";
 import "./buddy.css";
-import { buddyBody, buddyInner, parseBuddy, stateClasses, type BuddyState } from "@/lib/buddies";
-import { useFurUrl } from "@/lib/use-fur";
+import { buddyInner, parseBuddy, stateClasses, type BuddyState } from "@/lib/buddies";
 
 function hash(s: string) {
   let h = 0;
@@ -14,8 +13,8 @@ function hash(s: string) {
 /**
  * One animated buddy.
  *  state    = idle | thinking | working | waiting | blocked | done
- *  fur      = plush fur look (default on, false = old flat look)
- *  working / happy = old props, still work
+ *  working  = "thinking": eyes dart, a little PC pops up, thought dots   (old prop)
+ *  happy    = forced happy face + cheering jump (hovering does this too) (old prop)
  *  animate  = true | false | "hover" (still until the pointer is over it)
  */
 export default function BuddyAvatar({
@@ -25,7 +24,6 @@ export default function BuddyAvatar({
   happy = false,
   animate = true,
   state,
-  fur = true,
 }: {
   value: string;
   size?: number;
@@ -33,7 +31,6 @@ export default function BuddyAvatar({
   happy?: boolean;
   animate?: boolean | "hover";
   state?: BuddyState;
-  fur?: boolean;
 }) {
   const uid = useId();
   const delay = (hash(uid) % 40) / 10;
@@ -43,40 +40,10 @@ export default function BuddyAvatar({
   const hex = parsed?.hex ?? "";
   const face = parsed?.face ?? "dot";
 
-  // only make the fur picture when the avatar is (almost) on screen
-  const ref = useRef<SVGSVGElement | null>(null);
-  const [seen, setSeen] = useState(false);
-  const has = !!parsed;
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (typeof IntersectionObserver === "undefined") {
-      setSeen(true);
-      return;
-    }
-    const io = new IntersectionObserver(
-      (list) => {
-        if (list.some((e) => e.isIntersecting)) {
-          setSeen(true);
-          io.disconnect();
-        }
-      },
-      { rootMargin: "120px" }
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [has]);
-
-  const body = useMemo(() => (parsed ? buddyBody(parsed.def, parsed.hex) : ""),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, hex]
-  );
-  const furUrl = useFurUrl(body, id, hex, size, fur && has && seen);
-
   const html = useMemo(
-    () => (parsed ? buddyInner(parsed.def, parsed.hex, parsed.face, fur ? { url: furUrl } : undefined) : ""),
+    () => (parsed ? buddyInner(parsed.def, parsed.hex, parsed.face) : ""),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, hex, face, fur, furUrl]
+    [id, hex, face]
   );
 
   if (!parsed) return null;
@@ -85,7 +52,6 @@ export default function BuddyAvatar({
     "bd shrink-0",
     `bd-m-${parsed.def.motion}`,
     state ? stateClasses(state) : working ? "bd-working" : happy ? "bd-happy" : "",
-    fur ? "bd-fur" : "",
     animate === false ? "bd-still" : animate === "hover" ? "bd-hoveronly" : "",
   ]
     .filter(Boolean)
@@ -93,7 +59,6 @@ export default function BuddyAvatar({
 
   return (
     <svg
-      ref={ref}
       width={size}
       height={size}
       viewBox="0 0 100 100"
