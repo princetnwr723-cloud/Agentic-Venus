@@ -39,7 +39,27 @@ export default function Reliability() {
     return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
   }, [refresh]);
 
-  if (!s) return <main className="min-h-screen bg-bg" />;
+  const header = (
+    <header className="mb-5 flex items-center gap-2">
+      <button onClick={() => router.push("/m")} aria-label="Back" className="press flex h-10 w-10 items-center justify-center rounded-full bg-panel2"><ChevronLeft size={20} /></button>
+      <h1 className="text-[20px] font-semibold">Schedules on this phone</h1>
+    </header>
+  );
+  const shell = "mx-auto min-h-screen max-w-md bg-bg px-4 pb-[calc(var(--sab)+28px)] pt-[calc(var(--sat)+12px)] text-ink";
+
+  if (!s) return <main className={shell}>{header}<p className="py-10 text-center text-sm text-muted">Loading…</p></main>;
+
+  if (s.unavailable) {
+    return (
+      <main className={shell}>
+        {header}
+        <section className="rounded-2xl border border-line bg-panel p-4 text-[14px] leading-relaxed text-muted">
+          <p className="mb-2 text-[15px] font-semibold text-ink">This app version is too old.</p>
+          It does not have the phone scheduler inside yet. Build the newest Android APK on GitHub (Actions, Android APK, Run workflow), install it over this one, and open this screen again.
+        </section>
+      </main>
+    );
+  }
 
   const r = reliability(s);
   const rows: Row[] = [];
@@ -63,11 +83,8 @@ export default function Reliability() {
   const sync = async () => { setBusy(true); setMsg("Updating…"); const n = await resyncScheduler(); setMsg(`${n} alarm${n === 1 ? "" : "s"} armed.`); setBusy(false); void refresh(); };
 
   return (
-    <main className="mx-auto min-h-screen max-w-md bg-bg px-4 pb-[calc(var(--sab)+28px)] pt-[calc(var(--sat)+12px)] text-ink">
-      <header className="mb-5 flex items-center gap-2">
-        <button onClick={() => router.push("/m")} aria-label="Back" className="press flex h-10 w-10 items-center justify-center rounded-full bg-panel2"><ChevronLeft size={20} /></button>
-        <h1 className="text-[20px] font-semibold">Schedules on this phone</h1>
-      </header>
+    <main className={shell}>
+      {header}
 
       {s.platform === "android" ? (
         <>
