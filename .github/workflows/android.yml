@@ -58,6 +58,17 @@ jobs:
           path: ~/.android/debug.keystore
           key: venus-debug-keystore-v1
 
+      # downloaded libraries are kept between runs (also after a failed run), so Maven Central is asked far less often
+      - name: Restore Gradle downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Install
         run: npm install
 
@@ -68,17 +79,33 @@ jobs:
         if: ${{ env.GOOGLE_SERVICES_JSON != '' }}
         run: printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
-      - name: Prepare (permissions, runner service, icon, login link)
+      - name: Prepare (permissions, runner service, icon, login link, scheduler)
         run: node scripts/prepare-android.mjs
 
       - name: Sync plugins
         run: npx cap sync android
 
+      # Maven Central sometimes answers "429 Too Many Requests" to GitHub's servers: wait a little and try again (up to 3 times)
       - name: Build APK
         working-directory: mobile/android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          n=0
+          until ./gradlew assembleDebug --no-daemon; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "::error::Build failed 3 times."; exit 1; fi
+            echo "::warning::Build failed (attempt $n of 3). Waiting 45 seconds, then trying again."
+            sleep 45
+          done
+
+      - name: Save Gradle downloads
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ github.run_id }}
 
       - uses: actions/upload-artifact@v4
         with:
