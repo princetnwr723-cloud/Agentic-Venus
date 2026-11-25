@@ -20,7 +20,6 @@ import {
   FLUFFY_THINGS,
   stateOverlays,
 } from "@/lib/buddy-fluffy";
-import { FUR_PAD, FUR_SPAN } from "@/lib/fur-render";
 
 export type { BuddyFace, BuddyGroup, BuddyValue, BuddyDef } from "@/lib/buddy-kit";
 export {
@@ -179,22 +178,14 @@ function mouth(face: BuddyFace, ex: number, ey: number, s: number, ink: string):
   }
 }
 
-// plush look: tall glossy black ovals (like a real plush toy)
-function plushEye(x: number, y: number, s: number, ink: string, hl: string): string {
-  return `<g class="bd-blink"><ellipse cx="${n2(x)}" cy="${n2(y)}" rx="${n2(3.5 * s)}" ry="${n2(5.6 * s)}" fill="${ink}"/><ellipse cx="${n2(x - 1.1 * s)}" cy="${n2(y - 2.3 * s)}" rx="${n2(1.1 * s)}" ry="${n2(1.8 * s)}" fill="${hl}" opacity=".6"/></g>`;
-}
-
-function eyesFor(face: BuddyFace, def: BuddyDef, ink: string, hl: string, plush = false): string {
+function eyesFor(face: BuddyFace, def: BuddyDef, ink: string, hl: string): string {
   const [ex, ey, gap, sc] = def.eyes;
   const s = sc ?? 1;
   const single = gap === 0;
   const x1 = single ? ex : ex - gap / 2;
   const x2 = ex + gap / 2;
   let out = "";
-  if (plush && face === "dot") {
-    out += plushEye(x1, ey, s, ink, hl);
-    if (!single) out += plushEye(x2, ey, s, ink, hl);
-  } else if (face === "cool") {
+  if (face === "cool") {
     out += `<g class="bd-glasses">${shades(x1, x2, ey, s, single)}</g>`;
   } else {
     out += eye(face, x1, ey, s, ink, hl, 0);
@@ -206,17 +197,17 @@ function eyesFor(face: BuddyFace, def: BuddyDef, ink: string, hl: string, plush 
   return out;
 }
 
-function faceSvg(def: BuddyDef, face: BuddyFace, hex: string, plush = false): string {
+function faceSvg(def: BuddyDef, face: BuddyFace, hex: string): string {
   const [ex, ey, gap, sc] = def.eyes;
   const s = sc ?? 1;
   const dark = lum(hex) < 0.3;
-  const ink = def.ink ?? (dark ? "#ffffff" : plush ? "#0b0b10" : "#1d1b29");
+  const ink = def.ink ?? (dark ? "#ffffff" : "#1d1b29");
   const hl = ink === "#ffffff" ? "#1d1b29" : "#ffffff";
   const single = gap === 0;
   const x1 = single ? ex : ex - gap / 2;
   const x2 = ex + gap / 2;
 
-  const cheeks = def.blush && !plush
+  const cheeks = def.blush
     ? `<g class="bd-cheek" fill="#ff6f9c" opacity=".38"><ellipse cx="${n2(x1 - 2.4 * s)}" cy="${n2(ey + 7.4 * s)}" rx="${n2(4 * s)}" ry="${n2(2.6 * s)}"/>${
         single ? "" : `<ellipse cx="${n2(x2 + 2.4 * s)}" cy="${n2(ey + 7.4 * s)}" rx="${n2(4 * s)}" ry="${n2(2.6 * s)}"/>`
       }</g>`
@@ -229,7 +220,7 @@ function faceSvg(def: BuddyDef, face: BuddyFace, hex: string, plush = false): st
   return (
     `<g class="bd-face">` +
     cheeks +
-    `<g class="bd-eyes-main"><g class="bd-look">${eyesFor(face, def, ink, hl, plush)}</g>${mouth(face, ex, ey, s, ink)}</g>` +
+    `<g class="bd-eyes-main"><g class="bd-look">${eyesFor(face, def, ink, hl)}</g>${mouth(face, ex, ey, s, ink)}</g>` +
     `<g class="bd-eyes-joy">${joyEyes}${mouth("joy", ex, ey, s, joyInk)}</g>` +
     `</g>`
   );
@@ -249,30 +240,13 @@ const LAPTOP =
 const DOTS =
   `<g class="bd-dots" fill="#9aa0ad"><circle cx="76" cy="10" r="2.2"/><circle cx="83" cy="6" r="2.9" style="animation-delay:.2s"/><circle cx="91" cy="2" r="3.6" style="animation-delay:.4s"/></g>`;
 
-/** the flat, painted shape of one buddy (no face) - the fur renderer turns this into fur */
-export function buddyBody(def: BuddyDef, hexIn: string): string {
-  const hex = normHex(hexIn) ?? def.hex;
-  return paint(def.svg, palette(hex));
-}
-
-export type FurOpt = { url?: string | null };
-
-/**
- * the inside of the <svg> (viewBox 0 0 100 100) for one buddy.
- * fur = plush mode: plush face (black glossy eyes, no cheeks) and, once `fur.url` is ready,
- *       the fur picture (lib/fur-render.ts) instead of the flat shape. Leave it out for the flat look.
- */
-export function buddyInner(def: BuddyDef, hexIn: string, face: BuddyFace, fur?: FurOpt): string {
+/** the inside of the <svg> (viewBox 0 0 100 100) for one buddy. */
+export function buddyInner(def: BuddyDef, hexIn: string, face: BuddyFace): string {
   const hex = normHex(hexIn) ?? def.hex;
   const pal = palette(hex);
-  const plush = !!fur;
-  const shape = paint(def.svg, pal);
-  const body = fur?.url
-    ? `<image class="bd-furimg" href="${fur.url}" x="${-FUR_PAD}" y="${-FUR_PAD}" width="${FUR_SPAN}" height="${FUR_SPAN}"/>`
-    : shape;
   return (
     `<ellipse class="bd-shadow" cx="50" cy="93" rx="27" ry="3.6" fill="#000" opacity=".18"/>` +
-    `<g class="bd-body">${body}${paint(faceSvg(def, face, hex, plush), pal)}</g>` +
+    `<g class="bd-body">${paint(def.svg, pal)}${paint(faceSvg(def, face, hex), pal)}</g>` +
     LAPTOP +
     DOTS +
     stateOverlays(def.eyes)
