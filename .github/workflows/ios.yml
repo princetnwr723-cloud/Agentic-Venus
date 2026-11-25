@@ -1,0 +1,80 @@
+name: iOS IPA (unsigned)
+
+# Builds the iPhone and iPad app on GitHub's Mac servers (no Mac of your own needed) and gives you AgenticVenus-unsigned.ipa.
+#   - Run it from the Actions tab ("Run workflow"). When it is green, open the run: the file is under "Artifacts".
+#   - It is also attached to a GitHub Release called "ios-latest", which is the easiest place to download it from a phone.
+# The .ipa is NOT signed: iOS will not open it until a signing tool (SideStore, AltStore, Sideloadly) signs it with your Apple ID.
+# Secrets (Settings -> Secrets and variables -> Actions):
+#   APP_URL   REQUIRED. Your website, e.g. https://your-app.vercel.app
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "mobile/**"
+      - ".github/workflows/ios.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      APP_URL: ${{ secrets.APP_URL }}
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        run: |
+          [ -n "$APP_URL" ] || { echo "::error::The secret APP_URL is missing. Add it in Settings -> Secrets and variables -> Actions."; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        run: |
+          npm install
+          npm install @capacitor/ios@^7.0.0
+
+      - name: Create the iOS project
+        run: npx cap add ios
+
+      - name: Prepare (login link)
+        run: node scripts/prepare-ios.mjs
+
+      - name: Sync plugins
+        run: npx cap sync ios
+
+      - name: Build (no signing)
+        working-directory: mobile/ios/App
+        run: |
+          if [ -d App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
+          xcodebuild $TARGET -scheme App -configuration Release -sdk iphoneos \
+            -archivePath "$PWD/build/App.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" | tail -n 40
+
+      - name: Pack the .ipa
+        working-directory: mobile/ios/App/build
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R App.xcarchive/Products/Applications/App.app Payload/
+          zip -qry AgenticVenus-unsigned.ipa Payload
+          ls -la AgenticVenus-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: venus-ios-unsigned
+          path: mobile/ios/App/build/AgenticVenus-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Put it on the ios-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ios-latest --repo "${{ github.repository }}" >/dev/null 2>&1 || gh release create ios-latest --repo "${{ github.repository }}" --prerelease --title "iOS test build" --notes "Unsigned .ipa from the iOS IPA workflow. Sign it with SideStore, AltStore or Sideloadly before installing."
+          gh release upload ios-latest ios/App/build/AgenticVenus-unsigned.ipa --clobber --repo "${{ github.repository }}"
