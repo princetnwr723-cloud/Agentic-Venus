@@ -20,6 +20,8 @@ export type SchedulerStatus = {
   nextAt: number;
   lastSync: number;
   log: SchedulerLog[];
+  /** this app build has no phone scheduler inside (an old APK): install the newest one */
+  unavailable?: boolean;
 };
 
 type Api = {
@@ -59,8 +61,13 @@ export async function schedulerStatus(): Promise<SchedulerStatus> {
     const ios = (() => { try { return Capacitor.getPlatform() === "ios"; } catch { return false; } })();
     return { platform: ios ? "ios" : "web", configured: false, exactAlarm: true, batteryUnrestricted: true, notifications: true, needsAutostart: false, armed: 0, nextAt: 0, lastSync: 0, log: [] };
   }
-  const s = await plugin().status();
-  return { ...s, log: s.log ?? [] };
+  try {
+    const s = await plugin().status();
+    return { ...s, log: s.log ?? [] };
+  } catch {
+    // an older APK does not contain the scheduler: say so instead of failing
+    return { platform: "android", configured: false, exactAlarm: false, batteryUnrestricted: false, notifications: true, needsAutostart: false, armed: 0, nextAt: 0, lastSync: 0, log: [], unavailable: true };
+  }
 }
 
 export const testAlarm = (seconds = 15) => (isAndroid() ? plugin().test({ seconds }) : Promise.resolve());
@@ -73,6 +80,7 @@ export const clearScheduler = () => (isAndroid() ? plugin().clear().catch(() => 
 /** 0-100 and the things still to switch on. */
 export function reliability(s: SchedulerStatus): { score: number; todo: Array<"exact" | "battery" | "autostart" | "notifications" | "login"> } {
   if (s.platform !== "android") return { score: 100, todo: [] };
+  if (s.unavailable) return { score: 0, todo: ["login"] };
   const todo: Array<"exact" | "battery" | "autostart" | "notifications" | "login"> = [];
   if (!s.configured || s.authLost) todo.push("login");
   if (!s.exactAlarm) todo.push("exact");
