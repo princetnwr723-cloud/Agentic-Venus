@@ -13,6 +13,11 @@ export type SavedLogin = { email: string; password: string };
 type KeysState = {
   apiKeys: Partial<Record<ProviderId, string>>;
   e2bKey: string | null;
+  /** Which computer the account uses: the phone/PC one ("phone") or the cloud (E2B) one ("cloud"). */
+  pcSource: "phone" | "cloud";
+  setPcSource: (s: "phone" | "cloud") => void;
+  hasPhoneComputer: boolean;
+  savedE2bKey: string | null;
   pcSandboxId: string | null;
   pcCredentials: Record<string, SavedLogin>;
   loading: boolean;
@@ -23,7 +28,7 @@ type KeysState = {
 };
 
 const KeysContext = createContext<KeysState>({
-  apiKeys: {}, e2bKey: null, pcSandboxId: null, pcCredentials: {}, loading: true,
+  apiKeys: {}, e2bKey: null, pcSource: "phone", setPcSource: () => {}, hasPhoneComputer: false, savedE2bKey: null, pcSandboxId: null, pcCredentials: {}, loading: true,
   saveProviderKey: async () => {}, saveE2bKey: async () => {}, savePcSandboxId: async () => {}, savePcCredential: async () => {},
 });
 
@@ -107,7 +112,18 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
   }, [user]);
   useEffect(() => { phoneKeyRef.current = phoneKey; }, [phoneKey]);
 
-  const e2bKey = desktopLocalKey() ? savedE2bKey : (phoneKey ?? savedE2bKey);
+  // The user's own choice (kept on this device): "phone" = the computer on this phone, "cloud" = their own E2B key.
+  // With nothing chosen, the phone computer is used when it exists, otherwise the E2B key.
+  const [pcSource, setPcSourceState] = useState<"phone" | "cloud">("phone");
+  useEffect(() => {
+    try { setPcSourceState(localStorage.getItem("venus.pcSource") === "cloud" ? "cloud" : "phone"); } catch { /* private mode: keep the default */ }
+  }, []);
+  function setPcSource(s: "phone" | "cloud") {
+    setPcSourceState(s);
+    try { localStorage.setItem("venus.pcSource", s); } catch { /* not saved: still works for this visit */ }
+  }
+  const useCloud = pcSource === "cloud" && Boolean(savedE2bKey);
+  const e2bKey = desktopLocalKey() ? savedE2bKey : (useCloud ? savedE2bKey : (phoneKey ?? savedE2bKey));
 
   async function saveProviderKey(provider: ProviderId, key: string) {
     if (!user) return;
@@ -135,7 +151,7 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <KeysContext.Provider value={{ apiKeys, e2bKey, pcSandboxId, pcCredentials, loading, saveProviderKey, saveE2bKey, savePcSandboxId, savePcCredential }}>
+    <KeysContext.Provider value={{ apiKeys, e2bKey, pcSource, setPcSource, hasPhoneComputer: Boolean(phoneKey), savedE2bKey, pcSandboxId, pcCredentials, loading, saveProviderKey, saveE2bKey, savePcSandboxId, savePcCredential }}>
       {children}
     </KeysContext.Provider>
   );

@@ -55,11 +55,16 @@ function cleanKey(apiKey: string): string {
 }
 
 export const GONE_PREFIX = "SANDBOX_GONE";
+export const LOCAL_VIEW_PREFIX = "venus-view://";
 
 /** connect() also RESUMES a paused sandbox and pushes the expiry 1h forward. */
 export async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   // A computer on the user's own PC (through the desktop app): no E2B key is needed.
-  if (isLocalSandboxId(sandboxId)) return localSandbox(sandboxId) as unknown as DesktopSandbox;
+  if (isLocalSandboxId(sandboxId)) {
+    // The user switched this account to a CLOUD (E2B) computer: this chat's old phone/PC computer is "gone", so a cloud one is made.
+    if (cleanKey(apiKey) && !isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: the computer was switched from your phone/PC to the cloud computer.`);
+    return localSandbox(sandboxId) as unknown as DesktopSandbox;
+  }
   // The key is a local computer's key (desktop app or phone) but this chat still remembers an old CLOUD computer: it can never work
   // with that key, so say "gone" and the app starts a new computer on the local one.
   if (isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: this chat's computer was a cloud computer; the computer on your own device is used now.`);
@@ -254,7 +259,12 @@ export async function deleteSandbox(apiKey: string, sandboxId: string): Promise<
 }
 
 export async function getScreenUrl(apiKey: string, sandboxId: string): Promise<string> {
-  if (isLocalSandboxId(sandboxId)) throw new Error("A local computer opens in its own window on your PC (the AgenticVenus desktop app).");
+  // A computer on the user's own phone or PC has no web screen server. The website draws its live picture itself
+  // (components/dashboard/LocalScreen.tsx: screenshots + taps through /api/e2b/view), so we only say "this one is local".
+  if (isLocalSandboxId(sandboxId)) {
+    if (cleanKey(apiKey) && !isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: the computer was switched from your phone/PC to the cloud computer.`);
+    return LOCAL_VIEW_PREFIX + sandboxId;
+  }
   const sandbox = await connect(apiKey, sandboxId);
   const stream = loose(sandbox).stream;
   let problem = "";
@@ -324,12 +334,28 @@ export async function takeScreenshot(apiKey: string, sandboxId: string): Promise
   }
   if (!buf) throw new Error("Could not take a screenshot.");
   const isPng = buf.length > 24 && buf.toString("ascii", 1, 4) === "PNG";
+  const jpg = isPng ? null : jpegSize(buf);
   return {
     data: buf.toString("base64"),
     mediaType: isPng ? "image/png" : "image/jpeg",
-    width: isPng ? buf.readUInt32BE(16) : 1440,
-    height: isPng ? buf.readUInt32BE(20) : 900,
+    width: isPng ? buf.readUInt32BE(16) : jpg?.width ?? 1440,
+    height: isPng ? buf.readUInt32BE(20) : jpg?.height ?? 900,
   };
+}
+
+/** The real size of a JPEG (the phone computer sends JPEG). A wrong size would make every click land in the wrong place. */
+function jpegSize(b: Buffer): { width: number; height: number } | null {
+  if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < b.length) {
+    if (b[i] !== 0xff) { i++; continue; }
+    const m = b[i + 1];
+    if (m === 0xff) { i++; continue; }
+    if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return { height: b.readUInt16BE(i + 5), width: b.readUInt16BE(i + 7) };
+    if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { i += 2; continue; }
+    i += 2 + b.readUInt16BE(i + 2);
+  }
+  return null;
 }
 
 // ---- Shell jobs (run in a REAL terminal window so the user can watch) ----
