@@ -10,6 +10,8 @@ import {
   startCodeSetup, wsRoot, type ToolResult,
 } from "@/lib/code-server";
 import type { ToolCall } from "@/lib/code-prompts";
+import { isLocalSandboxId } from "@/lib/local-relay-core";
+import { PC_SETUP_VERSION } from "@/lib/pc-toolbelt";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -47,6 +49,48 @@ async function codeStateWithRepair(sb: Box): Promise<SetupState> {
   return { state: "installing", log: `Setup hit a problem (${why}). Repairing automatically, attempt ${tries + 2} of ${MAX_SETUP_REPAIRS + 1}...` };
 }
 
+
+/**
+ * A computer on the user's PHONE or PC is a small Alpine/Debian machine (not the cloud's Ubuntu). The cloud setup script
+ * (apt mirrors, Node 22, a long pip list that has to compile on a phone) never finishes there and left the chat on
+ * "Preparing the computer...". This light check only makes sure Node (18+), npm and git exist, creates the folders, marks the
+ * computer ready, and puts a calm idle window on the screen so the live view is not a black rectangle.
+ */
+const LOCAL_PREP = [
+  'export PATH="$PATH:/usr/local/bin:$HOME/.npm-global/bin"',
+  'export DISPLAY=:0',
+  'have() { command -v "$1" >/dev/null 2>&1; }',
+  "nodemajor() { node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || echo 0; }",
+  'major=$(nodemajor)',
+  'if [ "$major" -lt 18 ] || ! have npm || ! have git; then',
+  '  if have apk; then apk add --no-cache nodejs npm git curl ca-certificates >&2 || true',
+  '  elif have apt-get; then sudo -E apt-get install -y nodejs npm git curl ca-certificates >&2 || true; fi',
+  '  hash -r; major=$(nodemajor)',
+  'fi',
+  '[ "$major" -ge 18 ] || { echo NODE_MISSING; exit 0; }',
+  'mkdir -p /home/user/work /home/user/runner /home/user/Documents /home/user/Downloads /home/user/Desktop /tmp/jobs',
+  'echo ' + PC_SETUP_VERSION + ' > /home/user/.code-version',
+  'touch /home/user/.code-ready',
+  "have xsetroot && xsetroot -solid '#14202e' 2>/dev/null",
+  'if have xterm && ! pgrep -x xterm >/dev/null 2>&1 && ! pgrep -f chromium >/dev/null 2>&1; then',
+  "  nohup xterm -geometry 120x34+0+0 -bg '#14202e' -fg '#9fb3c8' -fa 'DejaVu Sans Mono' -fs 11 -T 'AgenticVenus computer' -e sh -c \"printf '\\n  AgenticVenus computer is ready.\\n  Waiting for a task...\\n'; exec sleep 100000\" >/dev/null 2>&1 &",
+  'fi',
+  'echo LOCAL_READY',
+].join("\n");
+
+async function localPrepare(sb: Box): Promise<SetupState> {
+  try {
+    const r = await exec(sb, LOCAL_PREP, 50_000);
+    if (/LOCAL_READY/.test(r.stdout)) return { state: "ready", log: "" };
+    if (/NODE_MISSING/.test(r.stdout)) {
+      return { state: "failed", log: "Node.js could not be installed on this computer. Open 'Phone computer' (or the desktop app), reset the computer and run setup again. " + (r.stderr || "").slice(-200) };
+    }
+    return { state: "installing", log: "Getting the computer ready..." };
+  } catch {
+    return { state: "installing", log: "Getting the computer ready (installing Node.js on the phone can take a minute)..." };
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const body = await readBody(req, { allowJob: "vpro" }); // Venus Pro server runs call this with their own job token
@@ -64,6 +108,11 @@ export async function POST(req: Request) {
     if (!sandboxId) return fail("This chat has no computer yet — turn it on first.", 400);
     const sb = await connect(e2bKey, sandboxId); // resumes a paused computer
     const ws = String(body.ws || "");
+
+    // Phone / PC computers: light setup only (see LOCAL_PREP). Nothing to install in the background.
+    if (isLocalSandboxId(sandboxId) && (action === "setup" || action === "status")) {
+      return NextResponse.json(action === "setup" ? { ok: true } : await localPrepare(sb));
+    }
 
     switch (action) {
       case "setup":
