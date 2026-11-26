@@ -9,6 +9,7 @@ import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { useKeys } from "@/lib/keys-context";
 import { touch } from "@/lib/computers";
+import LocalScreen, { isLocalView } from "@/components/dashboard/LocalScreen";
 import { freshLink, startDownload } from "@/lib/chat-files";
 
 /* ------------------------------------------------------------------ */
@@ -131,7 +132,9 @@ export function LiveComputerCard({ chatId, agentName }: { chatId: string; agentN
         <div className="relative aspect-[16/10] w-full overflow-hidden rounded-xl border border-line bg-bg">
           {screen ? (
             <>
-              <iframe key={screen} src={viewSrc(screen, false)} title="Computer screen" className="pointer-events-none h-full w-full border-0" />
+              {isLocalView(screen) && e2bKey
+                ? <LocalScreen apiKey={e2bKey} url={screen} control={false} className="pointer-events-none" />
+                : <iframe key={screen} src={viewSrc(screen, false)} title="Computer screen" className="pointer-events-none h-full w-full border-0" />}
               <button type="button" onClick={() => setFull(true)} aria-label="Open the computer" className="absolute inset-0 cursor-zoom-in" />
             </>
           ) : (
@@ -152,7 +155,9 @@ export function LiveComputerCard({ chatId, agentName }: { chatId: string; agentN
             </button>
           }
         >
-          <iframe key={viewSrc(screen, control)} src={viewSrc(screen, control)} title="Computer screen" allow="clipboard-read; clipboard-write" className="h-full w-full rounded-xl border-0 bg-black" />
+          {isLocalView(screen) && e2bKey
+            ? <LocalScreen apiKey={e2bKey} url={screen} control={control} />
+            : <iframe key={viewSrc(screen, control)} src={viewSrc(screen, control)} title="Computer screen" allow="clipboard-read; clipboard-write" className="h-full w-full rounded-xl border-0 bg-black" />}
         </Overlay>
       )}
     </div>

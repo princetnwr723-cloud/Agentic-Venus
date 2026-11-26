@@ -17,6 +17,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import LocalScreen, { isLocalView } from "@/components/dashboard/LocalScreen";
 
 export type PcStatus = "idle" | "creating" | "loading" | "ready" | "paused" | "error";
 
@@ -172,6 +173,7 @@ export default function PcPanel({
   status,
   error,
   screenUrl,
+  viewKey,
   steps,
   running,
   request,
@@ -191,6 +193,7 @@ export default function PcPanel({
   status: PcStatus;
   error: string | null;
   screenUrl: string | null;
+  viewKey?: string | null;
   steps: string[];
   running: boolean;
   request: AgentRequest | null;
@@ -231,8 +234,9 @@ export default function PcPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [fullscreen, onToggleFullscreen]);
 
+  const localView = isLocalView(screenUrl);
   const src = useMemo(() => {
-    if (!screenUrl) return null;
+    if (!screenUrl || isLocalView(screenUrl)) return null;
     const u = new URL(screenUrl);
     if (takeControl) u.searchParams.delete("view_only");
     else u.searchParams.set("view_only", "true");
@@ -414,6 +418,10 @@ export default function PcPanel({
               Try again
             </button>
           </div>
+        )}
+
+        {status === "ready" && localView && viewKey && (
+          <LocalScreen key={screenUrl} apiKey={viewKey} url={screenUrl as string} control={takeControl} />
         )}
 
         {status === "ready" && src && (

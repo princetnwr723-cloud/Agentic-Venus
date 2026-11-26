@@ -19,7 +19,7 @@ function mask(key?: string | null) {
 }
 
 export default function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { apiKeys, e2bKey, saveProviderKey, saveE2bKey } = useKeys();
+  const { apiKeys, e2bKey, savedE2bKey, pcSource, setPcSource, hasPhoneComputer, saveProviderKey, saveE2bKey } = useKeys();
   const [tab, setTab] = useState<"keys" | "plans">("keys");
   const [drafts, setDrafts] = useState<Partial<Record<ProviderId, string>>>({});
   const [e2bDraft, setE2bDraft] = useState("");
@@ -119,6 +119,27 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
 
             <FountSettings />
 
+            {hasPhoneComputer && (
+              <div className="mb-4">
+                <h3 className="mb-1.5 text-sm text-ink">Which computer should the agent use?</h3>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button" onClick={() => setPcSource("phone")}
+                    className={`rounded-lg border px-3 py-2 text-left text-xs ${pcSource === "phone" || !savedE2bKey ? "border-gold bg-goldSoft/40 text-ink" : "border-line text-muted hover:bg-panel2"}`}
+                  >
+                    <span className="block text-sm">This phone&rsquo;s computer</span>
+                    <span className="block text-[11px] text-muted">Free · runs on your phone</span>
+                  </button>
+                  <button
+                    type="button" onClick={() => setPcSource("cloud")} disabled={!savedE2bKey}
+                    className={`rounded-lg border px-3 py-2 text-left text-xs disabled:opacity-50 ${pcSource === "cloud" && savedE2bKey ? "border-gold bg-goldSoft/40 text-ink" : "border-line text-muted hover:bg-panel2"}`}
+                  >
+                    <span className="block text-sm">Cloud computer (E2B)</span>
+                    <span className="block text-[11px] text-muted">{savedE2bKey ? "Uses your E2B key" : "Add your E2B key below"}</span>
+                  </button>
+                </div>
+              </div>
+            )}
             <h3 className="mb-1.5 text-sm text-ink">Computer (E2B)</h3>
             <p className="mb-3 text-xs leading-relaxed text-muted">
               One shared computer for the whole account — every chat can use it. Add your key once — get one at{" "}
@@ -126,7 +147,7 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
             </p>
             <div className="flex gap-2">
               <input
-                type="password" placeholder={e2bKey ? "Paste a new key to replace it" : "e2b_..."}
+                type="password" placeholder={savedE2bKey ? "Paste a new key to replace it" : "e2b_..."}
                 value={e2bDraft} onChange={(e) => setE2bDraft(e.target.value)}
                 className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold"
               />
@@ -134,7 +155,7 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
                 {savedFlash === "e2b" ? "Saved" : "Save"}
               </button>
             </div>
-            {e2bKey && <p className="mt-1.5 text-[11px] text-avatar-teal">Connected · {mask(e2bKey)}</p>}
+            {savedE2bKey && <p className="mt-1.5 text-[11px] text-avatar-teal">Connected · {mask(savedE2bKey)}</p>}
           </>
         )}
       </div>
