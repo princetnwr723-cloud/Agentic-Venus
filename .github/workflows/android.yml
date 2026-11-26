@@ -79,6 +79,23 @@ jobs:
         if: ${{ env.GOOGLE_SERVICES_JSON != '' }}
         run: printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
+      # The phone computer (Cloud PC) needs the "proot" engine inside the APK. fetch-proot.mjs downloads it from the
+      # Termux repository (checksum-verified) into android/app/src/main/jniLibs/arm64-v8a. Needs: ar, tar+xz, patchelf.
+      - name: Install tools for the phone computer engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends patchelf binutils xz-utils
+
+      - name: Fetch the phone computer engine (proot)
+        run: node scripts/fetch-proot.mjs
+
+      - name: Check the engine is in the project
+        run: |
+          for f in libproot.so libproot-loader.so; do
+            [ -s "android/app/src/main/jniLibs/arm64-v8a/$f" ] || { echo "::error::$f is missing, the Cloud PC would not work in this APK."; exit 1; }
+          done
+          ls -la android/app/src/main/jniLibs/arm64-v8a
+
       - name: Prepare (permissions, runner service, icon, login link, scheduler)
         run: node scripts/prepare-android.mjs
 
