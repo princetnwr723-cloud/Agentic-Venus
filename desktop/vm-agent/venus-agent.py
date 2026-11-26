@@ -9,6 +9,8 @@ import base64, hmac, json, os, subprocess, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("VENUS_AGENT_PORT", "7077"))
+# The desktop VM has its own network, so it listens on every address inside it. The phone computer (proot) shares the phone's network, so it sets 127.0.0.1.
+BIND = os.environ.get("VENUS_AGENT_BIND", "0.0.0.0")
 KEY_FILE = os.environ.get("VENUS_AGENT_KEYFILE", "/etc/venus-agent.key")
 READY_FILE = os.environ.get("VENUS_AGENT_READY", "/var/lib/venus-ready")
 RUN_USER = os.environ.get("VENUS_AGENT_USER", "user")
@@ -113,4 +115,4 @@ class H(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)[:300]})
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    ThreadingHTTPServer((BIND, PORT), H).serve_forever()
