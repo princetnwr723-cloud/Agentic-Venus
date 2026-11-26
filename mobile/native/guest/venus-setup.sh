@@ -15,6 +15,7 @@ fi
 apk add --no-cache bash curl ca-certificates tzdata git python3 nodejs npm unzip zip \
   xvfb xterm xdotool scrot chromium font-dejavu
 apk add --no-cache procps-ng || apk add --no-cache procps || true
+apk add --no-cache xsetroot || apk add --no-cache xset || true
 
 mkdir -p /home/user/Desktop /home/user/Documents /home/user/Downloads /home/user/work /home/user/runner /var/lib /tmp /usr/local/bin
 chmod 1777 /tmp
