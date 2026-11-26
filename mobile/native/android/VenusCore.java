@@ -161,10 +161,15 @@ public final class VenusCore {
     }
 
     static Res api(Context ctx, String method, String path, String json) throws Exception {
+        return api(ctx, method, path, json, 12000);
+    }
+
+    /** Same call with its own read timeout: the phone computer waits up to ~20 s for work on "/api/local" (long polling). */
+    static Res api(Context ctx, String method, String path, String json, int readTimeoutMs) throws Exception {
         for (int pass = 0; pass < 2; pass++) {
             String token = idToken(ctx, pass == 1);
             HttpURLConnection c = (HttpURLConnection) new URL(prefs(ctx).getString("appUrl", "") + path).openConnection();
-            c.setConnectTimeout(8000); c.setReadTimeout(12000);
+            c.setConnectTimeout(8000); c.setReadTimeout(readTimeoutMs);
             c.setRequestMethod(method);
             c.setRequestProperty("Authorization", "Bearer " + token);
             c.setRequestProperty("Accept", "application/json");
