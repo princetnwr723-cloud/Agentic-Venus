@@ -7,6 +7,7 @@ import { collection, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { disableThisDevice, enablePush, initNativeLinks, isNativeApp, startRunnerLoop } from "@/lib/native";
 import { clearScheduler, resyncScheduler, setupScheduler } from "@/lib/native-scheduler";
+import { autoSetupComputer, clearComputer } from "@/lib/native-computer";
 
 const OPEN = ["/app-login", "/native-login"];
 
@@ -38,7 +39,7 @@ export default function NativeBridge() {
     void enablePush();
     const stop = startRunnerLoop();
     const orig = auth.signOut.bind(auth);
-    auth.signOut = async () => { await disableThisDevice(); await clearScheduler(); await orig(); };
+    auth.signOut = async () => { await disableThisDevice(); await clearScheduler(); await clearComputer(); await orig(); };
     return () => { stop(); auth.signOut = orig; };
   }, [user]);
 
@@ -50,6 +51,12 @@ export default function NativeBridge() {
     const id = window.setInterval(tick, 10 * 60_000);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, [user]);
+
+  // the phone computer: right after the app is installed and signed in, it installs itself (on Wi-Fi; on mobile data it waits for a tap)
+  useEffect(() => {
+    if (!isNativeApp() || !user) return;
+    void autoSetupComputer().catch(() => undefined);
   }, [user]);
 
   // a routine was created, edited, paused or deleted (by you or by the agent): re-arm the alarms within a few seconds
