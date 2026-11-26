@@ -1,5 +1,6 @@
 // Run once after `npx cap add android` (the workflow does it). Adds what the plugins and Firebase need to the Android project,
-// and installs the native scheduler (mobile/native/android/*.java): exact alarms that run your routines on the phone, on time.
+// and installs the native scheduler (mobile/native/android/*.java): exact alarms that run your routines on the phone, on time,
+// and the phone computer (a small Linux with Chrome and a terminal: VenusLocal*.java + the guest scripts, see mobile/native/guest).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,7 @@ const PERMS = [
   "android.permission.FOREGROUND_SERVICE",
   "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
   "android.permission.WAKE_LOCK",
+  "android.permission.ACCESS_NETWORK_STATE", // the phone computer sets itself up on Wi-Fi, so it must know whether the network is metered
   // scheduler: exact alarms, come back after a reboot, and ask to be exempt from battery saving
   "android.permission.SCHEDULE_EXACT_ALARM",
   "android.permission.RECEIVE_BOOT_COMPLETED",
@@ -53,6 +55,11 @@ const SCHED_BLOCK = `
         </receiver>
 `;
 if (!xml.includes(".VenusAlarmReceiver")) xml = xml.replace("</application>", SCHED_BLOCK + "    </application>");
+
+const LOCAL_BLOCK = `
+        <service android:name=".VenusLocalService" android:foregroundServiceType="dataSync" android:exported="false" />
+`;
+if (!xml.includes(".VenusLocalService")) xml = xml.replace("</application>", LOCAL_BLOCK + "    </application>");
 
 // 3. the login link agenticvenus://auth?code=...
 const FILTER = `            <intent-filter>
@@ -97,13 +104,36 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(VenusSchedulerPlugin.class);
+        registerPlugin(VenusLocalPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
 `
 );
 
+// 6. the phone computer: the scripts that run INSIDE it (one agent file is shared with the desktop app)
+const assets = path.join(main, "assets", "venus");
+fs.mkdirSync(assets, { recursive: true });
+const guest = path.join(root, "native", "guest");
+for (const f of fs.readdirSync(guest)) fs.copyFileSync(path.join(guest, f), path.join(assets, f));
+const agent = path.resolve(root, "..", "desktop", "vm-agent", "venus-agent.py");
+if (fs.existsSync(agent)) fs.copyFileSync(agent, path.join(assets, "venus-agent.py"));
+else console.warn("WARNING: desktop/vm-agent/venus-agent.py not found: the phone computer will not work.");
+
+// 7. proot is started from the app's native-library folder (Android does not let an app run files it downloaded),
+//    so that folder must hold real files: "legacy packaging" keeps them unpacked.
+const gradlePath = path.join(root, "android", "app", "build.gradle");
+if (fs.existsSync(gradlePath)) {
+  let g = fs.readFileSync(gradlePath, "utf8");
+  if (!g.includes("useLegacyPackaging")) {
+    g = g.replace(/^android\s*\{/m, "android {\n    packaging {\n        jniLibs {\n            useLegacyPackaging = true\n        }\n    }");
+    fs.writeFileSync(gradlePath, g);
+  }
+}
+const proot = path.join(main, "jniLibs", "arm64-v8a", "libproot.so");
+if (!fs.existsSync(proot)) console.warn("WARNING: libproot.so is missing (run `node scripts/fetch-proot.mjs` first). The app builds, but the phone computer will say it is not in this build.");
+
 if (!fs.existsSync(path.join(root, "android", "app", "google-services.json"))) {
   console.warn("WARNING: android/app/google-services.json is missing, push notifications will not work.");
 }
-console.log("Android project prepared (scheduler installed).");
+console.log("Android project prepared (scheduler and phone computer installed).");
