@@ -1953,7 +1953,7 @@ export default function DashboardPage() {
         )}
         {pcOpen && !teamOpen && activeChat && (
           <PcPanel
-            key={activeChat.id} hasComputer={Boolean(activeSandboxId)} status={session.status} error={session.error} screenUrl={session.screenUrl}
+            key={activeChat.id} hasComputer={Boolean(activeSandboxId)} status={session.status} error={session.error} screenUrl={session.screenUrl} viewKey={e2bKey}
             steps={session.steps} running={session.running} request={session.request} fullscreen={pcFullscreen} wide={focusMode}
             onClose={() => { setPcOpen(false); setPcFullscreen(false); }}
             onStart={() => void createPc(activeChat.id)}
