@@ -60,11 +60,9 @@ export const LOCAL_VIEW_PREFIX = "venus-view://";
 /** connect() also RESUMES a paused sandbox and pushes the expiry 1h forward. */
 export async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   // A computer on the user's own PC (through the desktop app): no E2B key is needed.
-  if (isLocalSandboxId(sandboxId)) {
-    // The user switched this account to a CLOUD (E2B) computer: this chat's old phone/PC computer is "gone", so a cloud one is made.
-    if (cleanKey(apiKey) && !isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: the computer was switched from your phone/PC to the cloud computer.`);
-    return localSandbox(sandboxId) as unknown as DesktopSandbox;
-  }
+  // The user switched this account to a CLOUD (E2B) computer: this chat's old phone/PC computer is "gone", so a cloud one is made.
+  if (isLocalSandboxId(sandboxId) && cleanKey(apiKey) && !isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: the computer was switched from your phone/PC to the cloud computer.`);
+  if (isLocalSandboxId(sandboxId)) return localSandbox(sandboxId) as unknown as DesktopSandbox;
   // The key is a local computer's key (desktop app or phone) but this chat still remembers an old CLOUD computer: it can never work
   // with that key, so say "gone" and the app starts a new computer on the local one.
   if (isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: this chat's computer was a cloud computer; the computer on your own device is used now.`);
