@@ -60,6 +60,9 @@ export const GONE_PREFIX = "SANDBOX_GONE";
 export async function connect(apiKey: string, sandboxId: string): Promise<DesktopSandbox> {
   // A computer on the user's own PC (through the desktop app): no E2B key is needed.
   if (isLocalSandboxId(sandboxId)) return localSandbox(sandboxId) as unknown as DesktopSandbox;
+  // The key is a local computer's key (desktop app or phone) but this chat still remembers an old CLOUD computer: it can never work
+  // with that key, so say "gone" and the app starts a new computer on the local one.
+  if (isLocalKey(cleanKey(apiKey))) throw new Error(`${GONE_PREFIX}: this chat's computer was a cloud computer; the computer on your own device is used now.`);
   const { Sandbox } = await loadSdk();
   try {
     return (await Sandbox.connect(sandboxId, { apiKey: cleanKey(apiKey), timeoutMs: SANDBOX_TIMEOUT_MS } as never)) as unknown as DesktopSandbox;

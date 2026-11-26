@@ -3,6 +3,7 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { signInWithCustomToken } from "firebase/auth";
 import { auth } from "@/lib/firebase";
+import { wakeComputer } from "@/lib/native-computer";
 
 export const APP_SCHEME = "agenticvenus";
 const FCM_KEY = "venus_fcm_token";
@@ -191,6 +192,7 @@ export function startRunnerLoop(): () => void {
         if (r.ok) {
           const s = (await r.json()) as Status;
           if (s.jobs.length) {
+            void wakeComputer(); // a task is running: the phone computer stays online for it, even with the screen off
             if (on && Date.now() - startedAt > RUNNER_MAX_MS) { await hide(); paused = true; }
             else if (await allowed()) {
               const what = s.jobs.length > 1 ? `${s.jobs.length} kaam chal rahe hain` : s.jobs[0].task;

@@ -1,10 +1,11 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import type { ProviderId } from "@/lib/providers";
+import { phoneComputerKey, subscribeComputer } from "@/lib/native-computer";
 
 // Both fields are vault placeholders ("vault:cred.site.e"), never the real login.
 export type SavedLogin = { email: string; password: string };
@@ -57,16 +58,19 @@ async function vault(body: Record<string, unknown>) {
 }
 
 export function KeysProvider({ children }: { children: React.ReactNode }) {
+  const phoneKeyRef = useRef<string | null>(null);
   const { user } = useAuth();
   const [apiKeys, setApiKeys] = useState<Partial<Record<ProviderId, string>>>({});
-  const [e2bKey, setE2bKey] = useState<string | null>(null);
+  const [savedE2bKey, setE2bKey] = useState<string | null>(null);
+  // Inside the Android app, once the phone computer is set up and switched on, its key replaces the cloud computer key. Elsewhere: always null.
+  const [phoneKey, setPhoneKey] = useState<string | null>(null);
   const [pcSandboxId, setPcSandboxId] = useState<string | null>(null);
   const [pcCredentials, setPcCredentials] = useState<Record<string, SavedLogin>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!user) {
-      setApiKeys({}); setE2bKey(null); setPcSandboxId(null); setPcCredentials({}); setLoading(false);
+      setApiKeys({}); setE2bKey(null); setPhoneKey(null); setPcSandboxId(null); setPcCredentials({}); setLoading(false);
       return;
     }
     let alive = true;
@@ -89,6 +93,21 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
     })().catch(() => alive && setLoading(false));
     return () => { alive = false; };
   }, [user]);
+
+  // The phone computer: ask once, then again whenever it changes (set up, switched on or off), and every 15 s until it has a key
+  // (the login can reach the app a moment after the screen opens).
+  useEffect(() => {
+    if (!user) return;
+    let dead = false;
+    const read = () => { void phoneComputerKey().then((k) => { if (!dead) setPhoneKey(k); }).catch(() => undefined); };
+    read();
+    const off = subscribeComputer(read);
+    const id = window.setInterval(() => { if (!phoneKeyRef.current) read(); }, 15_000);
+    return () => { dead = true; off(); window.clearInterval(id); };
+  }, [user]);
+  useEffect(() => { phoneKeyRef.current = phoneKey; }, [phoneKey]);
+
+  const e2bKey = desktopLocalKey() ? savedE2bKey : (phoneKey ?? savedE2bKey);
 
   async function saveProviderKey(provider: ProviderId, key: string) {
     if (!user) return;
