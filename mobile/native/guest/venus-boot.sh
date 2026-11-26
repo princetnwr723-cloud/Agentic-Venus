@@ -12,5 +12,11 @@ cd /home/user || exit 1
 VENUS_AGENT_NOSUDO=1 VENUS_AGENT_BIND=127.0.0.1 VENUS_AGENT_PORT="$1" \
   python3 /usr/local/bin/venus-agent.py >/tmp/agent.log 2>&1 &
 for i in $(seq 1 60); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.2; done
+# An empty Xvfb screen is pure black, so the live view looked "broken". Give it a background and a small idle window.
+command -v xsetroot >/dev/null 2>&1 && xsetroot -solid '#14202e' >/dev/null 2>&1
+if command -v xterm >/dev/null 2>&1 && ! pgrep -x xterm >/dev/null 2>&1; then
+  nohup xterm -geometry 120x34+0+0 -bg '#14202e' -fg '#9fb3c8' -fa 'DejaVu Sans Mono' -fs 11 -T 'AgenticVenus computer' \
+    -e sh -c "printf '\n  AgenticVenus computer is ready.\n  Waiting for a task...\n'; exec sleep 100000" >/dev/null 2>&1 &
+fi
 touch /var/lib/venus-ready
 wait
