@@ -14,11 +14,12 @@ import java.util.concurrent.Executors;
  * "is there work for me?" (long polling on /api/local), runs each job in the computer, and posts the answer back.
  * The server decides everything (plans, limits, what to run). The phone gets only jobs, and looks at every job again before it runs it.
  *
- * It does NOT keep running all day. It runs while the app is open, while the computer is running, for a few minutes after the last job,
- * and while the website's task runner keeps calling wake() (a task is running). Then it stops and the phone is left alone.
+ * It does NOT keep running all day. It runs while the app is open, while the computer is running, for a while after the last job,
+ * while the website's task runner keeps calling wake() (a task is running), and while a schedule alarm holds it (holdFor): a routine that
+ * starts with the app closed can use this phone's computer. Then it stops and the phone is left alone.
  */
 final class VenusLocalRelay {
-    private static final long AFTER_JOB_MS = 10 * 60_000L;
+    private static final long AFTER_JOB_MS = 30 * 60_000L; // server-side tasks think between jobs: stay reachable for a while
     private static final long WAKE_MS = 90_000L;
 
     private static VenusLocalRelay instance;
@@ -34,6 +35,7 @@ final class VenusLocalRelay {
     private volatile boolean visible;
     private volatile long lastJobAt;
     private volatile long wakeAt;
+    private volatile long holdUntil;
     private Thread loop;
 
     private VenusLocalRelay(Context ctx) {
@@ -52,10 +54,21 @@ final class VenusLocalRelay {
         ensure();
     }
 
+    /**
+     * A schedule alarm fired (the app may be closed): stay online for `ms` so the routine's server-side agent can use this phone's computer.
+     * The notification (foreground service) keeps Android from freezing the app and keeps the network open. It ends with the hold.
+     */
+    void holdFor(long ms) {
+        if (!pc.enabled() || !pc.installed() || !VenusCore.configured(app)) return;
+        holdUntil = Math.max(holdUntil, System.currentTimeMillis() + ms);
+        VenusLocalService.sync(app, true, "Schedule ka kaam: phone online hai");
+        ensure();
+    }
+
     private boolean shouldRun() {
         if (!pc.enabled() || !pc.installed() || !VenusCore.configured(app)) return false;
         long now = System.currentTimeMillis();
-        return visible || pc.isRunning() || now - lastJobAt < AFTER_JOB_MS || now - wakeAt < WAKE_MS;
+        return visible || pc.isRunning() || now - lastJobAt < AFTER_JOB_MS || now - wakeAt < WAKE_MS || now < holdUntil;
     }
 
     synchronized void ensure() {
@@ -81,6 +94,14 @@ final class VenusLocalRelay {
     }
 
     private void run() {
+        try { loop(); }
+        finally {
+            // the hold is over and the computer is not running: take the notification away (a running computer keeps its own)
+            if (!pc.isRunning()) VenusLocalService.sync(app, false, "");
+        }
+    }
+
+    private void loop() {
         int errors = 0;
         while (shouldRun()) {
             try {
