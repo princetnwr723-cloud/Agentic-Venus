@@ -121,6 +121,9 @@ export function KeysProvider({ children }: { children: React.ReactNode }) {
   function setPcSource(s: "phone" | "cloud") {
     setPcSourceState(s);
     try { localStorage.setItem("venus.pcSource", s); } catch { /* not saved: still works for this visit */ }
+    // the server (routines, scheduled and background tasks, also with every app closed) follows the same choice:
+    // "phone" = own phone / PC when it is online (the cloud computer only as a backup), "cloud" = E2B only
+    void fetch("/api/local", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "prefer", source: s === "cloud" ? "cloud" : "auto" }) }).catch(() => {});
   }
   const useCloud = pcSource === "cloud" && Boolean(savedE2bKey);
   const e2bKey = desktopLocalKey() ? savedE2bKey : (useCloud ? savedE2bKey : (phoneKey ?? savedE2bKey));
