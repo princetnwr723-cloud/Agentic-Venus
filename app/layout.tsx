@@ -4,6 +4,7 @@ import { AuthProvider } from "@/lib/auth-context";
 import { KeysProvider } from "@/lib/keys-context";
 import LimitModal from "@/components/LimitModal";
 import NativeBridge from "@/components/NativeBridge";
+import RunKeeper from "@/components/agent/RunKeeper";
 import ThemeProvider from "@/components/ThemeProvider";
 import "./globals.css";
 import "./mobile.css";
@@ -46,6 +47,7 @@ export default function RootLayout({
           <KeysProvider>{children}</KeysProvider>
           <LimitModal />
           <NativeBridge />
+          <RunKeeper />
           <ThemeProvider />
         </AuthProvider>
       </body>
