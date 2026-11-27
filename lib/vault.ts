@@ -3,6 +3,7 @@
 // Key: VAULT_KEY (required in production). Keep old values in VAULT_KEY_OLD so old secrets keep opening.
 import { getAdminDb } from "@/lib/firebase-admin";
 import { docIdOf, loadKeys, seal, unseal, writeKey } from "@/lib/vault-crypto";
+import { pickComputerKey } from "@/lib/computer-pref";
 
 // "_" is allowed: connector names such as github_oauth or mcp:my_crm contain it.
 const NAME_RE = /^[a-z0-9._:_-]{1,90}$/;
@@ -58,10 +59,26 @@ export async function vaultDelete(uid: string, name: string) {
   await col(uid).doc(docIdOf(uid, name)).delete().catch(() => {});
 }
 
-/** "vault:x" -> the real secret. Anything else is returned unchanged. */
+/**
+ * "vault:x" -> the real secret. Anything else is returned unchanged.
+ * The computer key ("vault:e2b") is special: the server decides which computer to use. The user's own phone / PC when it is
+ * online (also for routines and background tasks with the app closed), the cloud E2B computer otherwise (see lib/computer-pref.ts).
+ */
 export async function resolveValue(uid: string, v: string): Promise<string> {
   const m = PLACEHOLDER_RE.exec(v);
   if (!m) return v;
+  if (m[1] === "e2b") {
+    let stored: string | null = null;
+    let unreadable: unknown = null;
+    try { stored = await vaultGet(uid, "e2b"); }
+    catch (e) { if (e instanceof VaultUnreadable) unreadable = e; else throw e; }
+    try { return await pickComputerKey(uid, stored); }
+    catch (e) {
+      if (unreadable) throw unreadable;
+      if (stored === null) throw new Error("A saved secret is missing (e2b). Please enter it again in Settings.");
+      throw e;
+    }
+  }
   const plain = await vaultGet(uid, m[1]);
   if (plain === null) throw new Error(`A saved secret is missing (${m[1]}). Please enter it again in Settings.`);
   return plain;
