@@ -5,8 +5,9 @@
 // it asks for queued jobs with the user's login token and posts the results back. It never receives plan data.
 import { randomBytes } from "crypto";
 import { getAdminDb } from "@/lib/firebase-admin";
+import { vaultPut } from "@/lib/vault";
 import {
-  MAX_PENDING, deviceFromSandboxId, isDeviceId, isExpired, isOnline, normalizeResult, sandboxIdOf, validateJob,
+  MAX_PENDING, deviceFromSandboxId, isDeviceId, isExpired, isOnline, makeLocalKey, normalizeResult, sandboxIdOf, validateJob,
   type JobResult, type RelayOp,
 } from "@/lib/local-relay-core";
 
@@ -16,16 +17,39 @@ const dev = (id: string) => devices().doc(id);
 
 type DeviceDoc = { uid: string; name: string; platform: string; createdAt: number; lastSeen: number };
 
+/**
+ * A user who only has a phone or a PC (no E2B key) still needs a "computer slot" on the account: every server-side feature
+ * (routines, background agent, Venus Pro / Code) looks for one. The slot holds this device's local key. A real E2B key saved
+ * later simply replaces it, and lib/computer-pref.ts keeps choosing the own computer while it is online.
+ */
+const slotDone = new Set<string>();
+export async function ensureComputerSlot(uid: string, deviceId: string): Promise<void> {
+  const k = uid + ":" + deviceId;
+  if (slotDone.has(k)) return;
+  try {
+    const ref = getAdminDb().collection("users").doc(uid);
+    const d = (await ref.get()).data() as { e2bKey?: string; pcDeviceId?: string } | undefined;
+    if (!d?.e2bKey) {
+      const ph = await vaultPut(uid, "e2b", makeLocalKey(deviceId));
+      await ref.set({ e2bKey: ph, pcDeviceId: deviceId }, { merge: true });
+    } else if (!d.pcDeviceId) {
+      await ref.set({ pcDeviceId: deviceId }, { merge: true });
+    }
+    slotDone.add(k);
+  } catch { /* the slot is a convenience: the device itself keeps working */ }
+}
+
 export async function registerDevice(uid: string, name: string, platform: string, existing?: unknown): Promise<string> {
   const now = Date.now();
   const clean = { name: String(name || "My PC").slice(0, 60), platform: String(platform || "").slice(0, 30) };
   if (isDeviceId(existing)) {
     const snap = await dev(existing).get();
     const d = snap.data() as DeviceDoc | undefined;
-    if (d && d.uid === uid) { await dev(existing).set({ ...clean, lastSeen: now }, { merge: true }); return existing; }
+    if (d && d.uid === uid) { await dev(existing).set({ ...clean, lastSeen: now }, { merge: true }); await ensureComputerSlot(uid, existing); return existing; }
   }
   const id = randomBytes(16).toString("hex");
   await dev(id).set({ uid, ...clean, createdAt: now, lastSeen: now } satisfies DeviceDoc);
+  await ensureComputerSlot(uid, id);
   return id;
 }
 
@@ -75,10 +99,16 @@ export async function completeJob(uid: string, deviceId: string, jobId: string, 
   await jr.update({ status: "done", result: normalizeResult(result), doneAt: Date.now() });
 }
 
-export async function assertDeviceOnline(deviceId: string) {
-  const d = (await dev(deviceId).get()).data() as DeviceDoc | undefined;
-  if (!d) throw new Error("This computer is not registered. Open the AgenticVenus desktop app and sign in.");
-  if (!isOnline(d.lastSeen)) throw new Error("Your PC app is offline. Open the AgenticVenus desktop app on that PC and try again.");
+/** A device can be a few seconds late (a phone that just woke up, a network change): wait a little before giving up. */
+export async function assertDeviceOnline(deviceId: string, waitMs = 8_000) {
+  const end = Date.now() + waitMs;
+  for (;;) {
+    const d = (await dev(deviceId).get()).data() as DeviceDoc | undefined;
+    if (!d) throw new Error("This computer is not registered. Open the AgenticVenus app (phone or PC) and sign in.");
+    if (isOnline(d.lastSeen)) return;
+    if (Date.now() >= end) throw new Error("Your phone / PC is offline. Open the AgenticVenus app on it (or let its schedule wake it) and try again.");
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
 }
 
 /** Queues one job for the desktop app and waits for its answer. */
