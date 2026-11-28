@@ -116,7 +116,7 @@ export default function VmapsPage() {
         <h1 className="flex items-center gap-2 text-xl font-semibold text-ink"><MapPin size={20} className="text-avatar-teal" /> Vmaps</h1>
         <p className="mt-1 text-sm text-muted">Free maps and local research for you and your agents. Built on OpenStreetMap: no Google, no key, no card.</p>
 
-        <div className="mt-5 grid grid-cols-4 gap-1 rounded-xl border border-line bg-panel p-1">
+        <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-1 rounded-xl border border-line bg-panel p-1">
           {TABS.map((t) => (
             <button key={t.key} type="button" onClick={() => { setTab(t.key); setError(""); }} aria-pressed={tab === t.key}
               className={`rounded-lg py-2 text-xs font-medium sm:text-sm ${tab === t.key ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{t.label}</button>
