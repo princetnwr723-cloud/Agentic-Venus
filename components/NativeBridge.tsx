@@ -11,7 +11,7 @@ import { autoSetupComputer, clearComputer } from "@/lib/native-computer";
 
 const OPEN = ["/app-login", "/native-login"];
 
-/** Mounted once in the layout. Does nothing on the website; inside the Android app it wires login, push, the runner and the phone's own scheduler. */
+/** Mounted once in the layout. On the website it only wakes due routines while the site is open; inside the Android app it wires login, push, the runner and the phone's own scheduler. */
 export default function NativeBridge() {
   const { user, loading } = useAuth();
   const path = usePathname() || "/";
@@ -51,6 +51,23 @@ export default function NativeBridge() {
     const id = window.setInterval(tick, 10 * 60_000);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, [user]);
+
+  // website: while the site is open, start this user's due routines on time (the cloud scheduler alone can be minutes late)
+  useEffect(() => {
+    if (isNativeApp() || !user) return;
+    let busy = false;
+    const wake = async () => {
+      if (busy || document.visibilityState !== "visible") return;
+      busy = true;
+      try {
+        await fetch("/api/routines/wake", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${await user.getIdToken()}` }, body: "{}" });
+      } catch { /* the next tick tries again */ } finally { busy = false; }
+    };
+    void wake();
+    const id = window.setInterval(wake, 30_000);
+    document.addEventListener("visibilitychange", wake);
+    return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", wake); };
   }, [user]);
 
   // the phone computer: right after the app is installed and signed in, it installs itself (on Wi-Fi; on mobile data it waits for a tap)
