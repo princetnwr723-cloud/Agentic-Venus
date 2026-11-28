@@ -25,7 +25,7 @@ export default function RunsPage() {
 
   return (
     <div className="min-h-screen bg-bg">
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-3xl px-4 py-6 md:px-6 md:py-8">
         <button onClick={() => router.push("/dashboard")} className="mb-4 flex items-center gap-1.5 text-xs text-muted hover:text-ink"><ArrowLeft size={14} /> Dashboard</button>
         <h1 className="flex items-center gap-2 text-xl font-semibold text-ink"><Activity size={20} className="text-gold" /> Runs</h1>
         <p className="mt-1 text-sm text-muted">Every agent run, step by step. Cost is an estimate from text size and list prices (last {traces.length} runs ≈ ${total.toFixed(3)}).</p>
