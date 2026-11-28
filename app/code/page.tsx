@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FieldPath, doc, onSnapshot, updateDoc } from "firebase/firestore";
-import { ArrowLeft, Download, File as FileIcon, Folder, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Square, Trash2, X } from "lucide-react";
+import { ArrowLeft, Download, Eye, File as FileIcon, Folder, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Square, Terminal, Trash2, X } from "lucide-react";
 import BotAvatar from "@/components/BotAvatar";
 import Markdown from "@/components/Markdown";
 import { useAuth } from "@/lib/auth-context";
@@ -57,6 +57,8 @@ export default function CodePage() {
   const [wsId, setWsId] = useState<string | null>(null);
   const wantProject = useRef<string | null>(null);
   const [tab, setTab] = useState<Tab>("preview");
+  // phone layout: one panel at a time (projects / the work / the preview side), switched with the bar at the bottom
+  const [mview, setMview] = useState<"projects" | "work" | "side">("work");
   const [tree, setTree] = useState<string[]>([]);
   const [file, setFile] = useState<{ path: string; content: string } | null>(null);
   const [checks, setChecks] = useState<Array<{ sha: string; when: string; msg: string }>>([]);
@@ -405,8 +407,18 @@ export default function CodePage() {
   const inp = "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:border-gold focus:outline-none";
 
   return (
-    <div className="flex h-screen bg-bg">
-      <aside className="flex w-[220px] shrink-0 flex-col border-r border-line bg-panel">
+    <div className="flex h-screen flex-col bg-bg pt-[var(--sat)] md:flex-row md:pt-0">
+      {/* phone: top bar */}
+      <header className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-3 py-2.5 md:hidden">
+        <button onClick={() => router.push("/dashboard")} aria-label="Back to the chat" className="rounded-full p-2 text-muted hover:bg-panel2 hover:text-ink"><ArrowLeft size={18} /></button>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-ink">{proj?.name ?? chat?.agentName ?? "Venus Code"}</p>
+          <p className="truncate text-[11px] text-faint">Venus Code{proj?.running ? " · working…" : ""}</p>
+        </div>
+        {proj?.running && <button onClick={() => user && wsId && setStop(user.uid, wsId, true)} className="flex items-center gap-1.5 rounded bg-red-500 px-2.5 py-1 text-xs text-white"><Square size={11} /> Stop</button>}
+      </header>
+
+      <aside className={`${mview === "projects" ? "flex" : "hidden"} min-h-0 w-full flex-1 shrink-0 flex-col border-line bg-panel md:flex md:w-[220px] md:flex-none md:border-r`}>
         <div className="flex items-center justify-between px-4 py-4">
           <span className="text-sm font-medium text-ink">Venus Code</span>
           <button onClick={() => router.push("/dashboard")} className="rounded-full p-1.5 text-muted hover:bg-panel2 hover:text-ink"><ArrowLeft size={16} /></button>
@@ -428,14 +440,14 @@ export default function CodePage() {
               {projects.map((p) => (
                 <div
                   key={p.id}
-                  onClick={() => openProject(p.id)}
+                  onClick={() => { openProject(p.id); setMview("work"); }}
                   className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] ${wsId === p.id ? "bg-panel2 text-ink" : "text-muted hover:bg-panel2/60 hover:text-ink"}`}
                 >
                   <Folder size={14} className={wsId === p.id ? "text-gold" : ""} />
                   <span className="min-w-0 flex-1 truncate">{p.name}</span>
                   {p.running && <span title="Working" className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />}
-                  <button onClick={(e) => { e.stopPropagation(); void renameProject(p); }} title="Rename" className="hidden shrink-0 text-faint hover:text-ink group-hover:block"><Pencil size={12} /></button>
-                  {!p.running && <button onClick={(e) => { e.stopPropagation(); void deleteProject(p); }} title="Remove from list" className="hidden shrink-0 text-faint hover:text-red-300 group-hover:block"><Trash2 size={12} /></button>}
+                  <button onClick={(e) => { e.stopPropagation(); void renameProject(p); }} title="Rename" className="shrink-0 p-1 text-faint hover:text-ink md:hidden md:p-0 md:group-hover:block"><Pencil size={13} /></button>
+                  {!p.running && <button onClick={(e) => { e.stopPropagation(); void deleteProject(p); }} title="Remove from list" className="shrink-0 p-1 text-faint hover:text-red-300 md:hidden md:p-0 md:group-hover:block"><Trash2 size={13} /></button>}
                 </div>
               ))}
             </div>
@@ -445,12 +457,12 @@ export default function CodePage() {
         <p className="mt-auto px-4 pb-4 text-[11px] leading-relaxed text-faint">One chat can hold many projects. Ask for code in the chat — the agent picks or creates the right project and this page shows the work live. It runs inside the computer, so it keeps working even if you close this tab.</p>
       </aside>
 
-      <main className="flex min-h-0 min-w-0 flex-1">
+      <main className={`${mview === "projects" ? "hidden" : "flex"} min-h-0 min-w-0 flex-1 md:flex`}>
         {!chat ? (
           <div className="flex flex-1 items-center justify-center text-sm text-muted">Create a chat first.</div>
         ) : (
           <>
-            <section className="m-3 mr-0 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-[#12141a] font-mono text-[13px] shadow-2xl">
+            <section className={`${mview === "work" ? "flex" : "hidden"} m-2 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-[#12141a] font-mono text-[13px] shadow-2xl md:m-3 md:mr-0 md:flex`}>
               <div className="flex items-center gap-2 border-b border-line px-3 py-2">
                 <span className="h-3 w-3 rounded-full bg-[#ff5f57]" /><span className="h-3 w-3 rounded-full bg-[#febc2e]" /><span className="h-3 w-3 rounded-full bg-[#28c840]" />
                 <span className="ml-2 text-xs text-muted">✳ Venus Code — {proj?.name ?? chat.agentName}</span>
@@ -496,8 +508,8 @@ export default function CodePage() {
               <div className="border-t border-line px-4 py-2 text-[11px] text-faint">Operated from the chat — there is no command box here.</div>
             </section>
 
-            <aside className="flex w-[46%] min-w-[340px] flex-col p-3">
-              <div className="flex gap-1 pb-2">
+            <aside className={`${mview === "side" ? "flex" : "hidden"} min-h-0 w-full min-w-0 flex-1 flex-col p-2 md:flex md:w-[46%] md:min-w-[340px] md:flex-none md:p-3`}>
+              <div className="flex gap-1 overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 {(["preview", "files", "terminal", "checkpoints", "repo"] as const).map((t) => <button key={t} onClick={() => setTab(t)} className={`rounded-md px-3 py-1 text-xs capitalize ${tab === t ? "bg-panel2 text-ink" : "text-muted hover:text-ink"}`}>{t}</button>)}
                 <button onClick={() => { refreshSide(); if (mode === "static") refreshPreview(); }} className="ml-auto text-muted hover:text-ink"><RefreshCw size={13} /></button>
               </div>
@@ -613,6 +625,19 @@ export default function CodePage() {
           </>
         )}
       </main>
+
+      {/* phone: switch between projects, the work and the preview */}
+      <nav aria-label="Venus Code panels" className="flex shrink-0 border-t border-line bg-panel pb-[max(0.25rem,var(--sab))] md:hidden">
+        {([
+          ["projects", "Projects", <Folder key="p" size={19} />],
+          ["work", "Work", <Terminal key="w" size={19} />],
+          ["side", "Preview", <Eye key="s" size={19} />],
+        ] as const).map(([k, label, ic]) => (
+          <button key={k} type="button" onClick={() => setMview(k)} aria-pressed={mview === k} className={`flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] ${mview === k ? "text-gold" : "text-muted"}`}>
+            {ic}{label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
