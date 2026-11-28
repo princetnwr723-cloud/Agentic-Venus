@@ -201,7 +201,13 @@ export default function ChatComposer({
   function stopDictation() { try { recRef.current?.stop(); } catch { /* already stopped */ } }
   function toggleDictation() {
     if (listening) { stopDictation(); return; }
-    const w = window as unknown as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    type Rec = {
+      lang: string; interimResults: boolean; continuous: boolean;
+      onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+      onend: (() => void) | null; onerror: (() => void) | null;
+      start: () => void; stop: () => void;
+    };
+    const w = window as unknown as { SpeechRecognition?: new () => Rec; webkitSpeechRecognition?: new () => Rec };
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
     if (!SR) return;
     const r = new SR();
@@ -209,7 +215,7 @@ export default function ChatComposer({
     r.interimResults = true;
     r.continuous = true;
     baseRef.current = draft ? draft.replace(/\s+$/, "") + " " : "";
-    r.onresult = (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => {
+    r.onresult = (e) => {
       let s = "";
       for (let i = 0; i < e.results.length; i++) s += e.results[i][0].transcript;
       setDraft(baseRef.current + s);
