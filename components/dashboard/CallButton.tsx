@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, Loader2, Mic, MicOff, Phone, PhoneOff, Square, Volume2, X } from "lucide-react";
+import { AudioLines, Check, Loader2, Mic, MicOff, Phone, PhoneOff, Square, Volume2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { listChats } from "@/lib/chats";
 
@@ -46,7 +46,7 @@ function useStrings() {
 
 const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 
-export default function CallButton({ agentName, chatId }: { agentName: string; chatId?: string }) {
+export default function CallButton({ agentName, chatId, variant = "plain" }: { agentName: string; chatId?: string; /** "voice" = the white round waveform button at the end of the message box */ variant?: "plain" | "voice" }) {
   const { user } = useAuth();
   const t = useStrings();
   const [open, setOpen] = useState(false);
@@ -309,9 +309,15 @@ export default function CallButton({ agentName, chatId }: { agentName: string; c
 
   return (
     <>
-      <button type="button" aria-label={`Call ${agentName}`} title={`Call ${agentName} (voice)`} onClick={() => void begin()} className="rounded-full p-2 text-muted hover:bg-panel2 hover:text-ink">
-        <Phone size={18} />
-      </button>
+      {variant === "voice" ? (
+        <button type="button" aria-label={`Talk to ${agentName} (voice call)`} title={`Talk to ${agentName} (voice call)`} onClick={() => void begin()} className="press flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white text-bg shadow-[0_2px_12px_rgba(231,178,77,.22)] transition-transform hover:scale-105 active:scale-95 sm:h-9 sm:w-9">
+          <AudioLines size={20} />
+        </button>
+      ) : (
+        <button type="button" aria-label={`Call ${agentName}`} title={`Call ${agentName} (voice)`} onClick={() => void begin()} className="rounded-full p-2 text-muted hover:bg-panel2 hover:text-ink">
+          <Phone size={18} />
+        </button>
+      )}
       {open && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-50 flex flex-col items-center overflow-y-auto bg-bg/95 px-6 py-8 backdrop-blur">
           <p className="text-xs uppercase tracking-wide text-muted">Call with</p>

@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle, ArrowUp, AtSign, Check, CornerUpLeft, File as FileIcon, FileArchive, FileCode2, FileSpreadsheet, FileText,
-  Film, Hand, Image as ImageIcon, Loader2, Music, Paperclip, Presentation, UploadCloud, X, Zap,
+  Film, Hand, Image as ImageIcon, Loader2, Mic, Music, Paperclip, Plus, Presentation, UploadCloud, X, Zap,
 } from "lucide-react";
 import { MAX_ATTACH_FILES, badgeOf, humanSize, shortName, type Attachment, type AttachKind } from "@/lib/attachments";
 import CallButton from "@/components/dashboard/CallButton";
@@ -114,7 +114,7 @@ function FileChip({ a, onRemove }: { a: Attachment; onRemove: () => void }) {
   );
 }
 
-/** The send button: arrow when ready, a progress ring while files upload, a spinner while the agent starts. */
+/** The send button: a white round arrow when ready, a progress ring while files upload, a spinner while the agent starts. */
 function SendButton({ canSend, uploading, overall, sending }: { canSend: boolean; uploading: boolean; overall: number; sending: boolean }) {
   const R = 16;
   const C = 2 * Math.PI * R;
@@ -125,8 +125,8 @@ function SendButton({ canSend, uploading, overall, sending }: { canSend: boolean
       aria-label={label}
       title={label}
       disabled={!canSend}
-      className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-all duration-200 sm:h-9 sm:w-9 ${
-        canSend ? "bg-white text-bg shadow-[0_2px_10px_rgba(231,178,77,.25)] hover:scale-105 active:scale-95" : "bg-panel2 text-faint"
+      className={`relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-all duration-200 sm:h-9 sm:w-9 ${
+        canSend ? "bg-white text-bg shadow-[0_2px_12px_rgba(231,178,77,.28)] hover:scale-105 active:scale-95" : "bg-panel2 text-faint"
       }`}
     >
       {uploading ? (
@@ -138,9 +138,9 @@ function SendButton({ canSend, uploading, overall, sending }: { canSend: boolean
           <span className="text-[9.5px] font-semibold tabular-nums text-ink">{overall}</span>
         </>
       ) : sending ? (
-        <Loader2 size={16} className="animate-spin" />
+        <Loader2 size={17} className="animate-spin" />
       ) : (
-        <ArrowUp size={17} strokeWidth={2.4} />
+        <ArrowUp size={19} strokeWidth={2.4} />
       )}
     </button>
   );
@@ -148,7 +148,7 @@ function SendButton({ canSend, uploading, overall, sending }: { canSend: boolean
 
 export default function ChatComposer({
   draft, setDraft, onSubmit, sending, agentName, attach, onPickFiles, onRemoveAttach,
-  mentionables, onMention, replyTo, onClearReply, chatId, autoMode, onToggleAuto,
+  mentionables, onMention, replyTo, onClearReply, chatId, autoMode, onToggleAuto, modelSlot, variant = "dock",
 }: {
   draft: string; setDraft: (v: string) => void; onSubmit: (e: React.FormEvent) => void; sending: boolean; agentName: string;
   attach: Attachment[]; onPickFiles: (f: File[]) => void; onRemoveAttach: (id: string) => void;
@@ -156,9 +156,13 @@ export default function ChatComposer({
   replyTo: { at: number; preview: string } | null; onClearReply: () => void;
   /** Optional: when given, the call button rings exactly this chat's agent. Without it the agent is found by its name. */
   chatId?: string;
-  /** Automatic (true) or Manual (false): Automatic never asks before ordinary actions. Without onToggleAuto no button is shown. */
+  /** Automatic (true) or Manual (false): Automatic never asks before ordinary actions. Without onToggleAuto the switch is not shown. */
   autoMode?: boolean;
   onToggleAuto?: () => void;
+  /** The model button (the pill) shown in the bottom row of the message box. */
+  modelSlot?: React.ReactNode;
+  /** "hero" = the big box of a brand-new chat, "dock" = the box under a running conversation. */
+  variant?: "hero" | "dock";
   /** @deprecated The computer and template buttons no longer live beside the message box. Kept so older callers still compile. */
   hasComputerKey?: boolean;
   /** @deprecated see hasComputerKey */
@@ -170,21 +174,71 @@ export default function ChatComposer({
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const plusRef = useRef<HTMLDivElement>(null);
   const [caret, setCaret] = useState(0);
   const [closed, setClosed] = useState(false);
   const [idx, setIdx] = useState(0);
   const [dragging, setDragging] = useState(false);
+  const [plusOpen, setPlusOpen] = useState(false);
   const dragDepth = useRef(0);
   const { user } = useAuth();
   const router = useRouter();
   const [deckBusy, setDeckBusy] = useState(false);
   const [deckSecs, setDeckSecs] = useState(0);
+  const hero = variant === "hero";
+
+  // ---- dictation: the mic button types what you say into the box (only where the browser can do it)
+  const recRef = useRef<{ stop: () => void } | null>(null);
+  const baseRef = useRef("");
+  const [canDictate, setCanDictate] = useState(false);
+  const [listening, setListening] = useState(false);
+  useEffect(() => {
+    const w = window as unknown as Record<string, unknown>;
+    setCanDictate(Boolean(w.SpeechRecognition || w.webkitSpeechRecognition));
+    return () => { try { recRef.current?.stop(); } catch { /* already stopped */ } };
+  }, []);
+
+  function stopDictation() { try { recRef.current?.stop(); } catch { /* already stopped */ } }
+  function toggleDictation() {
+    if (listening) { stopDictation(); return; }
+    const w = window as unknown as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!SR) return;
+    const r = new SR();
+    r.lang = /^hi\b/i.test(navigator.language) ? "hi-IN" : navigator.language || "en-US";
+    r.interimResults = true;
+    r.continuous = true;
+    baseRef.current = draft ? draft.replace(/\s+$/, "") + " " : "";
+    r.onresult = (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => {
+      let s = "";
+      for (let i = 0; i < e.results.length; i++) s += e.results[i][0].transcript;
+      setDraft(baseRef.current + s);
+    };
+    r.onend = () => { setListening(false); recRef.current = null; };
+    r.onerror = () => { setListening(false); recRef.current = null; };
+    recRef.current = r;
+    try { r.start(); setListening(true); inputRef.current?.focus(); } catch { setListening(false); }
+  }
 
   useEffect(() => {
     if (!deckBusy) { setDeckSecs(0); return; }
     const id = window.setInterval(() => setDeckSecs((n) => n + 1), 1000);
     return () => window.clearInterval(id);
   }, [deckBusy]);
+
+  // the "+" menu closes on an outside tap and on Escape
+  useEffect(() => {
+    if (!plusOpen) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-plus-btn]")) return; // the + button toggles by itself
+      if (plusRef.current && !plusRef.current.contains(t as Node)) setPlusOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setPlusOpen(false); };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [plusOpen]);
 
   /**
    * "/deck <topic>", or a normal sentence that asks for a new presentation, makes the presentation right away with this chat's model
@@ -215,6 +269,7 @@ export default function ChatComposer({
   }
 
   function submit(e: React.FormEvent) {
+    stopDictation();
     // "/business ..." or "set up a team for my business": the Business Hub opens, and what was typed is sent there as the first message
     const hub = wantsBusinessHub(draft);
     if (hub !== null && attach.length === 0 && !replyTo) {
@@ -267,6 +322,8 @@ export default function ChatComposer({
   const overall = counted.length ? pct(counted.reduce((s, a) => s + (a.status === "ready" ? 1 : a.progress), 0) / counted.length) : 0;
   const canSend = (Boolean(draft.trim()) || hasReady) && !sending && !uploading;
   const full = attach.length >= MAX_ATTACH_FILES;
+  // an empty box shows the voice-call button where the send arrow will be (like the waveform button in Claude)
+  const showCall = !canSend && !sending && !uploading;
 
   function pick(a: Mentionable) {
     if (!m) return;
@@ -281,6 +338,13 @@ export default function ChatComposer({
     requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(pos, pos); });
   }
 
+  /** put some text at the start of the box (used by the "+" menu) and focus it */
+  function seed(text: string) {
+    setDraft(text + draft);
+    setPlusOpen(false);
+    requestAnimationFrame(() => { const el = inputRef.current; if (el) { el.focus(); const p = text.length + draft.length; el.setSelectionRange(p, p); setCaret(p); } });
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (open) {
       if (e.key === "ArrowDown") { e.preventDefault(); setIdx((active + 1) % Math.max(1, matches.length)); return; }
@@ -291,6 +355,9 @@ export default function ChatComposer({
     if (e.key === "Escape" && replyTo) { e.preventDefault(); onClearReply(); return; }
     // Enter sends, Shift+Enter writes a new line (never while an IME / voice keyboard is still composing)
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      // on a phone the Enter key writes a new line (the arrow button sends); on a computer Enter sends
+      const phone = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches && window.innerWidth < 768;
+      if (phone) return;
       e.preventDefault();
       if (canSend) e.currentTarget.form?.requestSubmit();
     }
@@ -304,8 +371,10 @@ export default function ChatComposer({
       ? "Say what to do with the file(s)… or just press send"
       : `Message ${agentName}`;
 
+  const roundBtn = "press flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-panel2 text-muted transition-colors hover:text-ink sm:h-9 sm:w-9";
+
   return (
-    <div className="mx-auto w-full max-w-2xl px-3 pb-[max(0.75rem,var(--sab))] pt-2 sm:px-6">
+    <div className={`mx-auto w-full max-w-2xl px-3 pt-2 sm:px-6 ${hero ? "pb-3" : "pb-[max(0.75rem,var(--sab))]"}`}>
       <style>{CSS}</style>
 
       {replyTo && (
@@ -337,8 +406,9 @@ export default function ChatComposer({
           const f = Array.from(e.dataTransfer?.files ?? []);
           if (f.length) { e.preventDefault(); onPickFiles(f); }
         }}
-        className="relative flex w-full items-end gap-1.5"
+        className="relative w-full"
       >
+        {/* @mention list */}
         {open && (
           <div role="listbox" aria-label="Mention an agent" className="cc-in glass-m absolute bottom-full left-0 right-0 z-20 mb-2 overflow-hidden rounded-2xl border border-line bg-panel shadow-2xl">
             <p className="flex items-center gap-1.5 border-b border-line px-3 py-1.5 text-[11px] text-faint">
@@ -368,12 +438,47 @@ export default function ChatComposer({
           </div>
         )}
 
-        <div className="pb-2"><CallButton agentName={agentName} chatId={chatId} /></div>
+        {/* the "+" menu */}
+        {plusOpen && (
+          <div ref={plusRef} role="menu" className="cc-in absolute bottom-full left-0 z-30 mb-2 w-[min(300px,calc(100vw-1.5rem))] overflow-hidden rounded-3xl border border-line bg-panel p-1.5 shadow-2xl">
+            <button type="button" role="menuitem" onClick={() => { setPlusOpen(false); fileRef.current?.click(); }} className="press flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm text-ink hover:bg-panel2">
+              <Paperclip size={17} className="text-muted" />
+              <span className="min-w-0 flex-1"><span className="block">Add files or photos</span><span className="block text-[11px] text-faint">{full ? `Up to ${MAX_ATTACH_FILES} files at a time` : "Photo, video, zip, PDF or any file"}</span></span>
+            </button>
+            {chatId && (
+              <button type="button" role="menuitem" onClick={() => seed("/deck ")} className="press flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm text-ink hover:bg-panel2">
+                <Presentation size={17} className="text-muted" />
+                <span className="min-w-0 flex-1"><span className="block">Make a presentation</span><span className="block text-[11px] text-faint">Slides in one or two minutes</span></span>
+              </button>
+            )}
+            {mentionables.length > 0 && (
+              <button type="button" role="menuitem" onClick={() => seed("@")} className="press flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm text-ink hover:bg-panel2">
+                <AtSign size={17} className="text-muted" />
+                <span className="min-w-0 flex-1"><span className="block">Use another agent</span><span className="block text-[11px] text-faint">Bring its work into this task</span></span>
+              </button>
+            )}
+            {onToggleAuto && (
+              <>
+                <div className="mx-2 my-1 h-px bg-line" />
+                <button type="button" role="menuitemcheckbox" aria-checked={Boolean(autoMode)} onClick={() => onToggleAuto()} className="press flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm text-ink hover:bg-panel2">
+                  {autoMode ? <Zap size={17} className="text-gold" /> : <Hand size={17} className="text-muted" />}
+                  <span className="min-w-0 flex-1">
+                    <span className="block">{autoMode ? "Automatic" : "Manual"}</span>
+                    <span className="block text-[11px] text-faint">{autoMode ? "Works without asking. Still asks before spending money or deleting." : "Asks before sending, posting or changing things."}</span>
+                  </span>
+                  <span className={`relative h-6 w-10 shrink-0 rounded-full transition-colors ${autoMode ? "bg-gold" : "bg-line"}`}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${autoMode ? "left-[18px]" : "left-0.5"}`} />
+                  </span>
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
-        {/* the message box: files + their progress, the text, the attach button and the send arrow, all inside */}
+        {/* the message box: files + their progress, the text, and a bottom row with + / model / mic / send */}
         <div
-          className={`glass-m relative min-w-0 flex-1 overflow-hidden rounded-[26px] border bg-panel transition-[border-color,box-shadow] duration-200 ${
-            dragging ? "border-gold shadow-[0_0_0_3px_rgba(231,178,77,.18)]" : "border-line focus-within:border-gold/60 focus-within:shadow-[0_0_0_3px_rgba(231,178,77,.08)]"
+          className={`glass-m relative overflow-hidden rounded-[30px] border bg-panel transition-[border-color,box-shadow] duration-200 ${
+            dragging ? "border-gold shadow-[0_0_0_3px_rgba(231,178,77,.18)]" : "border-line focus-within:border-gold/50 focus-within:shadow-[0_0_0_3px_rgba(231,178,77,.07)]"
           }`}
         >
           {uploading && (
@@ -389,7 +494,7 @@ export default function ChatComposer({
           )}
 
           {attach.length > 0 && (
-            <div className="border-b border-line/70 px-2.5 pb-2 pt-2.5">
+            <div className="border-b border-line/70 px-3 pb-2 pt-3">
               <div className="cc-strip flex gap-2 overflow-x-auto" role="list" aria-label="Attached files">
                 {attach.map((a) => (
                   <FileChip key={a.id} a={a} onRemove={() => onRemoveAttach(a.id)} />
@@ -405,61 +510,84 @@ export default function ChatComposer({
             </div>
           )}
 
-          <div className="flex items-end gap-1 px-1.5 py-1.5">
-            <input ref={fileRef} type="file" multiple hidden onChange={(e) => { const f = Array.from(e.target.files ?? []); e.target.value = ""; if (f.length) onPickFiles(f); }} />
+          <input ref={fileRef} type="file" multiple hidden onChange={(e) => { const f = Array.from(e.target.files ?? []); e.target.value = ""; if (f.length) onPickFiles(f); }} />
+
+          <textarea
+            ref={inputRef}
+            rows={hero ? 2 : 1}
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); syncCaret(e.target); setClosed(false); setIdx(0); }}
+            onKeyDown={onKeyDown}
+            onPaste={(e) => { const f = Array.from(e.clipboardData?.files ?? []); if (f.length) { e.preventDefault(); onPickFiles(f); } }}
+            onKeyUp={(e) => syncCaret(e.currentTarget)}
+            onClick={(e) => syncCaret(e.currentTarget)}
+            onSelect={(e) => syncCaret(e.currentTarget)}
+            autoComplete="off"
+            autoCorrect="off"
+            enterKeyHint="enter"
+            aria-label={`Message ${agentName}`}
+            placeholder={placeholder}
+            className={`cc-ta block w-full resize-none bg-transparent px-5 pb-1 pt-4 text-[16px] leading-[24px] text-ink placeholder:text-faint focus:outline-none ${hero ? "min-h-[72px]" : "min-h-[52px]"}`}
+            style={{ maxHeight: MAX_TEXTAREA_PX }}
+          />
+
+          <div className="flex items-center gap-2 px-2.5 pb-2.5 pt-1">
             <button
               type="button"
-              aria-label="Attach files (photo, video, zip, PDF, any file)"
-              title={full ? `Up to ${MAX_ATTACH_FILES} files at a time` : "Attach photo, video, zip, PDF or any file"}
-              onClick={() => fileRef.current?.click()}
-              className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-panel2 hover:text-ink active:scale-95 sm:h-9 sm:w-9"
+              aria-label="Add files, presentation or settings"
+              aria-haspopup="menu"
+              aria-expanded={plusOpen}
+              data-plus-btn=""
+              title="Add files and more"
+              onClick={() => setPlusOpen((v) => !v)}
+              className={`${roundBtn} relative ${plusOpen ? "text-ink" : ""}`}
             >
-              <Paperclip size={18} />
+              <Plus size={20} className={`transition-transform duration-200 ${plusOpen ? "rotate-45" : ""}`} />
               {attach.length > 0 && (
                 <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-gold px-1 text-[10px] font-semibold leading-none text-bg">{attach.length}</span>
               )}
             </button>
 
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={draft}
-              onChange={(e) => { setDraft(e.target.value); syncCaret(e.target); setClosed(false); setIdx(0); }}
-              onKeyDown={onKeyDown}
-              onPaste={(e) => { const f = Array.from(e.clipboardData?.files ?? []); if (f.length) { e.preventDefault(); onPickFiles(f); } }}
-              onKeyUp={(e) => syncCaret(e.currentTarget)}
-              onClick={(e) => syncCaret(e.currentTarget)}
-              onSelect={(e) => syncCaret(e.currentTarget)}
-              autoComplete="off"
-              autoCorrect="off"
-              enterKeyHint="send"
-              aria-label={`Message ${agentName}`}
-              placeholder={placeholder}
-              className="cc-ta min-h-[36px] min-w-0 flex-1 resize-none self-center bg-transparent px-1.5 py-[7px] text-[15px] leading-[22px] text-ink placeholder:text-faint focus:outline-none"
-              style={{ maxHeight: MAX_TEXTAREA_PX }}
-            />
+            <div className="min-w-0 shrink">{modelSlot}</div>
 
-            <SendButton canSend={canSend} uploading={uploading} overall={overall} sending={sending} />
+            {onToggleAuto && (
+              <button
+                type="button"
+                onClick={onToggleAuto}
+                aria-pressed={Boolean(autoMode)}
+                title={autoMode ? "Automatic: the agent does the work without asking. It still asks before spending money, deleting things, or acting on untrusted web content. Click for Manual." : "Manual: the agent asks before sending, posting or changing things. Click for Automatic."}
+                className={`press hidden h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors sm:flex ${autoMode ? "border-gold/50 bg-gold/10 text-gold" : "border-line bg-transparent text-muted hover:text-ink"}`}
+              >
+                {autoMode ? <Zap size={13} /> : <Hand size={13} />}
+                <span>{autoMode ? "Auto" : "Manual"}</span>
+              </button>
+            )}
+
+            <span className="min-w-2 flex-1" />
+
+            {canDictate && (
+              <button
+                type="button"
+                onClick={toggleDictation}
+                aria-pressed={listening}
+                aria-label={listening ? "Stop dictation" : "Dictate with your voice"}
+                title={listening ? "Stop dictation" : "Speak instead of typing"}
+                className={`${roundBtn} ${listening ? "animate-pulse !bg-red-500/15 !text-red-300" : ""}`}
+              >
+                <Mic size={19} />
+              </button>
+            )}
+
+            {showCall ? (
+              <CallButton agentName={agentName} chatId={chatId} variant="voice" />
+            ) : (
+              <SendButton canSend={canSend} uploading={uploading} overall={overall} sending={sending} />
+            )}
           </div>
         </div>
-
-        {onToggleAuto && (
-          <div className="pb-2">
-            <button
-              type="button"
-              onClick={onToggleAuto}
-              aria-pressed={Boolean(autoMode)}
-              title={autoMode ? "Automatic: the agent does the work without asking. It still asks before spending money, deleting things, or acting on untrusted web content. Click for Manual." : "Manual: the agent asks before sending, posting or changing things. Click for Automatic."}
-              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors active:scale-95 sm:h-9 ${autoMode ? "border-gold/60 bg-gold/15 text-gold" : "border-line bg-panel text-muted hover:text-ink"}`}
-            >
-              {autoMode ? <Zap size={14} /> : <Hand size={14} />}
-              <span>{autoMode ? "Auto" : "Manual"}</span>
-            </button>
-          </div>
-        )}
       </form>
 
-      {!draft && !attach.length && !replyTo && (
+      {!hero && !draft && !attach.length && !replyTo && (
         <p className="mt-1.5 hidden truncate px-12 text-center text-[11px] text-faint sm:block">
           @agent · /deck (or just ask for a presentation) · /code · /video · /team · /business · /deploy · /recipe &nbsp;—&nbsp; Shift+Enter for a new line
         </p>

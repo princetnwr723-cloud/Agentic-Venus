@@ -23,6 +23,7 @@ import {
 import BotAvatar from "@/components/BotAvatar";
 import AboutModal from "@/components/dashboard/AboutModal";
 import PaymentApprovals from "@/components/dashboard/PaymentApprovals";
+import ToolsMenu, { type ToolGroup, type ToolItem, type ToolTone } from "@/components/dashboard/ToolsMenu";
 import DeckStudio from "@/components/decks/DeckStudio";
 import { DeckIcon } from "@/components/icons";
 import GlassSheet from "@/components/ui/GlassSheet";
@@ -31,42 +32,39 @@ import type { AvatarColor } from "@/lib/bots";
 import { openDrawer, useDashFlag, useIsMobile } from "@/lib/mobile-ui";
 import { useHeaderButtons } from "@/lib/header-prefs";
 
-/** Below this header width the less-used buttons move into the "More" menu, so nothing ever overlaps the avatar. */
+/** Below this header width the less-used buttons are only reachable through the three dots, so nothing ever overlaps the avatar. */
 const COMPACT_BELOW = 720;
 
-type Item = {
+type Def = {
   key: string;
   label: string;
-  icon: React.ReactNode;
+  hint: string;
+  tone: ToolTone;
+  icon: (size: number) => React.ReactNode;
   onClick: () => void;
   active?: boolean;
   dot?: boolean;
-  /** stays visible even when the header is narrow */
+  /** stays on the header even when it is narrow */
   pinned?: boolean;
+  words?: string;
+  /** only shown on a computer */
+  desktopOnly?: boolean;
 };
 
-type Tone = "gold" | "violet" | "teal" | "sky";
-const TONE: Record<Tone, string> = {
-  gold: "bg-gold/15 text-gold",
-  violet: "bg-avatar-violet/15 text-avatar-violet",
-  teal: "bg-avatar-teal/15 text-avatar-teal",
-  sky: "bg-avatar-sky/15 text-avatar-sky",
-};
-
-function IconBtn({ item }: { item: Item }) {
+function IconBtn({ d }: { d: Def }) {
   return (
     <button
       type="button"
-      onClick={item.onClick}
-      title={item.label}
-      aria-label={item.label}
-      aria-pressed={item.active}
+      onClick={d.onClick}
+      title={d.label}
+      aria-label={d.label}
+      aria-pressed={d.active}
       className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-panel2 hover:text-ink active:scale-95 ${
-        item.active ? "bg-panel2 text-ink" : "text-muted"
+        d.active ? "bg-panel2 text-ink" : "text-muted"
       }`}
     >
-      {item.icon}
-      {item.dot && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-gold" />}
+      {d.icon(16)}
+      {d.dot && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-gold" />}
     </button>
   );
 }
@@ -93,6 +91,7 @@ export default function ChatHeader({
   pcOpen,
   hasComputer,
   pcPaused,
+  minimal = false,
 }: {
   name: string;
   color: AvatarColor;
@@ -115,6 +114,8 @@ export default function ChatHeader({
   pcOpen: boolean;
   hasComputer: boolean;
   pcPaused: boolean;
+  /** a brand-new chat on a phone: only the menu and the avatar, like the start screen of Claude */
+  minimal?: boolean;
 }) {
   const busy = useAnyActivity();
   useAvatarStore();
@@ -145,7 +146,7 @@ export default function ChatHeader({
     return () => ro.disconnect();
   }, []);
 
-  // the menu closes on an outside tap and on Escape
+  // the popover closes on an outside tap and on Escape
   useEffect(() => {
     if (!menuOpen) return;
     const onDown = (e: PointerEvent) => {
@@ -156,81 +157,85 @@ export default function ChatHeader({
     document.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
   }, [menuOpen]);
-  useEffect(() => { if (!mobile) setSheet(false); }, [mobile]);
+  useEffect(() => { if (!mobile) setSheet(false); else setMenuOpen(false); }, [mobile]);
 
-  const pcLabel = !hasComputer
-    ? "Computer (not created yet)"
-    : pcPaused
-    ? "Computer (off · saved)"
-    : "Computer";
   const pcHint = !hasComputer ? "Not created yet" : pcPaused ? "Off · saved" : "On";
+  const pcLabel = !hasComputer ? "Computer (not created yet)" : pcPaused ? "Computer (off · saved)" : "Computer";
 
-  const items: Item[] = [
-    { key: "profile", label: "Profile & email", icon: <User size={16} />, onClick: onIdentity },
-    { key: "code", label: "Venus Code", icon: <Code2 size={16} />, onClick: onCode },
-    { key: "venus", label: "Venus Pro (video)", icon: <Film size={16} />, onClick: onVenus },
-    { key: "decks", label: "Decks (presentations)", icon: <DeckIcon size={17} />, onClick: () => setDeckOpen(true), active: deckOpen },
-    { key: "vmaps", label: "Vmaps (maps & leads)", icon: <MapPin size={16} />, onClick: () => router.push("/vmaps") },
-    { key: "skills", label: "Memory & Skills", icon: <Brain size={16} />, onClick: onSkills },
-    { key: "runs", label: "Runs", icon: <Activity size={16} />, onClick: onRuns },
-    { key: "vpassword", label: "vPassword", icon: <KeyRound size={16} />, onClick: onVpassword },
-    { key: "connectors", label: "Connectors", icon: <Plug size={16} />, onClick: onConnectors, dot: hasConnectors },
-    { key: "routines", label: "Routines", icon: <Clock size={16} />, onClick: onRoutines, dot: hasRoutines },
-    { key: "team", label: "Team", icon: <Users size={16} />, onClick: onTeam, active: teamOpen, dot: teamRunning, pinned: true },
-    { key: "pc", label: pcLabel, icon: <Monitor size={16} />, onClick: onPc, active: pcOpen, dot: hasComputer && !pcPaused, pinned: true },
+  const defs: Def[] = [
+    { key: "pc", label: pcLabel, hint: pcHint, tone: "teal", icon: (s) => <Monitor size={s} />, onClick: onPc, active: pcOpen, dot: hasComputer && !pcPaused, pinned: true, words: "computer pc browser screen" },
+    { key: "team", label: "Team", hint: teamRunning ? "Working" : "Add teammates", tone: "violet", icon: (s) => <Users size={s} />, onClick: onTeam, active: teamOpen, dot: teamRunning, pinned: true, words: "agents members" },
+    { key: "routines", label: "Routines", hint: hasRoutines ? "Active" : "Schedule tasks", tone: "gold", icon: (s) => <Clock size={s} />, onClick: onRoutines, dot: hasRoutines, words: "schedule repeat" },
+    { key: "runs", label: "Runs", hint: "Background tasks", tone: "sky", icon: (s) => <Activity size={s} />, onClick: onRuns, words: "missions jobs" },
+    { key: "vmaps", label: "Vmaps", hint: "Maps & leads", tone: "teal", icon: (s) => <MapPin size={s} />, onClick: () => router.push("/vmaps"), words: "map leads places" },
+    { key: "code", label: "Venus Code", hint: "Build & deploy", tone: "sky", icon: (s) => <Code2 size={s} />, onClick: onCode, words: "code website app project" },
+    { key: "venus", label: "Venus Pro", hint: "Video studio", tone: "violet", icon: (s) => <Film size={s} />, onClick: onVenus, words: "video reel editor" },
+    { key: "decks", label: "Decks", hint: "Make presentations", tone: "violet", icon: (s) => <DeckIcon size={s + 1} />, onClick: () => setDeckOpen(true), active: deckOpen, words: "slides presentation ppt" },
+    { key: "skills", label: "Memory & Skills", hint: "What it knows", tone: "gold", icon: (s) => <Brain size={s} />, onClick: onSkills, words: "brain memory skills" },
+    { key: "connectors", label: "Connectors", hint: hasConnectors ? "Connected" : "Link your tools", tone: "teal", icon: (s) => <Plug size={s} />, onClick: onConnectors, dot: hasConnectors, words: "gmail github shopify mcp" },
+    { key: "vpassword", label: "vPassword", hint: "Logins & cards vault", tone: "sky", icon: (s) => <KeyRound size={s} />, onClick: onVpassword, words: "password card vault login" },
+    { key: "profile", label: "Profile & email", hint: "Avatar, role, inbox", tone: "gold", icon: (s) => <User size={s} />, onClick: onIdentity, words: "identity avatar" },
     {
       key: "focus",
       label: focusMode ? "Exit focus mode" : "Focus mode",
-      icon: focusMode ? <Minimize2 size={16} /> : <Maximize2 size={16} />,
+      hint: focusMode ? "Show the chat list again" : "Hide the chat list",
+      tone: "coral",
+      icon: (s) => (focusMode ? <Minimize2 size={s} /> : <Maximize2 size={s} />),
       onClick: onToggleFocus,
       active: focusMode,
       pinned: true,
+      desktopOnly: true,
     },
   ];
 
-  // the owner picks the header buttons in About → "Header buttons"; the rest stay in the More menu
-  const onHeader = (i: Item) => shownKeys.includes(i.key) && (!compact || i.pinned);
-  const visible = items.filter(onHeader);
-  const hidden = items.filter((i) => !onHeader(i));
-  const hiddenDot = hidden.some((i) => i.dot);
+  const byKey = new Map(defs.map((d) => [d.key, d]));
+  const toItem = (d: Def): ToolItem => ({ key: d.key, label: d.label, hint: d.hint, tone: d.tone, icon: d.icon(18), onClick: d.onClick, dot: d.dot, active: d.active, words: d.words });
+  const groupOf = (title: string, keys: string[]): ToolGroup => ({
+    title,
+    items: keys
+      .map((k) => byKey.get(k))
+      .filter((d): d is Def => Boolean(d) && (!d!.desktopOnly || !mobile))
+      .map(toItem),
+  });
+  const groups: ToolGroup[] = [
+    groupOf("Work", ["pc", "team", "routines", "runs", "vmaps"]),
+    groupOf("Create", ["code", "venus", "decks"]),
+    groupOf("Brain & access", ["skills", "connectors", "vpassword"]),
+    groupOf("Agent", ["profile", "focus"]),
+  ].filter((g) => g.items.length > 0);
 
-  // phone: the same actions, grouped by purpose inside one glass sheet
-  const byKey = new Map(items.map((i) => [i.key, i]));
-  const info: Record<string, { label: string; hint: string; tone: Tone }> = {
-    pc: { label: "Computer", hint: pcHint, tone: "teal" },
-    team: { label: "Team", hint: teamRunning ? "Working" : "Add teammates", tone: "violet" },
-    routines: { label: "Routines", hint: hasRoutines ? "Active" : "Schedule tasks", tone: "gold" },
-    runs: { label: "Runs", hint: "Background tasks", tone: "sky" },
-    vmaps: { label: "Vmaps", hint: "Maps & leads", tone: "teal" },
-    code: { label: "Venus Code", hint: "Build & deploy", tone: "sky" },
-    venus: { label: "Venus Pro", hint: "Video studio", tone: "violet" },
-    decks: { label: "Decks", hint: "Make presentations", tone: "violet" },
-    skills: { label: "Memory & Skills", hint: "What it knows", tone: "gold" },
-    connectors: { label: "Connectors", hint: hasConnectors ? "Connected" : "Link your tools", tone: "teal" },
-    vpassword: { label: "vPassword", hint: "Logins vault", tone: "sky" },
-    profile: { label: "Profile & email", hint: "Avatar, role, inbox", tone: "gold" },
-  };
-  const groups: Array<{ title: string; keys: string[] }> = [
-    { title: "Work", keys: ["pc", "team", "routines", "runs", "vmaps"] },
-    { title: "Create", keys: ["code", "venus", "decks"] },
-    { title: "Brain & access", keys: ["skills", "connectors", "vpassword"] },
-    { title: "Agent", keys: ["profile"] },
-  ];
-  const run = (fn: () => void) => {
+  // the owner picks the header buttons in About → "Header buttons"; every tool is always in the three dots too
+  const onHeader = (d: Def) => shownKeys.includes(d.key) && (!compact || d.pinned) && (!d.desktopOnly || !mobile);
+  const visible = defs.filter((d) => d.key !== "pc" && onHeader(d));
+  const hiddenDot = defs.some((d) => d.key !== "pc" && !visible.includes(d) && d.dot);
+
+  const pcDef = byKey.get("pc") as Def;
+
+  // pick a tool: the sheet / popover slides away first, then the tool opens
+  const pick = (fn: () => void) => {
     setSheet(false);
-    setTimeout(fn, 170); // let the sheet slide away first
+    setMenuOpen(false);
+    window.setTimeout(fn, mobile ? 170 : 0);
   };
-  let n = 0;
 
-  const pcItem = byKey.get("pc");
+  const customize = (
+    <button
+      type="button"
+      onClick={() => { setMenuOpen(false); setSheet(false); setAboutOpen(true); }}
+      className="press mt-1 flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm text-muted transition-colors hover:bg-panel2 hover:text-ink"
+    >
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center"><Settings2 size={16} /></span>
+      Customize header buttons
+    </button>
+  );
+
+  const shellCls =
+    "glass-m relative z-30 flex items-center justify-between gap-2 border-b border-line bg-panel/80 px-3 pb-2.5 pt-[calc(var(--sat)+0.625rem)] backdrop-blur sm:px-5 sm:pb-3 sm:pt-[calc(var(--sat)+0.75rem)]";
 
   return (
     <>
       <PaymentApprovals />
-      <header
-        ref={headerRef}
-        className="glass-m relative z-30 flex items-center justify-between gap-2 border-b border-line px-3 pb-2.5 pt-[calc(var(--sat)+0.625rem)] sm:px-5 sm:pb-3 sm:pt-[calc(var(--sat)+0.75rem)]"
-      >
+      <header ref={headerRef} className={shellCls}>
         {mobile && (
           <button
             type="button"
@@ -238,148 +243,110 @@ export default function ChatHeader({
             aria-label="Chats"
             className="press -ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-ink"
           >
-            <Menu size={21} />
+            <Menu size={22} />
           </button>
         )}
 
-        {/* the avatar never shrinks, so the buttons can no longer slide over it */}
-        <button
-          type="button"
-          onClick={onIdentity}
-          title="Open profile · change avatar"
-          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg py-0.5 pl-1 pr-2 text-left hover:bg-panel2/60"
-        >
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center">
-            <BotAvatar color={shown} size={40} working={working} />
-          </span>
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-medium text-ink">{name}</span>
-            {mobile && (
-              <span className="flex items-center gap-1.5 text-[11px] text-muted">
-                <span className={`h-1.5 w-1.5 rounded-full ${working ? "animate-pulse bg-gold" : "bg-avatar-teal"}`} />
-                {working ? "Working…" : "Online"}
-              </span>
-            )}
-          </span>
-        </button>
-
-        {mobile ? (
-          /* phone: only two buttons, everything else is in the sheet */
-          <div className="flex shrink-0 items-center gap-1">
-            {pcItem && (
-              <button
-                type="button"
-                onClick={pcItem.onClick}
-                aria-label={pcItem.label}
-                className={`press relative flex h-10 w-10 items-center justify-center rounded-full ${
-                  pcItem.active ? "bg-white/15 text-ink" : "text-muted"
-                }`}
-              >
-                <Monitor size={19} />
-                {pcItem.dot && (
-                  <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-gold shadow-[0_0_8px_rgba(231,178,77,0.9)]" />
-                )}
-              </button>
-            )}
+        {mobile && minimal ? (
+          <>
+            <span className="min-w-0 flex-1" />
             <button
               type="button"
-              onClick={() => setSheet(true)}
-              aria-label="More"
-              className="press relative flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-ink"
+              onClick={onIdentity}
+              aria-label={`Open ${name}'s profile`}
+              title={`${name} · profile`}
+              className="press flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
             >
-              <MoreHorizontal size={20} />
-              {hiddenDot && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-gold" />}
+              <BotAvatar color={shown} size={32} working={working} />
             </button>
-          </div>
+          </>
         ) : (
-          <div className="flex shrink-0 items-center justify-end gap-0.5">
-            {visible.map((i) => <IconBtn key={i.key} item={i} />)}
+          <>
+            {/* the avatar never shrinks, so the buttons can never slide over it */}
+            <button
+              type="button"
+              onClick={onIdentity}
+              title="Open profile · change avatar"
+              className="flex min-w-0 flex-1 items-center gap-3 rounded-xl py-0.5 pl-1 pr-2 text-left hover:bg-panel2/60"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center">
+                <BotAvatar color={shown} size={40} working={working} />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-[15px] font-medium text-ink md:text-sm">{name}</span>
+                <span className="flex items-center gap-1.5 text-[11px] text-muted">
+                  <span className={`h-1.5 w-1.5 rounded-full ${working ? "animate-pulse bg-gold" : "bg-avatar-teal"}`} />
+                  {working ? "Working…" : "Online"}
+                </span>
+              </span>
+            </button>
 
-            <div ref={menuRef} className="relative">
-              <button
-                type="button"
-                onClick={() => setMenuOpen((v) => !v)}
-                title="More"
-                aria-label="More"
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-                className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-panel2 hover:text-ink active:scale-95 ${
-                  menuOpen ? "bg-panel2 text-ink" : "text-muted"
-                }`}
-              >
-                <MoreHorizontal size={18} />
-                {hiddenDot && !menuOpen && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-gold" />}
-              </button>
-
-              {menuOpen && (
-                <div
-                  role="menu"
-                  className="absolute right-0 top-full z-50 mt-2 w-60 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl border border-line bg-panel p-1.5 shadow-2xl"
+            {mobile ? (
+              /* phone: the computer button and the three dots, nothing else */
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={pcDef.onClick}
+                  aria-label={pcDef.label}
+                  title={pcDef.label}
+                  className={`press relative flex h-10 w-10 items-center justify-center rounded-full ${
+                    pcDef.active ? "bg-white/15 text-ink" : "text-muted"
+                  }`}
                 >
-                  {hidden.map((i) => (
-                    <button
-                      key={i.key}
-                      type="button"
-                      role="menuitem"
-                      onClick={() => { setMenuOpen(false); i.onClick(); }}
-                      className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-ink transition-colors hover:bg-panel2"
-                    >
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-muted">{i.icon}</span>
-                      <span className="min-w-0 flex-1 truncate">{i.label}</span>
-                      {i.dot && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-gold" />}
-                    </button>
-                  ))}
-                  {hidden.length > 0 && <div className="my-1 h-px bg-line" />}
+                  <Monitor size={20} />
+                  {pcDef.dot && (
+                    <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-gold shadow-[0_0_8px_rgba(231,178,77,0.9)]" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSheet(true)}
+                  aria-label="All tools"
+                  title="All tools"
+                  className="press relative flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-ink"
+                >
+                  <MoreHorizontal size={21} />
+                  {hiddenDot && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-gold" />}
+                </button>
+              </div>
+            ) : (
+              <div className="flex shrink-0 items-center justify-end gap-0.5">
+                {visible.map((d) => <IconBtn key={d.key} d={d} />)}
+                <IconBtn d={pcDef} />
+
+                <div ref={menuRef} className="relative">
                   <button
                     type="button"
-                    role="menuitem"
-                    onClick={() => { setMenuOpen(false); setAboutOpen(true); }}
-                    className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-muted transition-colors hover:bg-panel2 hover:text-ink"
+                    onClick={() => setMenuOpen((v) => !v)}
+                    title="All tools"
+                    aria-label="All tools"
+                    aria-haspopup="menu"
+                    aria-expanded={menuOpen}
+                    className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-panel2 hover:text-ink active:scale-95 ${
+                      menuOpen ? "bg-panel2 text-ink" : "text-muted"
+                    }`}
                   >
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center"><Settings2 size={16} /></span>
-                    <span className="min-w-0 flex-1 truncate">Customize header</span>
+                    <MoreHorizontal size={18} />
+                    {hiddenDot && !menuOpen && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-gold" />}
                   </button>
+
+                  {menuOpen && (
+                    <div
+                      role="menu"
+                      className="cc-in absolute right-0 top-full z-50 mt-2 max-h-[min(78vh,640px)] w-[360px] max-w-[calc(100vw-1.5rem)] overflow-y-auto overscroll-contain rounded-3xl border border-line bg-panel p-3 shadow-2xl"
+                    >
+                      <ToolsMenu groups={groups} onPick={pick} footer={customize} compact />
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
+              </div>
+            )}
+          </>
         )}
       </header>
 
-      <GlassSheet open={sheet} onClose={() => setSheet(false)} title="Everything your agent can do">
-        {groups.map((g) => (
-          <section key={g.title} className="mb-4">
-            <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-wider text-faint">{g.title}</p>
-            <div className="grid grid-cols-2 gap-2.5">
-              {g.keys.map((k) => {
-                const it = byKey.get(k);
-                const meta = info[k];
-                if (!it || !meta) return null;
-                const delay = 40 + n++ * 45;
-                return (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => run(it.onClick)}
-                    style={{ animationDelay: `${delay}ms` }}
-                    className="tile-in press relative flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.06] p-3 text-left"
-                  >
-                    <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl [&>svg]:h-[19px] [&>svg]:w-[19px] ${TONE[meta.tone]}`}>
-                      {it.icon}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-[13px] font-medium text-ink">{meta.label}</span>
-                      <span className="block truncate text-[11px] text-muted">{meta.hint}</span>
-                    </span>
-                    {it.dot && (
-                      <span className="absolute right-2.5 top-2.5 h-1.5 w-1.5 rounded-full bg-gold shadow-[0_0_8px_rgba(231,178,77,0.9)]" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        ))}
+      <GlassSheet open={sheet} onClose={() => setSheet(false)} title="Tools">
+        <ToolsMenu groups={groups} onPick={pick} footer={customize} />
       </GlassSheet>
 
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />

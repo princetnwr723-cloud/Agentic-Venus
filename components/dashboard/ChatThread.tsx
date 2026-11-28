@@ -173,7 +173,7 @@ export default function ChatThread({
   }, [messages, pending, busy, toBottom]);
 
   return (
-    <div ref={root} className="space-y-4">
+    <div ref={root} className="space-y-5">
       {messages.map((m, i) => {
         const isAssistant = m.role === "assistant";
         const { body, next, empty, toolName } = viewOf(m);
@@ -204,7 +204,7 @@ export default function ChatThread({
         return (
           <div key={i} data-msg={i} className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}>
             {m.role === "user" ? (
-              <div className="flex max-w-[75%] flex-col items-end gap-1">
+              <div className="flex max-w-[88%] flex-col items-end gap-1 sm:max-w-[80%]">
                 {m.replyTo && (
                   <div className="flex max-w-full items-start gap-1.5 rounded-lg border-l-2 border-gold/70 bg-panel px-2.5 py-1.5 text-[11px] text-muted">
                     <CornerUpLeft size={12} className="mt-0.5 shrink-0 text-gold" />
@@ -220,16 +220,16 @@ export default function ChatThread({
                           {sent.files.map((f, k) => <AttachCard key={k} name={f.name} kind={f.kind as AttachKind} preview={f.id ? previewFor(f.id) : undefined} />)}
                         </div>
                       )}
-                      {(sent.text.trim() || sent.files.length === 0) && <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md bg-ink px-4 py-2.5 text-sm leading-relaxed text-bg">{sent.text}</div>}
+                      {(sent.text.trim() || sent.files.length === 0) && <div className="whitespace-pre-wrap break-words rounded-[22px] bg-panel2 px-4 py-2.5 text-[15px] leading-relaxed text-ink">{sent.text}</div>}
                     </>
                   );
                 })()}
               </div>
             ) : (
-              <div className="w-full max-w-[85%]">
+              <div className="w-full max-w-full">
                 {agentName && !sameSpeaker && <p className="mb-1 ml-1 text-[11px] font-medium tracking-wide text-faint">{agentName}</p>}
                 {showBubble && (
-                  <div className={`rounded-2xl rounded-tl-md border bg-panel2 px-4 py-3 text-sm leading-relaxed text-ink shadow-panel transition-colors ${active ? "border-gold/70" : "border-line"}`}>
+                  <div className={`rounded-2xl text-[15px] leading-relaxed text-ink transition-colors ${active ? "bg-gold/10 px-3 py-2 ring-1 ring-gold/50" : "px-0.5 py-1"}`}>
                     {st.s && (
                       <div className={`mb-2.5 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${st.s.cls}`}>
                         <st.s.Icon size={13} /> {st.s.label}
@@ -287,7 +287,7 @@ export default function ChatThread({
               </button>
             )}
             {isAssistant && isLast && next.length > 0 && onSuggest && (
-              <div className="mt-2 flex max-w-[85%] flex-wrap gap-2">
+              <div className="mt-2 flex max-w-full flex-wrap gap-2">
                 {next.map((n) => (
                   <button
                     key={n}
@@ -306,7 +306,7 @@ export default function ChatThread({
 
       {pending && (
         <div className="flex justify-start">
-          <div className="flex items-center gap-1 rounded-2xl rounded-tl-md border border-line bg-panel2 px-4 py-3">
+          <div className="flex items-center gap-1.5 px-1 py-3">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:150ms]" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-faint [animation-delay:300ms]" />
