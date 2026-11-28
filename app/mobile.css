@@ -80,6 +80,8 @@
 @keyframes blob-b { to { transform: translate(-80px, 60px) scale(1.12); } }
 @keyframes blob-c { to { transform: translate(60px, -70px) scale(1.2); } }
 
+@keyframes cc-in { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+
 .gs-fade-in { animation: fade-in 0.3s ease both; }
 .gs-fade-out { animation: fade-out 0.24s ease forwards; }
 .gs-up { animation: gs-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
@@ -88,6 +90,16 @@
 .list-in { animation: list-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .rise { animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .float-y { animation: float-y 5s ease-in-out infinite; }
+
+.cc-in { animation: cc-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.cc-strip { scrollbar-width: none; -ms-overflow-style: none; }
+.cc-strip::-webkit-scrollbar { display: none; }
+
+/* the calm serif of the "Evening, <name>" greeting on the new-chat screen */
+.av-serif {
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", "Noto Serif", Georgia, "Times New Roman", serif;
+  letter-spacing: -0.015em;
+}
 
 .shine { position: relative; overflow: hidden; }
 .shine::after {
@@ -202,7 +214,23 @@
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Tool pages (Venus Pro, Venus Code, vPassword, Skills, Runs, Vmaps)  */
+/* ------------------------------------------------------------------ */
+@media (max-width: 767px) {
+  /* every full-page tool keeps clear of the notch and the gesture bar */
+  html .min-h-screen.bg-bg { padding-top: var(--sat); padding-bottom: var(--sab); }
+  /* inputs never zoom the page on iPhone (16px text) */
+  html input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), html textarea, html select { font-size: 16px; }
+  /* tool pages: less side padding, bigger thumb targets */
+  html .min-h-screen.bg-bg .max-w-3xl, html .min-h-screen.bg-bg .max-w-5xl { padding-left: 1rem; padding-right: 1rem; }
+
+  /* the message box and the new-chat screen */
+  html[data-dash] .cc-ta { font-size: 16px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .cc-in,
   .gs-up, .gs-down, .tile-in, .list-in, .rise, .float-y, .shine::after, .blob,
   html[data-dash] body::before, html[data-dash] [data-msg],
   html[data-dash] aside.w-\[46\%\], html[data-dash] aside.w-\[62\%\] {
