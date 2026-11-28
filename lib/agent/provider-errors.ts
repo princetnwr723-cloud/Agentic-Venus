@@ -1,3 +1,4 @@
+
 // Turns the many error texts of 11 providers into ONE typed answer, so the loop knows what to do:
 // retry, switch provider, shrink the context, stop for the day, or tell the owner exactly what is wrong.
 
@@ -32,7 +33,8 @@ const RULES: Array<[ErrorCode, RegExp]> = [
   ["aborted", /\b(aborted|abort(ed)?error|cancell?ed by user)\b/i],
   ["context_exceeded", /(context[_ ]length|context window|maximum context|prompt is too long|input is too long|too many tokens|exceeds? the (model'?s )?(maximum|context)|request too large|reduce the length)/i],
   // the account has no money left: waiting does not help, only the owner (or another provider) can
-  ["no_credit", /(insufficient[_ ](quota|balance|funds)|credit balance|out of credits?|no credits?|balance is (too )?low|payment required|\b402\b)/i],
+  // only clear "money is gone" wording: a bare "402" or "no credit" somewhere in a longer text must not count (Gemini's per-minute quota errors are not this)
+  ["no_credit", /(insufficient[_ ](quota|balance|funds)|credit balance|out of credits?|(have|has) no credits?|no credits? (left|remaining)|credits? (are|is|have been) (depleted|exhausted)|prepayment credits?|balance is (too )?low|payment required|^402[\s:]|\s402:)/i],
   // a limit that resets by itself
   ["usage_limit", /(billing|quota exceeded|exceeded your current quota|usage limit|spend limit|monthly limit)/i],
   ["unauthorized", /(\b401\b|\b403\b|invalid[_ ]api[_ ]key|invalid x-api-key|incorrect api key|authentication|unauthori[sz]ed|permission[_ ]denied|api key not valid|forbidden)/i],
