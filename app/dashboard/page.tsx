@@ -46,6 +46,7 @@ import Sidebar from "@/components/dashboard/Sidebar";
 import ChatThread from "@/components/dashboard/ChatThread";
 import ChatHeader from "@/components/dashboard/ChatHeader";
 import ChatComposer, { type Mentionable } from "@/components/dashboard/ChatComposer";
+import NewChatScreen from "@/components/dashboard/NewChatScreen";
 import RunBar from "@/components/dashboard/RunBar";
 import RunBars from "@/components/dashboard/RunBars";
 import IdentityPanel from "@/components/dashboard/IdentityPanel";
@@ -1898,6 +1899,7 @@ export default function DashboardPage() {
               onRoutines={() => setRoutinesOpen(true)} hasRoutines={routines.some((r) => r.enabled)}
               onTeam={handleTeamClick} teamOpen={teamOpen} teamRunning={Boolean(teamRun)}
               onPc={handlePcClick} pcOpen={pcOpen} hasComputer={Boolean(activeSandboxId)} pcPaused={session.status === "paused"}
+              minimal={activeChat.messages.length === 0}
             />
           )}
 
@@ -1914,36 +1916,61 @@ export default function DashboardPage() {
             </div>
           ) : (
             <>
-              <div className="flex-1 overflow-y-auto px-6 py-6">
-                <div className="mx-auto max-w-2xl">
-                  <ChatThread
-                    chatId={activeChat.id}
-                    messages={activeChat.messages}
-                    pending={sending && !streaming && !activeWork}
-                    busy={sending || Boolean(activeWork)}
-                    onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }}
-                    onSuggest={(t) => void submitText(t)}
-                    onReply={(preview, at) => setReplyTo({ at, preview })}
-                    onRetry={(t) => void submitText(t)}
-                    replyingAt={replyTo?.at ?? null}
+              {activeChat.messages.length === 0 ? (
+                /* a brand-new chat: the start screen with the big message box (like Claude's new chat) */
+                <>
+                  <NewChatScreen
+                    agentName={activeChat.agentName} color={activeChat.agentColor}
+                    role={roleOf(activeChat.id) || PRESET_AGENTS.find((a) => a.name === activeChat.agentName)?.role}
+                    onIdentity={() => setIdentityOpen(true)} onFill={(t) => setDraft(t)}
+                  >
+                    <AgentDock uid={user.uid} chatId={activeChat.id} onDone={onServerRunDone} />
+                    <ChatComposer
+                      variant="hero"
+                      draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
+                      hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
+                      attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
+                      mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
+                      replyTo={replyTo} onClearReply={() => setReplyTo(null)}
+                      chatId={activeChat.id} autoMode={autoMode} onToggleAuto={toggleAuto}
+                      modelSlot={<ModelPicker variant="pill" provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} />}
+                    />
+                  </NewChatScreen>
+                </>
+              ) : (
+                <>
+                  <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+                    <div className="mx-auto max-w-2xl">
+                      <ChatThread
+                        chatId={activeChat.id}
+                        messages={activeChat.messages}
+                        pending={sending && !streaming && !activeWork}
+                        busy={sending || Boolean(activeWork)}
+                        onSaveAsRoutine={(t) => { setRoutinePrefill(t); setRoutinesOpen(true); }}
+                        onSuggest={(t) => void submitText(t)}
+                        onReply={(preview, at) => setReplyTo({ at, preview })}
+                        onRetry={(t) => void submitText(t)}
+                        replyingAt={replyTo?.at ?? null}
+                      />
+                      {/* the one run bar: a short generic line + timer, right under the last message (video / code / team runs and normal work all use it) */}
+                      {(activeWork || venusRun || serverVenus || codeRun || teamRun) && <RunBar key={activeChat.id} work={activeWork ?? null} venusRun={venusRun ?? serverVenus} codeRun={codeRun} teamRun={teamRun} />}
+                    </div>
+                  </div>
+                  {/* only the dock slot of the Progress panel stays above the message box (no run cards there any more) */}
+                  <RunBars venusRun={null} codeRun={null} teamRun={null} />
+                  {/* background agent: live answer, steps and the cards (approve / question / secret / take over) of this chat's server runs */}
+                  <AgentDock uid={user.uid} chatId={activeChat.id} onDone={onServerRunDone} />
+                  <ChatComposer
+                    draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
+                    hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
+                    attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
+                    mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
+                    replyTo={replyTo} onClearReply={() => setReplyTo(null)}
+                    chatId={activeChat.id} autoMode={autoMode} onToggleAuto={toggleAuto}
+                    modelSlot={<ModelPicker variant="pill" provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} />}
                   />
-                  {/* the one run bar: a short generic line + timer, right under the last message (video / code / team runs and normal work all use it) */}
-                  {(activeWork || venusRun || serverVenus || codeRun || teamRun) && <RunBar key={activeChat.id} work={activeWork ?? null} venusRun={venusRun ?? serverVenus} codeRun={codeRun} teamRun={teamRun} />}
-                </div>
-              </div>
-              {/* only the dock slot of the Progress panel stays above the message box (no run cards there any more) */}
-              <RunBars venusRun={null} codeRun={null} teamRun={null} />
-              {/* background agent: live answer, steps and the cards (approve / question / secret / take over) of this chat's server runs */}
-              <AgentDock uid={user.uid} chatId={activeChat.id} onDone={onServerRunDone} />
-              <div className="mx-auto w-full max-w-2xl px-6 pb-2"><ModelPicker provider={activeChat.provider} model={activeChat.model} apiKeys={apiKeys} onChange={handleModelChange} /></div>
-              <ChatComposer
-                draft={draft} setDraft={setDraft} onSubmit={handleSend} sending={sending} agentName={activeChat.agentName}
-                hasComputerKey={Boolean(e2bKey)} computerMode={computerMode} onToggleComputer={() => setComputerMode((v) => !v)}
-                attach={attach} onPickFiles={(f) => void handleAttachFiles(f)} onRemoveAttach={(id) => setAttach((cur) => { cur.filter((x) => x.id === id).forEach(revokePreview); return cur.filter((x) => x.id !== id); })}
-                mentionables={mentionables} onMention={(token, id) => { pickedRef.current[token] = id; }}
-                replyTo={replyTo} onClearReply={() => setReplyTo(null)}
-                chatId={activeChat.id} autoMode={autoMode} onToggleAuto={toggleAuto}
-              />
+                </>
+              )}
             </>
           )}
         </div>
