@@ -60,7 +60,7 @@ function CardBudget({ e, onSave, onReset }: { e: VpMeta; onSave: (v: { limit: st
       ) : (
         <p className="text-xs text-muted">Spent so far: {num(e.spent ?? 0)}. No total budget set.</p>
       )}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <input className={input} placeholder="Per payment" inputMode="decimal" value={v.limit} onChange={(x) => setV({ ...v, limit: x.target.value })} />
         <input className={input} placeholder="Total budget" inputMode="decimal" value={v.budget} onChange={(x) => setV({ ...v, budget: x.target.value })} />
         <input className={input} placeholder="Per day" inputMode="decimal" value={v.daily} onChange={(x) => setV({ ...v, daily: x.target.value })} />
@@ -169,7 +169,7 @@ export default function VPasswordPage() {
 
   return (
     <div className="min-h-screen bg-bg">
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-3xl px-4 py-6 md:px-6 md:py-8">
         <button onClick={() => router.push("/dashboard")} className="mb-4 flex items-center gap-1.5 text-xs text-muted hover:text-ink"><ArrowLeft size={14} /> Dashboard</button>
         <h1 className="flex items-center gap-2 text-xl font-semibold text-ink"><KeyRound size={20} className="text-gold" /> vPassword</h1>
         <p className="mt-1 text-sm leading-relaxed text-muted">
@@ -229,9 +229,9 @@ export default function VPasswordPage() {
               {field("site", "Only on this site (for example shop.com)")}
               <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={anySite} onChange={(e) => setAnySite(e.target.checked)} /> Any site (less safe: leave the site empty only if you really want this)</label>
               {field("number", "Card number")}
-              <div className="grid grid-cols-3 gap-2">{field("exp", "MM/YY")}{field("cvc", "CVC", "password")}{field("zip", "ZIP / PIN")}</div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{field("exp", "MM/YY")}{field("cvc", "CVC", "password")}{field("zip", "ZIP / PIN")}</div>
               {field("name", "Name on card")}
-              <div className="grid grid-cols-3 gap-2">{field("limit", "Per payment")}{field("budget", "Total budget")}{field("daily", "Per day")}</div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{field("limit", "Per payment")}{field("budget", "Total budget")}{field("daily", "Per day")}</div>
               <p className="text-[11px] leading-relaxed text-faint">The agent can never spend more than the total budget, the daily limit or the per-payment limit, and every payment asks you first (site and amount shown). These are checked on the server. For the strongest protection also use a card that has its own limit at your bank.</p>
             </>)}
             {kind === "session" && (<>
@@ -259,11 +259,11 @@ export default function VPasswordPage() {
                 </select>
               </div>
               <p className="text-[11px] leading-relaxed text-faint">A preset only fills the gateway address. Your username and password come from your own proxy account (check the address in your provider&apos;s dashboard, they change it sometimes). Many providers choose the country inside the username, for example <span className="text-muted">country-in</span>.</p>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 <select className={input} value={f.scheme} onChange={(e) => setF({ ...f, scheme: e.target.value })}><option value="http">http</option><option value="https">https</option></select>
                 <div className="col-span-2">{field("host", "Proxy host (for example proxy.example.com)")}</div>
               </div>
-              <div className="grid grid-cols-3 gap-2">{field("port", "Port")}{field("username", "Username")}{field("password", "Password", "password")}</div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{field("port", "Port")}{field("username", "Username")}{field("password", "Password", "password")}</div>
               <div className="grid grid-cols-2 gap-2">{field("tz", "Time zone (optional, Asia/Kolkata)")}{field("lang", "Language (optional, en-IN)")}</div>
               <p className="text-[11px] leading-relaxed text-faint">Set the time zone and language to match the proxy&apos;s country: sites compare them with the IP.</p>
             </>)}
