@@ -133,6 +133,21 @@ export default function VenusPage() {
   const [tool, setTool] = useState<"select" | "razor">("select");
   const [sel, setSel] = useState(0);
   const [tab, setTab] = useState<"project" | "agent">("project");
+  // phone layout: one panel at a time, switched with the bar at the bottom (on a computer all panels show together)
+  const [mview, setMview] = useState<"preview" | "timeline" | "edit" | "agent">("preview");
+  const [vw, setVw] = useState(1200);
+  useEffect(() => {
+    const on = () => setVw(window.innerWidth);
+    on();
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  const phone = vw < 768;
+  const goView = (v: "preview" | "timeline" | "edit" | "agent") => {
+    setMview(v);
+    if (v === "edit") setTab("project");
+    if (v === "agent") setTab("agent");
+  };
   const [log, setLog] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ label: string; value: number | null } | null>(null);
   const [running, setRunning] = useState(false);
@@ -358,7 +373,7 @@ export default function VenusPage() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
       else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
       else if (e.key === " ") { e.preventDefault(); setPlaying((p) => !p); }
-      else if (e.key === "/") { e.preventDefault(); setTab("agent"); setTimeout(() => askRef.current?.focus(), 50); }
+      else if (e.key === "/") { e.preventDefault(); setTab("agent"); setMview("agent"); setTimeout(() => askRef.current?.focus(), 50); }
       else if (e.key.toLowerCase() === "v") setTool("select");
       else if (e.key.toLowerCase() === "c") setTool("razor");
       else if (e.key.toLowerCase() === "s" && sb) { const i = idxAt(t); split(i, t - L[i].from / 30); }
@@ -373,9 +388,11 @@ export default function VenusPage() {
   if (authLoading || !user || keysLoading) return <div className="flex h-screen items-center justify-center bg-bg text-sm text-muted">Loading…</div>;
 
   const palette = sb?.palette ?? {};
-  const stageH = 360 * (zoomC / 100);
   const ar = sb ? sb.width / sb.height : 16 / 9;
-  const stageW = stageH * ar;
+  const wantH = 360 * (zoomC / 100);
+  const maxW = phone ? Math.max(200, vw - 24) : Infinity;
+  const stageW = Math.min(wantH * ar, maxW);
+  const stageH = stageW / ar;
   const vSrc = urls[vkind] ?? urls.final ?? urls.preview;
   const trackW = Math.max(dur * pps + 60, 400);
   const toolBtn = (active: boolean) => `flex h-9 w-9 items-center justify-center rounded-lg ${active ? "bg-blue-600 text-white" : "text-muted hover:bg-panel2 hover:text-ink"}`;
@@ -384,7 +401,7 @@ export default function VenusPage() {
   if (activeId === "list" || !project || !sb) {
     return (
       <div className="min-h-screen bg-bg">
-        <div className="mx-auto max-w-5xl px-6 py-8">
+        <div className="mx-auto max-w-5xl px-4 py-6 md:px-6 md:py-8">
           <div className="mb-6 flex items-center gap-3">
             <button onClick={() => router.push("/dashboard")} className="rounded-full p-2 text-muted hover:bg-panel2"><ArrowLeft size={18} /></button>
             <Film size={20} className="text-gold" /><h1 className="text-xl font-semibold text-ink">Venus Pro</h1><span className="rounded-full bg-goldSoft px-2 py-0.5 text-[10px] font-medium uppercase text-gold">Beta</span>
@@ -405,7 +422,7 @@ export default function VenusPage() {
                 {projects.length === 0 && <p className="text-xs text-faint">No videos yet — make your first one →</p>}
               </div>
             </div>
-            <div className="rounded-xl border border-line bg-panel p-4">
+            <div className="order-first rounded-xl border border-line bg-panel p-4 md:order-none">
               <p className="mb-2 flex items-center gap-2 text-sm font-medium text-ink"><Sparkles size={15} className="text-gold" /> New video</p>
               <textarea value={brief} onChange={(e) => setBrief(e.target.value)} rows={4} placeholder="Describe the video… e.g. A 30-second reel on how AI agents change work, bold and energetic." className={input} />
               <div className="mt-3 grid grid-cols-2 gap-2">
@@ -429,16 +446,16 @@ export default function VenusPage() {
   // ================= editor =================
   return (
     <div className="flex h-screen flex-col bg-bg">
-      <header className="flex items-center gap-3 border-b border-line px-4 py-2.5">
-        <button onClick={() => setActiveId("list")} className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm text-ink hover:bg-panel2"><ArrowLeft size={14} /> Projects</button>
-        <input value={project.title} onChange={(e) => { const u = { ...project, title: e.target.value }; setProjects((p) => p.map((x) => (x.id === project.id ? u : x))); }} onBlur={() => saveProject(user.uid, project)} className="min-w-0 flex-1 bg-transparent text-base font-semibold text-ink focus:outline-none" />
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-3 pb-2.5 pt-[calc(var(--sat)+0.625rem)] md:flex-nowrap md:gap-3 md:px-4 md:pt-2.5">
+        <button onClick={() => setActiveId("list")} aria-label="Projects" className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm text-ink hover:bg-panel2"><ArrowLeft size={14} /> <span className="hidden sm:inline">Projects</span></button>
+        <input value={project.title} onChange={(e) => { const u = { ...project, title: e.target.value }; setProjects((p) => p.map((x) => (x.id === project.id ? u : x))); }} onBlur={() => saveProject(user.uid, project)} className="min-w-0 flex-1 basis-24 bg-transparent text-base font-semibold text-ink focus:outline-none" />
         {(progress || running) && <span className="flex max-w-[260px] items-center gap-2 truncate text-xs text-muted"><Loader2 size={13} className="animate-spin" />{progress?.label ?? log[log.length - 1]}{progress?.value != null && ` ${Math.round(progress.value * 100)}%`}</span>}
         {running && <button onClick={() => { cancelRef.current = true; }} className="text-xs text-muted underline">Stop</button>}
-        <div className="flex rounded-lg border border-line text-xs">{(Object.keys(ASPECTS) as Aspect[]).map((a) => <button key={a} onClick={() => setAspectTo(a)} className={`px-2.5 py-1.5 ${sb.width === ASPECTS[a].width && sb.height === ASPECTS[a].height ? "bg-panel2 text-ink" : "text-muted"}`}>{a}</button>)}</div>
+        <div className="order-last flex rounded-lg border border-line text-xs md:order-none">{(Object.keys(ASPECTS) as Aspect[]).map((a) => <button key={a} onClick={() => setAspectTo(a)} className={`px-2.5 py-1.5 ${sb.width === ASPECTS[a].width && sb.height === ASPECTS[a].height ? "bg-panel2 text-ink" : "text-muted"}`}>{a}</button>)}</div>
         <div className="relative">
           <button onClick={() => setExportOpen((v) => !v)} className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-sm font-medium text-bg"><Download size={14} /> Export <ChevronDown size={13} /></button>
           {exportOpen && (
-            <div className="absolute right-0 z-30 mt-1 w-56 rounded-lg border border-line bg-panel2 p-1 text-sm shadow-xl" onClick={() => setExportOpen(false)}>
+            <div className="absolute right-0 z-30 mt-1 w-60 max-w-[calc(100vw-1.5rem)] rounded-lg border border-line bg-panel2 p-1 text-sm shadow-xl" onClick={() => setExportOpen(false)}>
               {urls.final && <a href={urls.final} download className="block rounded px-3 py-2 text-ink hover:bg-panel">Download final video</a>}
               <button onClick={() => render("final")} disabled={running} className="block w-full rounded px-3 py-2 text-left text-ink hover:bg-panel disabled:opacity-40">Render final ({project.quality})</button>
               <button onClick={() => { const u = { ...project, quality: project.quality === "720p" ? "1080p" as const : "720p" as const }; setProjects((p) => p.map((x) => (x.id === project.id ? u : x))); saveProject(user.uid, u); }} className="block w-full rounded px-3 py-2 text-left text-muted hover:bg-panel">Switch to {project.quality === "720p" ? "1080p" : "720p"}</button>
@@ -450,10 +467,10 @@ export default function VenusPage() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------- left: Project / Agent ---------- */}
-        <aside className="flex w-[330px] shrink-0 flex-col border-r border-line bg-panel">
-          <div className="flex gap-1 p-2">{(["project", "agent"] as const).map((k) => <button key={k} onClick={() => setTab(k)} className={`flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm ${tab === k ? "bg-bg font-medium text-ink shadow" : "text-muted"}`}>{k === "agent" ? <BotAvatar color="amber" size={18} /> : null}{k === "project" ? "Project" : "Agent"}</button>)}</div>
+        <aside className={`${mview === "edit" || mview === "agent" ? "flex" : "hidden"} min-h-0 w-full flex-1 shrink-0 flex-col border-line bg-panel md:flex md:w-[330px] md:flex-none md:border-r`}>
+          <div className="hidden gap-1 p-2 md:flex">{(["project", "agent"] as const).map((k) => <button key={k} onClick={() => setTab(k)} className={`flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm ${tab === k ? "bg-bg font-medium text-ink shadow" : "text-muted"}`}>{k === "agent" ? <BotAvatar color="amber" size={18} /> : null}{k === "project" ? "Project" : "Agent"}</button>)}</div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {tab === "project" ? (
               <>
@@ -501,28 +518,28 @@ export default function VenusPage() {
         </aside>
 
         {/* ---------- center: canvas + timeline ---------- */}
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="relative min-h-0 flex-1 overflow-auto" style={{ backgroundImage: "radial-gradient(rgba(255,255,255,0.13) 1px, transparent 1px)", backgroundSize: "22px 22px" }}>
-            <div className="flex min-h-full items-center justify-center p-8 pb-20">
+        <main className={`${mview === "preview" || mview === "timeline" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col md:flex`}>
+          <div className={`${mview === "preview" ? "" : "hidden"} relative min-h-0 flex-1 overflow-auto md:block`} style={{ backgroundImage: "radial-gradient(rgba(255,255,255,0.13) 1px, transparent 1px)", backgroundSize: "22px 22px" }}>
+            <div className="flex min-h-full items-center justify-center p-3 pb-20 md:p-8 md:pb-20">
               <div style={{ width: stageW, height: stageH }} className="overflow-hidden rounded-2xl border border-line shadow-2xl">
                 {mode === "live" ? <Animatic sb={sb} t={t} W={stageW} H={stageH} /> : vSrc ? (
                   <video ref={videoRef} key={vSrc} src={vSrc} playsInline className="h-full w-full bg-black object-contain" onTimeUpdate={(e) => { if (vkind !== "scene") setT((e.target as HTMLVideoElement).currentTime); }} onEnded={() => setPlaying(false)} />
                 ) : <div className="flex h-full items-center justify-center bg-black text-xs text-muted">Nothing rendered yet</div>}
               </div>
             </div>
-            <div className="absolute right-4 top-3 flex rounded-lg border border-line bg-panel text-xs">
+            <div className="absolute right-2 top-2 flex rounded-lg border border-line bg-panel text-xs md:right-4 md:top-3">
               <button onClick={() => { setMode("live"); setPlaying(false); }} className={`px-3 py-1.5 ${mode === "live" ? "bg-panel2 text-ink" : "text-muted"}`}>Live</button>
               {(["scene", "preview", "final"] as const).map((k) => <button key={k} disabled={!urls[k]} onClick={() => { setMode("video"); setVkind(k); setPlaying(false); }} className={`px-3 py-1.5 capitalize disabled:opacity-30 ${mode === "video" && vkind === k ? "bg-panel2 text-ink" : "text-muted"}`}>{k}</button>)}
             </div>
-            <div className="absolute bottom-4 left-4 flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-1 text-xs text-muted">
+            <div className="absolute bottom-4 left-4 hidden items-center gap-1 rounded-full border border-line bg-panel px-2 py-1 text-xs text-muted md:flex">
               <button onClick={() => setZoomC((z) => Math.max(40, z - 10))} className="p-1 hover:text-ink"><ZoomOut size={15} /></button><span className="w-9 text-center text-ink">{zoomC}%</span><button onClick={() => setZoomC((z) => Math.min(200, z + 10))} className="p-1 hover:text-ink"><ZoomIn size={15} /></button>
             </div>
-            <button onClick={() => { setTab("agent"); setTimeout(() => askRef.current?.focus(), 50); }} className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-full bg-orange-500 px-5 py-3 text-base font-semibold text-white shadow-xl hover:bg-orange-400"><BotAvatar color="amber" size={26} /> Ask agent <kbd className="rounded bg-white/20 px-2 text-sm">/</kbd></button>
-            <button onClick={() => { const k = urls.final ? "final" : urls.preview ? "preview" : null; if (!k) return setLog(["Render a preview first to hear the music and voice."]); setMode("video"); setVkind(k); if (videoRef.current) videoRef.current.currentTime = t; setPlaying(true); }} className="absolute bottom-4 right-4 flex items-center gap-2 rounded-full bg-neutral-800 px-4 py-2.5 text-sm font-medium text-white hover:bg-neutral-700">{urls.final || urls.preview ? <Volume2 size={16} /> : <VolumeX size={16} />} Play with sound</button>
+            <button onClick={() => { setTab("agent"); setMview("agent"); setTimeout(() => askRef.current?.focus(), 50); }} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white shadow-xl hover:bg-orange-400 md:bottom-4 md:gap-3 md:px-5 md:py-3 md:text-base"><BotAvatar color="amber" size={24} /> Ask agent <kbd className="hidden rounded bg-white/20 px-2 text-sm md:inline">/</kbd></button>
+            <button onClick={() => { const k = urls.final ? "final" : urls.preview ? "preview" : null; if (!k) return setLog(["Render a preview first to hear the music and voice."]); setMode("video"); setVkind(k); if (videoRef.current) videoRef.current.currentTime = t; setPlaying(true); }} className="absolute bottom-3 right-3 flex items-center gap-2 rounded-full bg-neutral-800 px-3 py-2.5 text-sm font-medium text-white hover:bg-neutral-700 md:bottom-4 md:right-4 md:px-4">{urls.final || urls.preview ? <Volume2 size={16} /> : <VolumeX size={16} />} <span className="hidden sm:inline">Play with sound</span><span className="sm:hidden">Sound</span></button>
           </div>
 
           {/* tools + transport */}
-          <div className="flex items-center gap-1 border-y border-line bg-panel px-3 py-2">
+          <div className="flex items-center gap-1 overflow-x-auto border-y border-line bg-panel px-2 py-2 [scrollbar-width:none] md:px-3 [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
             <button title="Select (V)" onClick={() => setTool("select")} className={toolBtn(tool === "select")}><MousePointer2 size={17} /></button>
             <button title="Razor — click a section to split (C / S)" onClick={() => setTool("razor")} className={toolBtn(tool === "razor")}><Scissors size={17} /></button>
             <span className="mx-1 h-6 w-px bg-line" />
@@ -548,8 +565,8 @@ export default function VenusPage() {
           </div>
 
           {/* timeline */}
-          <div className="flex h-[250px] shrink-0 bg-panel">
-            <div className="w-[120px] shrink-0 border-r border-line text-[11px] text-muted">
+          <div className={`${mview === "timeline" ? "flex" : "hidden"} min-h-[250px] flex-1 bg-panel md:flex md:h-[250px] md:min-h-0 md:flex-none md:shrink-0`}>
+            <div className="w-[88px] shrink-0 border-r border-line text-[11px] text-muted md:w-[120px]">
               <div className="h-6" />
               <div className="flex h-[38px] items-center px-3 uppercase tracking-widest text-faint">Sections</div>
               <div className="flex h-[40px] items-center gap-2 px-3"><span className="h-5 w-5 rounded bg-emerald-500" />Score</div>
@@ -587,7 +604,7 @@ export default function VenusPage() {
               </div>
             </div>
             {showLayers && (
-              <div className="w-[230px] shrink-0 overflow-y-auto border-l border-line p-2">
+              <div className="w-[170px] shrink-0 overflow-y-auto border-l border-line p-2 md:w-[230px]">
                 <p className="mb-1 text-[11px] uppercase tracking-widest text-faint">Layers</p>
                 {sb.scenes.map((s, i) => (
                   <div key={i} onClick={() => setSel(i)} className={`mb-1 flex items-center gap-1 rounded-md px-2 py-1 text-xs ${selIdx === i ? "bg-panel2 text-ink" : "text-muted"}`}>
@@ -602,6 +619,20 @@ export default function VenusPage() {
           </div>
         </main>
       </div>
+
+      {/* phone: switch between the panels (on a computer they all show at once) */}
+      <nav aria-label="Editor panels" className="flex shrink-0 border-t border-line bg-panel pb-[max(0.25rem,var(--sab))] md:hidden">
+        {([
+          ["preview", "Preview", <Play key="p" size={19} />],
+          ["timeline", "Timeline", <Layers key="t" size={19} />],
+          ["edit", "Edit", <Scissors key="e" size={19} />],
+          ["agent", "Agent", <Wand2 key="a" size={19} />],
+        ] as const).map(([k, label, ic]) => (
+          <button key={k} type="button" onClick={() => goView(k)} aria-pressed={mview === k} className={`flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] ${mview === k ? "text-gold" : "text-muted"}`}>
+            {ic}{label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
