@@ -235,7 +235,7 @@ export default function SkillsPage() {
 
   return (
     <div className="min-h-screen bg-bg">
-      <div className="mx-auto max-w-3xl px-6 py-8">
+      <div className="mx-auto max-w-3xl px-4 py-6 md:px-6 md:py-8">
         <button
           onClick={() => router.push("/dashboard")}
           className="mb-4 flex items-center gap-1.5 text-xs text-muted hover:text-ink"
